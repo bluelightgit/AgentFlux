@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Build / dist
+dist/
+build/
+*.tsbuildinfo
+.next/
+out/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Logs / cache
+*.log
+.cache/
+tmp/
+
+# Local experiment data (not design docs)
+data/local/
