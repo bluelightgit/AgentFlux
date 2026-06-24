@@ -33,10 +33,12 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 | [06-cache-strategy](docs/06-cache-strategy.md) | 缓存策略 |
 | [07-roadmap](docs/07-roadmap.md) | 落地路线 |
 | [08-references](docs/08-references.md) | 参考文献与前例 |
+| [09-tech-stack](docs/09-tech-stack.md) | 技术栈选型与主流框架调研 |
+| [10-pi-integration](docs/10-pi-integration.md) | pi 集成可行性分析 |
 
 ## 状态
 
-🚧 Phase 0:设计阶段。文档先行,代码待实现。见 [roadmap](docs/07-roadmap.md)。
+🚧 Phase 0:设计阶段。文档先行,代码待实现。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi)。见 [roadmap](docs/07-roadmap.md)。
 
 ## License
 
