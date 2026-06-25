@@ -8,7 +8,7 @@
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FluxRuntimeState } from "../core/types";
-import { fmt, pct } from "./cache-monitor";
+import { fmt, fmtCost, pct } from "./cache-monitor";
 
 export function installFooter(ctx: any, getState: () => FluxRuntimeState): void {
 	if (ctx.mode !== "tui") return;
@@ -18,7 +18,7 @@ export function installFooter(ctx: any, getState: () => FluxRuntimeState): void 
 			render(width: number): string[] {
 				const s = getState();
 				const left = theme.fg("dim",
-					`flux ${s.mode} · cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% · ctx ${pct(s.cache.contextPercent)} · $${s.cache.costUsd.toFixed(3)}`);
+					`flux ${s.mode} · cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% · ctx ${pct(s.cache.contextPercent)} · ${fmtCost(s.cache.costUsd)}`);
 				const right = theme.fg("dim", `${s.stage}/${s.role} · ${s.preset}→${s.expectedMode}`);
 				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
 				return [truncateToWidth(left + pad + right, width)];
@@ -49,7 +49,7 @@ export function buildFluxSummary(s: FluxRuntimeState, telemetryPath: string, bra
 		`  cacheRead   ${fmt(s.cache.cacheRead)}`,
 		`  cacheWrite  ${fmt(s.cache.cacheWrite)}`,
 		`  hit rate    ${(s.cache.cacheHitRate * 100).toFixed(1)}%`,
-		`  cost        $${s.cache.costUsd.toFixed(4)}`,
+		`  cost        ${fmtCost(s.cache.costUsd)}`,
 		``,
 		`Context`,
 		`  tokens  ${fmt(s.cache.contextTokens)} / ${fmt(s.cache.contextWindow)}`,
@@ -86,7 +86,7 @@ export function buildInspectorText(
 		`  preset  ${s.preset}  →  ${s.expectedMode}`,
 		``, `Cache Ledger`,
 		`  input ${fmt(s.cache.input)}  read ${fmt(s.cache.cacheRead)}  write ${fmt(s.cache.cacheWrite)}`,
-		`  hit ${(s.cache.cacheHitRate * 100).toFixed(1)}%  ·  ctx ${pct(s.cache.contextPercent)}  ·  $${s.cache.costUsd.toFixed(4)}`,
+		`  hit ${(s.cache.cacheHitRate * 100).toFixed(1)}%  ·  ctx ${pct(s.cache.contextPercent)}  ·  ${fmtCost(s.cache.costUsd)}`,
 		``, `telemetry → ${telemetryPath}`);
 	return lines.join("\n");
 }

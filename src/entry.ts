@@ -24,12 +24,13 @@ import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "
 import { loadConfig, loadPreference, applyRuntimeOverride, validateConfig } from "./core/config";
 import { route } from "./core/routing";
 import { TelemetryWriter, cacheStatsToSample } from "./telemetry/events";
-import { collectCacheStats, fmt, pct } from "./extension/cache-monitor";
+import { collectCacheStats, fmt, fmtCost, pct } from "./extension/cache-monitor";
 import { collectMaturity, loadOrCreateProfile, bumpSessionHistory } from "./extension/maturity";
 import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } from "./extension/footer";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
+import { loadPricing, type PricingTable } from "./core/pricing";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -47,11 +48,12 @@ export default function (pi: ExtensionAPI) {
 	let decision: RoutingDecision | null = null;
 	let maturitySignals = { fileCount: 0, commitCount: 0 };
 	let runtimePreset: Preset | undefined;
+	let pricingTable: PricingTable | null = null;
 
 	const getState = () => state;
 
 	function refreshCache(ctx: any) {
-		state.cache = collectCacheStats(ctx);
+		state.cache = collectCacheStats(ctx, pricingTable ?? undefined);
 	}
 
 	function emitSample(ctx: any) {
@@ -63,7 +65,7 @@ export default function (pi: ExtensionAPI) {
 		console.error(
 			`[flux] turn ${state.turnIndex} | in ${fmt(state.cache.input)} read ${fmt(state.cache.cacheRead)} ` +
 			`write ${fmt(state.cache.cacheWrite)} hit ${(state.cache.cacheHitRate * 100).toFixed(0)}% | ` +
-			`ctx ${pct(state.cache.contextPercent)} | $${state.cache.costUsd.toFixed(4)} | ` +
+			`ctx ${pct(state.cache.contextPercent)} | ${fmtCost(state.cache.costUsd)} | ` +
 			`${state.mode} · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode}`,
 		);
 	}
@@ -101,6 +103,15 @@ export default function (pi: ExtensionAPI) {
 		maturitySignals = { fileCount: m.fileCount, commitCount: m.commitCount };
 		state.branch = m.branch; state.stage = m.stage; state.role = m.role;
 		profile = loadOrCreateProfile(ctx.cwd, m);
+
+		// F1-14: 加载价格表 (OpenRouter 远程 + 用户覆盖 + 兑底均值)
+		const config = loadConfig(ctx.cwd);
+		const currentModel = ctx.model?.id ?? "deepseek-v4-flash";
+		try {
+			pricingTable = await loadPricing(fluxDir, config.pricing, currentModel);
+		} catch (e: any) {
+			console.error(`[flux pricing] load failed: ${e?.message}, cost 将回退上游 cost.total`);
+		}
 
 		runRouter(ctx);
 		setFluxStatus(ctx, getState);
@@ -174,6 +185,7 @@ export default function (pi: ExtensionAPI) {
 			const r = await runSubagent({
 				cwd: ctx.cwd, agent, task: params.task, sessionId,
 				telemetry, prefixLayout: config.cache.prefix_layout === "static_first",
+				pricing: pricingTable ?? undefined,
 			});
 			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
 		},

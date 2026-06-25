@@ -39,6 +39,7 @@ src/
 | F1-12 项目成熟度 | ✅ | git file/commit → stage/role, project-profile.json 持久化 |
 | F1-13 项目面板 | ✅ | /flux project 命令显示成熟度信号 + 跃迁阈值 |
 | F1-7 subagent 适配 | ✅ | flux_subagent 工具, 子进程加载 entry.ts, telemetry subagent.run |
+| F1-14 价格层 | ✅ | OpenRouter 远程+models.json 覆盖+兑底均值, cost 本地算 (token×单价), 见 docs/16 |
 
 ## 关键技术决策 (实证驱动)
 
@@ -69,6 +70,21 @@ naive vs agentflux 对照 (2轮 task: read README.md + 总结):
   1. telemetry 可观测 (cacheRead/cost/turns 跟踪, subagent.run 事件)
   2. 统一前缀布局 (为长历史/跨调用场景准备)
   3. 路由决策 (何时用 subagent, Phase 2 静态路由接入)
+
+### F1-14 价格层验证 (2026-06-25)
+
+成本公式: cost = input×p_in + output×p_out + cacheRead×p_cacheRead + cacheWrite×p_cacheWrite
+四层降级: models.json(用户) > OpenRouter远程(缓存24h) > 兑底均值(339模型均价)
+
+| 验证点 | 结果 |
+|---|---|
+| OpenRouter 远程拉取 | ✅ 339 模型, 498KB |
+| 模型名映射 | ✅ deepseek-v4-flash/glm-5.2/gpt-5.5/qwen3.7-max 全命中 |
+| 价格本地算 | ✅ cost=$3.48e-5 (15in×9e-8 + 1664read×2e-8), 非 0 |
+| 兑底均值 | ✅ 未知模型 → fallback, 339 模型均值 |
+
+关键修正: docs/07 的“成本−60%”是借 librarian-demo 第三方锚点, 在用户 relay 下不可复现。
+现改为以 deepseek-v4-flash 为基准 + 价格层实测降幅, 去掉伪常数。
 
 关键技术决策 (Windows spawn 调试结论):
   - 子进程用 `node + require.resolve(cli.js)` shell:false, 避免 args 分词

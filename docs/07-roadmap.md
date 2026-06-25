@@ -42,7 +42,7 @@
 
 ## Phase 1:缓存优先(2 周,纯 TS,立刻见效)
 
-**目标**:在 pi 上,用前缀布局 + mask + cache 监控把 subagent 流程成本砍 60%+,不动架构。
+**目标**:在 pi 上,用前缀布局 + mask + cache 监控 + 价格层把 subagent 流程成本可观测并优化,不动架构。
 
 **技术栈**:纯 TypeScript(pi extension),不引入 Python。
 
@@ -65,7 +65,7 @@
 | F1-13 `/flux project` 面板 | 成熟度信号面板 + 跃迁建议(suggest) | [14](14-project-evolution.md) |
 
 **验证指标**:
-- 对比 naive subagent,成本下降 ≥ 60%(锚点:librarian-demo $1.32→$0.45)
+- 对比 naive subagent,实测成本降幅 (基准 deepseek-v4-flash, 价格层 docs/16 提供 token×单价, 不再套用第三方 60% 锚点)
 - cache hit rate ≥ 85%,footer 实时显示
 - mask 策略下 solve rate 不下降(对照 JetBrains +2.6%)
 - Windows 下 subagent 子进程 spawn 正常

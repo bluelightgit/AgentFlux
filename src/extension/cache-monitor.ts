@@ -8,8 +8,10 @@
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { CacheStats } from "../core/types";
+import type { PricingTable } from "../core/pricing";
+import { calcCost, lookupPrice } from "../core/pricing";
 
-export function collectCacheStats(ctx: any): CacheStats {
+export function collectCacheStats(ctx: any, pricing?: PricingTable): CacheStats {
 	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0;
 	try {
 		for (const e of ctx.sessionManager.getBranch()) {
@@ -20,7 +22,12 @@ export function collectCacheStats(ctx: any): CacheStats {
 				output += u.output || 0;
 				cacheRead += u.cacheRead || 0;
 				cacheWrite += u.cacheWrite || 0;
-				cost += u.cost?.total || 0;
+				// F1-14: 优先本地算成本 (token×单价), 上游 cost.total 兜底
+				if (pricing && m.model) {
+					cost += calcCost(u, lookupPrice(pricing, m.model));
+				} else {
+					cost += u.cost?.total || 0;
+				}
 			}
 		}
 	} catch { /* session not ready */ }
@@ -46,6 +53,14 @@ export function collectCacheStats(ctx: any): CacheStats {
 
 export function fmt(n: number): string {
 	return n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`;
+}
+
+/** 自适应成本显示: 极低用科学计数, 低用 6 位, 高用 4 位 */
+export function fmtCost(c: number): string {
+	if (c === 0) return "$0";
+	if (c < 0.001) return `$${c.toExponential(2)}`;
+	if (c < 0.01) return `$${c.toFixed(6)}`;
+	return `$${c.toFixed(4)}`;
 }
 
 export function pct(x: number | null): string {

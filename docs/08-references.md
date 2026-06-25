@@ -28,7 +28,7 @@
 |---|---|---|
 | Don't Break the Cache | arXiv 2601.06007, PwC | cache 降成本 41–80%、TTFT 13–31%;动态内容放后部 |
 | Tokenomics of Multi-Agent SDLC | arXiv 2601.14470, MSR'26 | Code Review 占 59.4% token,input 占 53.9% |
-| librarian-demo | AndreaGriffiths11, 2026-05 | 5 reviewer 实测:naive $1.316 / cache $0.453 / librarian $0.486 |
+| librarian-demo | AndreaGriffiths11, 2026-05 | 5 reviewer 实测:naive $1.316 / cache $0.453 / librarian $0.486 (第三方锚点, 非本项目基准; 本项目用 deepseek-v4-flash + 价格层 docs/16 实测) |
 | Context window degradation | JetBrains Research 等 | 0–60% 填充性能稳,90% 恶化;observation masking −52% cost +2.6% solve |
 
 ## 四、Context 生命周期与对话树

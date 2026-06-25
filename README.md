@@ -42,10 +42,12 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 | [12-ui-direction](docs/12-ui-direction.md) | TUI/Web/Electron 用户界面方向 |
 | [13-routing-preference](docs/13-routing-preference.md) | 路由偏好与可视化配置 |
 | [14-project-evolution](docs/14-project-evolution.md) | 项目演进与角色演进 |
+| [15-phase1-progress](docs/15-phase1-progress.md) | Phase 1 实现进度 |
+| [16-pricing-layer](docs/16-pricing-layer.md) | 价格层与成本计算 (F1-14) |
 
 ## 状态
 
-🚧 Phase 0:设计阶段。文档先行,代码待实现。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi),用户端路线已定(pi TUI → Web → Electron/Tauri)。见 [roadmap](docs/07-roadmap.md)。
+🚧 Phase 1:实现中。价格层 + cache + mask + 前缀布局 + subagent + telemetry 已验证。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi),用户端路线已定(pi TUI → Web → Electron/Tauri)。见 [roadmap](docs/07-roadmap.md)。
 
 ## License
 

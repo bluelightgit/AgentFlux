@@ -17,6 +17,8 @@ import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
+import type { PricingTable } from "../core/pricing";
+import { calcCost, lookupPrice } from "../core/pricing";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { TelemetryWriter } from "../telemetry/events";
 
@@ -110,6 +112,7 @@ export async function runSubagent(opts: {
 	prefixLayout: boolean;
 	model?: string;
 	provider?: string;
+	pricing?: PricingTable;  // F1-14: 父进程用价格表重算子进程成本
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
 
@@ -166,7 +169,12 @@ export async function runSubagent(opts: {
 						result.usage.output += u.output || 0;
 						result.usage.cacheRead += u.cacheRead || 0;
 						result.usage.cacheWrite += u.cacheWrite || 0;
-						result.usage.cost += u.cost?.total || 0;
+						// F1-14: 优先本地算成本 (父进程 pricing table × token), 上游 cost.total 兜底
+						if (opts.pricing && msg.model) {
+							result.usage.cost += calcCost(u, lookupPrice(opts.pricing, msg.model));
+						} else {
+							result.usage.cost += u.cost?.total || 0;
+						}
 						result.usage.contextTokens = u.totalTokens || 0;
 						if (!result.model && msg.model) result.model = msg.model;
 						if (msg.errorMessage) result.errorMessage = msg.errorMessage;

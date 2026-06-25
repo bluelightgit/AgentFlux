@@ -124,6 +124,8 @@ export interface RoutingConfig {
 	override_mode: "auto" | "manual" | "suggest";
 }
 
+import { DEFAULT_PRICING_CONFIG, type PricingConfig } from "./pricing";
+
 export interface FluxConfig {
 	mode: Preset;
 	context_topology: ContextTopology;
@@ -134,6 +136,7 @@ export interface FluxConfig {
 	context: ContextConfig;
 	budget: BudgetConfig;
 	routing: RoutingConfig;
+	pricing: PricingConfig;
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {
@@ -146,6 +149,7 @@ export const DEFAULT_CONFIG: FluxConfig = {
 	context: { compaction_threshold: 0.70, mask_strategy: "hide_tool_results", mask_keep_last_n: 3 },
 	budget: { max_cost_per_task: 2.0, max_iterations: 5, max_wall_clock_seconds: 600 },
 	routing: { static_signals: true, budget_aware: true, experience_aware: false, override_mode: "suggest" },
+	pricing: DEFAULT_PRICING_CONFIG,
 };
 
 export const DEFAULT_PREFERENCE: PreferenceConfig = {
