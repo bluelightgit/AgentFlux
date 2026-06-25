@@ -30,6 +30,8 @@ import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } fr
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
+import { registerForkMode, handleForkCommand } from "./extension/fork-mode";
+import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { Type } from "typebox";
 
@@ -49,6 +51,7 @@ export default function (pi: ExtensionAPI) {
 	let maturitySignals = { fileCount: 0, commitCount: 0 };
 	let runtimePreset: Preset | undefined;
 	let pricingTable: PricingTable | null = null;
+	let complexitySignal: TaskComplexitySignal | null = null;
 
 	const getState = () => state;
 
@@ -77,7 +80,7 @@ export default function (pi: ExtensionAPI) {
 		state.preset = ov.config.mode;
 		pref = ov.pref;
 
-		decision = route({ stage: state.stage, pref, preset: state.preset });
+		decision = route({ stage: state.stage, pref, preset: state.preset, taskSignal: complexitySignal ?? undefined });
 		state.mode = decision.mode;
 		state.expectedMode = decision.biasSources.preference ?? state.mode;
 
@@ -111,6 +114,14 @@ export default function (pi: ExtensionAPI) {
 			pricingTable = await loadPricing(fluxDir, config.pricing, currentModel);
 		} catch (e: any) {
 			console.error(`[flux pricing] load failed: ${e?.message}, cost 将回退上游 cost.total`);
+		}
+
+		// Phase 2: 收集复杂度信号 (RGAO 静态分析)
+		try {
+			complexitySignal = collectComplexitySignal(ctx.cwd);
+			console.error(`[flux] complexity: tier${complexitySignal.complexityTier} → ${complexitySignal.recommendedMode} (${complexitySignal.reason.join("; ")})`);
+		} catch (e: any) {
+			console.error(`[flux] complexity analysis failed: ${e?.message}`);
 		}
 
 		runRouter(ctx);
@@ -166,6 +177,10 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
+	// ---------- M3 fork 事件 (Phase 2) ----------
+
+	registerForkMode(pi, () => ({ sessionId, telemetry }));
+
 	// ---------- 命令 ----------
 
 	pi.registerTool({
@@ -192,7 +207,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache state. subcommands: why | mode <preset> | preference | project",
+		description: "AgentFlux: routing/cache/mode/fork. subcommands: why | mode <preset> | preference | project | fork | complexity",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -201,6 +216,8 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "mode") return cmdMode(parts[1] as Preset | undefined, ctx);
 			if (sub === "preference") return cmdPreference(ctx);
 			if (sub === "project") return cmdProject(ctx);
+			if (sub === "fork") return handleForkCommand(parts.slice(1), ctx);
+			if (sub === "complexity") return cmdComplexity(ctx);
 
 			// 默认: 摘要
 			refreshCache(ctx);
@@ -261,9 +278,21 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 	}
 
+	function cmdComplexity(ctx: any) {
+		if (!complexitySignal) {
+			const text = "复杂度信号未收集 (session_start 失败?)";
+			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+			return;
+		}
+		const text = formatComplexitySignal(complexitySignal);
+		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+	}
+
 	async function showInspector(ctx: any) {
 		refreshCache(ctx);
-		const text = buildInspectorText(state, decision, maturitySignals, telemetry.path);
+		const parts = [buildInspectorText(state, decision, maturitySignals, telemetry.path)];
+		if (complexitySignal) parts.push(formatComplexitySignal(complexitySignal));
+		const text = parts.join("\n\n");
 		if (ctx.mode !== "tui") { ctx.ui.notify(text, "info"); return; }
 		await ctx.ui.custom<void>((tui: any, theme: any, _kb: any, done: () => void) => {
 			const lines = text.split("\n");

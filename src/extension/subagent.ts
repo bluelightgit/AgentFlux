@@ -3,13 +3,15 @@
  * 文档依据: docs/03-modes M2, 06-cache-strategy L1 跨 session, 10-pi-integration §2
  *
  * 增量价值 (docs 反思 4b174b47): 不重写 subagent 原语, 而是确保:
- *   1. 子进程加载 AgentFlux entry.ts → 前缀布局 + cache 监控自动应用
+ *   1. 子进程加载 subagent-entry.ts (精简入口) → 前缀布局自动应用, 但不注册 tool/command
+ *      (完整 entry.ts 会改变 LLM 工具列表, 导致行为差异, 实验 C 暴露)
  *   2. 统一 system prompt 前缀 → 主+子共享 L1, 跨调用命中 (docs/06)
  *   3. subagent.run telemetry → cacheRead/cost 可观测, 支撑成本对比验证
  *
  * 对比 naive subagent (pi examples/extensions/subagent, 无前缀布局):
- *   - naive: 子进程无 entry.ts, 历史不打 cache_control, 多轮 L2 不缓存
- *   - AgentFlux: 子进程加载 entry.ts, 前缀布局让 L2 命中, cache 监控可观测
+ *   - naive: 子进程无 AgentFlux 扩展, 历史不打 cache_control, 多轮 L2 不缓存
+ *   - AgentFlux: 子进程加载 subagent-entry.ts, 前缀布局让 L2 命中, cache 监控可观测
+ *   - 两者 LLM 工具列表完全一致 (都是内置工具), 行为可公平对比
  */
 
 import { spawn } from "node:child_process";
@@ -75,9 +77,13 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 	return null;
 }
 
-/** 子进程要加载的 entry.ts 路径 (相对项目根 src/entry.ts) */
-function getEntryPath(cwd: string): string {
-	return join(cwd, "src", "entry.ts");
+/** 子进程要加载的 entry 路径:
+ *  - prefixLayout=true: 用 subagent-entry.ts (精简, 只加载 prefix-layout, 不注册 tool/command)
+ *    避免改变子进程 LLM 工具列表和行为 (实验 C 暴露的问题)
+ *  - prefixLayout=false: 不加载任何 AgentFlux 扩展 (naive 对照)
+ */
+function getSubagentEntryPath(cwd: string): string {
+	return join(cwd, "src", "subagent-entry.ts");
 }
 
 /** 决定 pi 可执行路径: 用 node + pi 的 cli.js (shell:false, 避免 Windows shell 分词) */
@@ -117,9 +123,8 @@ export async function runSubagent(opts: {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-skills", "--no-prompt-templates", "--approve"];
-	// 关键: 加载 entry.ts 使前缀布局 + cache 监控在子进程生效
 	if (prefixLayout) {
-		args.push("--no-extensions", "-e", getEntryPath(cwd));
+		args.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
 	} else {
 		args.push("--no-extensions");
 	}
