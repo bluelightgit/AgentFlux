@@ -1,0 +1,17 @@
+{
+  "preference": {
+    "profile": "accurate",
+    "cost_sensitivity": 0.2,
+    "accuracy_priority": 1.0,
+    "latency_priority": 0.4,
+    "parallelism_willingness": 0.6,
+    "multi_agent_willingness": 0.9,
+    "scenarios": {
+      "bugfix": { "profile": "eco", "latency_priority": 0.8 },
+      "refactor": { "profile": "fast", "parallelism_willingness": 0.9 },
+      "feature": { "profile": "accurate", "accuracy_priority": 0.9 },
+      "explore": { "profile": "balanced", "multi_agent_willingness": 0.1 }
+    },
+    "escalate_hint": "suggest"
+  }
+}

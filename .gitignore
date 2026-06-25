@@ -34,3 +34,6 @@ tmp/
 
 # Local experiment data (not design docs)
 data/local/
+
+# AgentFlux runtime telemetry (local, per-machine)
+.agentflux/
