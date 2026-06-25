@@ -39,7 +39,7 @@ export function collectCacheStats(ctx: any, pricing?: PricingTable): CacheStats 
 		if (cu) {
 			contextTokens = cu.tokens || 0;
 			contextWindow = (cu as any).contextWindow || 0;
-			contextPercent = (cu as any).percent ?? null;
+			contextPercent = (cu as any).percent != null ? (cu as any).percent / 100 : null; // pi returns 0-100, normalize to 0-1
 		}
 	} catch { /* */ }
 
