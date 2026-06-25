@@ -1,0 +1,92 @@
+/**
+ * AgentFlux Extension — TUI 渲染 (footer / status / overlay)
+ * 文档依据: docs/10-pi-integration §5, 12-ui-direction
+ *
+ * pi TUI 布局: footer = 左(cache/mode/ctx/cost) + 右(stage/role/preset→expected)
+ * 非 TUI 模式 (print/rpc) setFooter/setStatus 是 no-op, 走 telemetry + stderr
+ */
+
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { FluxRuntimeState } from "../core/types";
+import { fmt, pct } from "./cache-monitor";
+
+export function installFooter(ctx: any, getState: () => FluxRuntimeState): void {
+	if (ctx.mode !== "tui") return;
+	ctx.ui.setFooter((_tui: any, theme: any, _footerData: any) => {
+		return {
+			invalidate() {},
+			render(width: number): string[] {
+				const s = getState();
+				const left = theme.fg("dim",
+					`flux ${s.mode} · cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% · ctx ${pct(s.cache.contextPercent)} · $${s.cache.costUsd.toFixed(3)}`);
+				const right = theme.fg("dim", `${s.stage}/${s.role} · ${s.preset}→${s.expectedMode}`);
+				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
+				return [truncateToWidth(left + pad + right, width)];
+			},
+		};
+	});
+}
+
+export function setFluxStatus(ctx: any, getState: () => FluxRuntimeState): void {
+	if (!ctx.hasUI) return;
+	const s = getState();
+	const t = ctx.ui.theme;
+	ctx.ui.setStatus("flux", t.fg("dim",
+		`flux · ${s.mode} · ${s.stage}/${s.role} · ${s.preset}→${s.expectedMode}`));
+}
+
+/** 构造 /flux 摘要文本 (TUI notify + 非 TUI stdout 共用) */
+export function buildFluxSummary(s: FluxRuntimeState, telemetryPath: string, branch: string | null): string {
+	return [
+		`AgentFlux`,
+		`  mode      ${s.mode}  (fallback ${s.mode === "M1" ? "M1" : "M1"})`,
+		`  stage     ${s.stage}  /  role ${s.role}`,
+		`  preset    ${s.preset}  →  expected ${s.expectedMode}`,
+		`  branch    ${branch ?? "-"}`,
+		``,
+		`Cache Ledger (cumulative)`,
+		`  input       ${fmt(s.cache.input)}`,
+		`  cacheRead   ${fmt(s.cache.cacheRead)}`,
+		`  cacheWrite  ${fmt(s.cache.cacheWrite)}`,
+		`  hit rate    ${(s.cache.cacheHitRate * 100).toFixed(1)}%`,
+		`  cost        $${s.cache.costUsd.toFixed(4)}`,
+		``,
+		`Context`,
+		`  tokens  ${fmt(s.cache.contextTokens)} / ${fmt(s.cache.contextWindow)}`,
+		`  fill    ${pct(s.cache.contextPercent)}`,
+		``,
+		`telemetry: ${telemetryPath}`,
+	].join("\n");
+}
+
+/** 构造 route inspector 文本 (/flux why) */
+export function buildInspectorText(
+	s: FluxRuntimeState,
+	decision: { reason: string[]; confidence: number; expected: any; biasSources: any } | null,
+	maturitySignals: { fileCount: number; commitCount: number },
+	telemetryPath: string,
+): string {
+	const lines: string[] = [
+		`Current Mode`,
+		`  ${s.mode}  ·  fallback M1`,
+		``,
+		`Route Reason`,
+	];
+	if (decision) {
+		for (const r of decision.reason) lines.push(`  - ${r}`);
+		lines.push(`  confidence ${decision.confidence}`);
+		lines.push(`  expected   cost:${decision.expected.cost} latency:${decision.expected.latency} acc:${decision.expected.accuracy}`);
+	} else {
+		lines.push(`  - 路由器未运行 (Phase 1 规则路由)`);
+	}
+	lines.push(``, `Project Maturity (docs/14)`,
+		`  stage ${s.stage}   role ${s.role}`,
+		`  signals  file ${maturitySignals.fileCount}  commit ${maturitySignals.commitCount}`,
+		``, `Preference (docs/13)`,
+		`  preset  ${s.preset}  →  ${s.expectedMode}`,
+		``, `Cache Ledger`,
+		`  input ${fmt(s.cache.input)}  read ${fmt(s.cache.cacheRead)}  write ${fmt(s.cache.cacheWrite)}`,
+		`  hit ${(s.cache.cacheHitRate * 100).toFixed(1)}%  ·  ctx ${pct(s.cache.contextPercent)}  ·  $${s.cache.costUsd.toFixed(4)}`,
+		``, `telemetry → ${telemetryPath}`);
+	return lines.join("\n");
+}
