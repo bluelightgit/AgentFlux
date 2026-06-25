@@ -29,6 +29,8 @@ import { collectMaturity, loadOrCreateProfile, bumpSessionHistory } from "./exte
 import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } from "./extension/footer";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
+import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
+import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
 	// ---------- 可变运行时状态 ----------
@@ -154,6 +156,28 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ---------- 命令 ----------
+
+	pi.registerTool({
+		name: "flux_subagent",
+		label: "Flux Subagent",
+		description: "Delegate a task to a specialized AgentFlux subagent (e.g. reviewer). 子进程加载前缀布局+cache监控, 跨调用共享 L1。参数: agent (reviewer 或 .agentflux/agents/*.md 定义的), task (任务描述)",
+		parameters: Type.Object({
+			agent: Type.String({ description: "subagent 名称, 如 reviewer" }),
+			task: Type.String({ description: "任务描述" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+			const agent = loadSubagent(ctx.cwd, params.agent);
+			if (!agent) {
+				return { content: [{ type: "text", text: `AgentFlux: unknown subagent '${params.agent}'. 可用: reviewer (内建) 或 .agentflux/agents/*.md` }], details: {} };
+			}
+			const config = loadConfig(ctx.cwd);
+			const r = await runSubagent({
+				cwd: ctx.cwd, agent, task: params.task, sessionId,
+				telemetry, prefixLayout: config.cache.prefix_layout === "static_first",
+			});
+			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
+		},
+	});
 
 	pi.registerCommand("flux", {
 		description: "AgentFlux: routing/cache state. subcommands: why | mode <preset> | preference | project",

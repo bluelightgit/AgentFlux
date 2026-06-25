@@ -58,7 +58,24 @@ export interface ContextEvent extends BaseEvent {
 	contextPercentAfter: number | null;
 }
 
-export type FluxEvent = RoutingDecisionEvent | CacheSampleEvent | ContextEvent;
+export interface SubagentRunEvent extends BaseEvent {
+	type: "subagent.run";
+	agent: string;
+	task: string;
+	model: string | null;
+	turns: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	costUsd: number;
+	contextTokens: number;
+	cacheHitRate: number;
+	prefixLayout: boolean;
+	exitCode: number;
+}
+
+export type FluxEvent = RoutingDecisionEvent | CacheSampleEvent | ContextEvent | SubagentRunEvent;
 
 // ---------- JSONL Writer ----------
 
@@ -87,6 +104,10 @@ export class TelemetryWriter {
 
 	writeContextEvent(ev: Omit<ContextEvent, "ts" | "type">): void {
 		this.write({ ts: Date.now(), type: "context.event", ...ev } as ContextEvent);
+	}
+
+	writeSubagentRun(ev: Omit<SubagentRunEvent, "ts" | "type">): void {
+		this.write({ ts: Date.now(), type: "subagent.run", ...ev } as SubagentRunEvent);
 	}
 
 	get path(): string { return this.filePath; }

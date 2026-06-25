@@ -38,6 +38,7 @@ src/
 | F1-10 偏好落点 | ✅ | footer 显示 preset→expected, /flux preference 命令 |
 | F1-12 项目成熟度 | ✅ | git file/commit → stage/role, project-profile.json 持久化 |
 | F1-13 项目面板 | ✅ | /flux project 命令显示成熟度信号 + 跃迁阈值 |
+| F1-7 subagent 适配 | ✅ | flux_subagent 工具, 子进程加载 entry.ts, telemetry subagent.run |
 
 ## 关键技术决策 (实证驱动)
 
@@ -52,8 +53,27 @@ src/
 | 任务 | 说明 | 依赖 |
 |---|---|---|
 | F1-6 模式选择器 | ctx.ui.custom overlay + SelectList (eco/balanced 切换) | TUI 验证 |
-| F1-7 subagent 适配 | 基于 examples/extensions/subagent 改造 + 前缀布局 | M2 成本核心 |
 | F1-11 调音台 | SettingsList 五维滑块 + 场景覆盖 | TUI 验证 |
+
+## F1-7 subagent 适配验证
+
+naive vs agentflux 对照 (2轮 task: read README.md + 总结):
+
+| 组 | turns | input | cacheRead | hit rate | cost |
+|---|---|---|---|---|---|
+| naive (无前缀布局) | 2 | 152 | 3200 | 95% | $0 |
+| agentflux (有前缀布局) | 2 | 152 | 3200 | 95% | $0 |
+
+两者相同, 符合预期 (CACHE-FINDINGS 实验四): 短2轮历史, 隐式缓存已覆盖 system L1 (1536/轮),
+显式 cache_control 边际不显著。AgentFlux subagent 增量价值在:
+  1. telemetry 可观测 (cacheRead/cost/turns 跟踪, subagent.run 事件)
+  2. 统一前缀布局 (为长历史/跨调用场景准备)
+  3. 路由决策 (何时用 subagent, Phase 2 静态路由接入)
+
+关键技术决策 (Windows spawn 调试结论):
+  - 子进程用 `node + require.resolve(cli.js)` shell:false, 避免 args 分词
+  - 子进程需 --approve (tool 执行权限)
+  - outputParts/stderrBuf 需在 Promise 外声明 (作用域)
 
 ## 用法
 
