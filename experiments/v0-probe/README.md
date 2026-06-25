@@ -64,4 +64,15 @@ grep '\[flux\]' 2>&1               # stderr 实时统计
 ## 验证通过,可进入 Phase 1
 
 V0 证明:pi extension 能捕获真实 cache 数据、telemetry 能持久化、event schema 可复用、两个新能力的最小形态可落地。
+
+## 缓存机制深挖实验 (experiments/v0-probe/CACHE-FINDINGS.md)
+
+V0 之后进一步实证了 docs/06 的三个核心论点(均可复现):
+
+1. **L1 system prompt 显式缓存** ✅ — pi 给 system 打 cache_control, 稳定命中 1536 token
+2. **L2 长历史(≥1024 token)隐式缓存累积命中** ✅ — 每轮 read 增量 3200→22144 递增
+3. **compaction 摧毁 L2 缓存前缀** ✅ — compact 后 read 增量 22144→1536 暴跌 93%, input 暴涨
+
+关键修正: L2 不是默认命中, 需 ≥1024 token 阈值; pi 默认不给历史打 cache_control(只给 system+最后user); AgentFlux 可通过 `before_provider_request` 主动注入(已验证 cache-inject.ts 可行)。
+
 下一步按 docs/07 Phase 1 任务 F1-1~F1-13 工程化。

@@ -13,15 +13,23 @@
 
 ## 三层 cache 收益模型
 
+> ⚠️ 以下经 V0 实测修正(详见 `experiments/v0-probe/CACHE-FINDINGS.md`)。
+> 实测环境: pi 0.80.2 + octopus-anthropic(deepseek-v4-flash, supportsLongCacheRetention)。
+
 | 层次 | 内容 | 大小 | subagent(临时) | 持久 session |
 |---|---|---|---|---|
-| **L1 稳定前缀** | system + CLAUDE.md + 相关文件 | ~40K | 前缀一致就命中 | 命中 |
-| **L2 历史对话** | 上轮 review 意见等累积历史 | 1–几十 K | **不命中**(每次 fresh) | **命中** |
+| **L1 稳定前缀** | system + CLAUDE.md + 相关文件 | ~1.5K–40K | 前缀一致就命中(显式 cache_control) | 命中 |
+| **L2 历史对话** | 上轮 review 意见等累积历史 | 1–几十 K | **不命中**(每次 fresh) | **≥1024 token 才命中**(隐式缓存) |
 | **L3 当轮新增** | 新 diff、新输出 | 变化 | 不命中 | 不命中 |
+
+**实测修正点**:
+1. **L1**: pi 默认给 system prompt 打 `cache_control`, 稳定命中(实测 1536 token system 块)。跨 session 5min TTL 内共享(实测同中转不同 session 命中)。
+2. **L2 不是默认命中**: 需 ≥1024 token 阈值(Anthropic 隐式缓存要求)。短对话历史不缓存、每轮重传; 长历史(≥1024)隐式缓存自动覆盖、逐轮累积命中(实测 read 增量 3200→22144 递增)。
+3. **pi 默认不给历史打 cache_control**: 只给 system + 最后一条 user 打标记。L2 命中完全靠 provider 隐式缓存。AgentFlux 可通过 `before_provider_request` 主动给历史注入 cache_control 控制断点(实测可行)。
 
 - **naive subagent**(前缀不一致):L1+L2+L3 全 miss → 最贵
 - **优化 subagent**(前缀一致):L1 命中,L2/L3 miss → 省大部分
-- **持久 session**:L1+L2 命中,L3 miss → 再省 L2
+- **持久 session**:L1+L2(≥1024)命中,L3 miss → 再省 L2
 
 L2 是持久 session 比 subagent 多省的部分,但被 compaction 限制(见下)。
 
@@ -54,11 +62,16 @@ L2 是持久 session 比 subagent 多省的部分,但被 compaction 限制(见�
 | 中途换 model | 跨 model 不共享 | 整个 session 锁定 model |
 | diff 放 user message 前部 | 每轮前缀变 | diff 放后部 |
 | subagent 各自带不同前缀 | 跨调用全 miss | 统一前缀布局 |
+| **历史消息未打 cache_control** | **L2 靠隐式缓存, 短历史(<1024)不命中** | **AgentFlux 主动注入 cache_control 断点(before_provider_request)** |
 | 频繁 compaction | 摧毁 prefix,全 miss | 见下 |
 
 ## Compaction 与 Cache
 
 **每次 compaction 摧毁整个 cached prefix,触发全价重读。** 这是持久 session L2 收益的侵蚀源:
+
+> ✅ 已实测(compaction-large.py): compact 成功后, 下一轮 cacheRead 增量从 22144 **暴跌到 1536(只剩 system)**, input 增量从 ~2000 **暴涨到 17985**。机制: compaction 在 system 后插入摘要(新内容), 使从摘要起的整个后续前缀失效 —— 即使保留了最近 20000 token 历史, 也因前部插入而全失效。
+
+> ⚠️ 实测补充: pi 的 `keepRecentTokens` 默认 **20000**, session ≤ 20000 token 时 compact 报 "Nothing to compact" 拒绝执行。低占用 session compact 不可用, 只能继续累积或新建 session(影响 docs/05 决策树)。
 
 - 迭代 2–3 轮:持久 session 净省(L2 命中 > 协调开销)
 - 迭代 5+ 轮:compaction 来,L2 收益一次性吐回,可能反更贵
