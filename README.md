@@ -19,6 +19,7 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 - **三档配置**:预设档位 / 维度开关 / 细粒度参数
 - **三层自动路由**:任务结构信号(静态)→ 预算约束(ILP)→ 历史经验(RL)
 - **缓存优先**:前缀布局优化 + mask 策略,优先保 prompt cache 命中
+- **用户端渐进路线**:先 pi TUI 验证,再 Web read-only dashboard,最后 Electron/Tauri 产品化
 
 ## 文档导航
 
@@ -35,10 +36,12 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 | [08-references](docs/08-references.md) | 参考文献与前例 |
 | [09-tech-stack](docs/09-tech-stack.md) | 技术栈选型与主流框架调研 |
 | [10-pi-integration](docs/10-pi-integration.md) | pi 集成可行性分析 |
+| [11-system-architecture](docs/11-system-architecture.md) | 系统架构规划与数据流 |
+| [12-ui-direction](docs/12-ui-direction.md) | TUI/Web/Electron 用户界面方向 |
 
 ## 状态
 
-🚧 Phase 0:设计阶段。文档先行,代码待实现。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi)。见 [roadmap](docs/07-roadmap.md)。
+🚧 Phase 0:设计阶段。文档先行,代码待实现。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi),用户端路线已定(pi TUI → Web → Electron/Tauri)。见 [roadmap](docs/07-roadmap.md)。
 
 ## License
 

@@ -6,10 +6,21 @@
 
 | 阶段 | 周期 | 内容 | 预期收益 |
 |---|---|---|---|
-| Phase 0 | 当前 | 文档与设计 | 立论成立 |
-| Phase 1 | ~2 周 | M1/M2 + 前缀布局 + mask | 成本 −60% |
-| Phase 2 | ~1 月 | M3 fork + 静态路由 | 准确性×成本折中点 |
-| Phase 3 | ~2 月+ | M6 异构 + ILP/RL 路由 | 护城河 |
+| Phase 0 | 当前 | 文档、架构、UI 方向 | 立论成立 |
+| Phase 1 | ~2 周 | M1/M2 + 前缀布局 + mask + pi TUI 验证 | 成本 −60% |
+| Phase 2 | ~1 月 | M3 fork + 静态路由 + Web read-only dashboard | 准确性×成本折中点 |
+| Phase 3 | ~2 月+ | M6 异构 + ILP/RL 路由 + Web control plane/Electron | 护城河 |
+
+## 用户端路线总览
+
+| 阶段 | 用户端形态 | 目标 |
+|---|---|---|
+| UI-A | pi TUI | 验证策略是否真的有效:footer/route inspector/cache ledger/subagent lane |
+| UI-B | Web read-only dashboard | 看长期趋势:route map/cache ledger/context studio/decision replay |
+| UI-C | Web control plane | 从 Web 调整策略:mode override/budget/agent pause/resume |
+| UI-D | Electron/Tauri shell | 产品化:托盘、通知、后台 daemon、内嵌终端、多项目管理 |
+
+原则:先用 pi TUI 验证核心价值,但从 Phase 1 开始写统一 telemetry,为 Web/Electron 留接口。
 
 ---
 
@@ -18,13 +29,14 @@
 **目标**:立论成立,设计文档完整,技术栈与集成路径明确。
 
 **交付物**:
-- [x] docs/00–10 全套设计文档
+- [x] docs/00–12 全套设计文档
 - [x] 三维度 + 六模式 + 三档配置 + 三层路由的完整定义
 - [x] 技术栈选型(TS + Python sidecar)与 pi 集成可行性分析
-- [ ] 最小可行架构图(下一轮)
+- [x] 最小可行架构图与分层设计(见 [11](11-system-architecture.md))
+- [x] TUI/Web/Electron 用户端方向(见 [12](12-ui-direction.md))
 - [ ] Phase 1 任务拆解(见下)
 
-**完成标准**:文档能回答"做什么、为什么、怎么做、何时做、用什么技术"五问。
+**完成标准**:文档能回答"做什么、为什么、怎么做、何时做、用什么技术、用户端怎么呈现"六问。
 
 ---
 
@@ -42,9 +54,11 @@
 | F1-2 前缀布局强制器 | `before_agent_start` hook 改 system prompt(static 在前,diff 在后) | [06](06-cache-strategy.md) |
 | F1-3 mask 策略 | `context` 事件 filter 旧 tool result(keep last N) | [06](06-cache-strategy.md) |
 | F1-4 cache hit rate 监控 | `get_session_stats`/`ctx.sessionManager` 读 cacheRead/cacheWrite | [10](10-pi-integration.md) §3 |
-| F1-5 TUI footer | `setFooter` 显示 mode + cache% + context% | [10](10-pi-integration.md) §5 |
-| F1-6 模式选择器 | `ctx.ui.custom` overlay + SelectList(eco/balanced) | [04](04-config-schema.md) Level 1 |
+| F1-5 TUI footer | `setFooter` 显示 mode + cache% + context% | [10](10-pi-integration.md) §5 / [12](12-ui-direction.md) |
+| F1-6 模式选择器 | `ctx.ui.custom` overlay + SelectList(eco/balanced) | [04](04-config-schema.md) Level 1 / [12](12-ui-direction.md) |
 | F1-7 subagent 适配 | 基于 `examples/extensions/subagent` 改造,加前缀布局 | [10](10-pi-integration.md) §2 M2 |
+| F1-8 telemetry JSONL | 统一写 `routing.decision`/`cache.sample`/`context.event` | [11](11-system-architecture.md) |
+| F1-9 route inspector | `/flux why` overlay 展示模式、理由、fallback、成本预估 | [12](12-ui-direction.md) |
 
 **验证指标**:
 - 对比 naive subagent,成本下降 ≥ 60%(锚点:librarian-demo $1.32→$0.45)
@@ -134,6 +148,8 @@
 - [x] 确定技术栈:TS(pi extension)+ Python sidecar(Phase 3)
 - [x] 确定集成目标:内置 pi
 - [x] pi 集成可行性分析(见 [10](10-pi-integration.md))
-- [ ] 画最小可行架构图(extension ↔ pi ↔ Python sidecar 数据流)
-- [ ] 拆 Phase 1 的具体任务(F1-1 ~ F1-7)成 issue 清单
+- [x] 画最小可行架构图(extension ↔ core ↔ telemetry ↔ UI ↔ Python sidecar,见 [11](11-system-architecture.md))
+- [x] 给出 TUI/Web/Electron 用户端方向(见 [12](12-ui-direction.md))
+- [ ] 拆 Phase 1 的具体任务(F1-1 ~ F1-9)成 issue 清单
+- [ ] 做 V0 probe:cache footer + events.jsonl + context% 显示
 - [ ] 在真实 pi 环境跑通 `examples/extensions/subagent`,验证 Windows 子进程
