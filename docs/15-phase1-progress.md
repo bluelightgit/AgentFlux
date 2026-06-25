@@ -1,7 +1,11 @@
-# AgentFlux Phase 1 — 实现进度
+# AgentFlux Phase 1+2 — 实现进度
 
-> Phase 1 目标(docs/07): 在 pi 上用前缀布局 + mask + cache 监控把 subagent 流程成本砍 60%+。
+> Phase 1 目标(docs/07): 在 pi 上用前缀布局 + mask + cache 监控优化 subagent 流程成本。
+> 实测结论: prefix layout 边际收益取决于场景 (主进程5轮仅2.6%, subagent6轮37.8%)。
+> Phase 2: M3 fork + RGAO 复杂度路由 + subagent 精简入口。
 > 技术栈: 纯 TypeScript(pi extension), 模块化 src/ 结构, pi 直接加载 entry.ts 无需构建。
+>
+> 成本基准: deepseek-v4-flash, 价格层见 docs/16。成本实验见 experiments/v0-probe/COST-CONCLUSIONS.md。
 
 ## M1.1 已实现 (src/)
 
@@ -121,3 +125,37 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
   }
 }
 ```
+
+## Phase 2 已实现 (commit 5d774d6)
+
+### RGAO 静态分析路由 (src/core/complexity.ts)
+- 从 git ls-files + 简单正则提取代码复杂度信号 (零依赖)
+- 信号: file_count, loc, dependency_depth, cross_module_coupling, symbol_density
+- 复杂度等级 0-3 (FastPath/SubAgent/MultiAgent/DeepResearch) → recommendedMode
+- 路由器 route() 接入 taskSignal, 推荐mode额外加权 0.3+tier*0.1
+- 命令: /flux complexity 显示信号面板, /flux why 包含复杂度信号
+
+### M3 对话树 fork (src/extension/fork-mode.ts)
+- session_before_fork / session_before_tree 事件记录到 telemetry
+- /flux fork 命令: 列出候选fork点 (最近5条用户消息), 从指定entry fork
+- 用 pi ctx.fork(entryId) API, withSession 回调通知
+
+### Subagent 精简入口 (src/subagent-entry.ts)
+- 只加载 prefix-layout + 轻量 telemetry, 不注册 flux_subagent tool 和 /flux 命令
+- 解决实验C暴露的问题: 完整entry.ts注册tool改变LLM工具列表, 导致行为差异
+- 验证: naive和agentflux都做6轮(之前flux只做1轮), 公平对比 flux省37.8%
+
+### Mask 刻度 Bug 修复 (commit d565eab)
+- pi getContextUsage() 返回 percent 是 0-100 刻度, 但 mask.ts 当 0-1 用
+- 导致 mask 在 0.7% 占用时就触发 (应为 70% 才触发)
+- 修复: cache-monitor.ts 里 percent/100 归一化
+- 之前误判 contextWindow=10000, 实际一直是 1M
+
+## 下一步方向
+
+按用户反馈, 从"省钱"转向"多模式 + 智能路由":
+1. M2 subagent 完善: 更多 agent 定义 (tester, planner), 工作流预设
+2. M3 fork 验证: 实际 fork 探索场景测试
+3. 路由优化: file_count 只统计代码文件, 复杂度阈值调优
+4. M4/M6 持久 team: 异构模型分工 (Phase 3)
+5. F1-6 模式选择器 overlay, F1-11 偏好调音台 (TUI 交互验证)
