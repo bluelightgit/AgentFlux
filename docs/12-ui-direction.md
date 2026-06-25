@@ -95,7 +95,7 @@ AgentFlux 的 UI 不是“聊天窗口的包装”,而是**路由控制台**。
 
 ## 二、统一的信息架构
 
-无论 TUI/Web/Electron,都应该围绕这 6 个信息面板:
+无论 TUI/Web/Electron,都应该围绕这 8 个信息面板:
 
 1. **当前模式**:M1–M6,以及 override 状态
 2. **路由理由**:为什么选这个模式,被什么信号触发
@@ -103,6 +103,8 @@ AgentFlux 的 UI 不是“聊天窗口的包装”,而是**路由控制台**。
 4. **上下文状态**:context fill, compaction 风险, branch 状态
 5. **执行链路**:主 agent、subagent、fork、handoff 的进度
 6. **决策历史**:上一次为什么选错/选对,后续如何调整
+7. **路由偏好**:五维倾向 + 场景覆盖(见 [13](13-routing-preference.md))
+8. **项目成熟度**:stage + role + 信号逼近阈值(见 [14](14-project-evolution.md))
 
 这 6 项要贯穿所有 UI 外壳,不能每个壳都自己发明一套。
 

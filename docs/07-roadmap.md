@@ -59,6 +59,10 @@
 | F1-7 subagent 适配 | 基于 `examples/extensions/subagent` 改造,加前缀布局 | [10](10-pi-integration.md) §2 M2 |
 | F1-8 telemetry JSONL | 统一写 `routing.decision`/`cache.sample`/`context.event` | [11](11-system-architecture.md) |
 | F1-9 route inspector | `/flux why` overlay 展示模式、理由、fallback、成本预估 | [12](12-ui-direction.md) |
+| F1-10 偏好加载 + footer 落点 | 读 `preference.profile`,footer 显示当前倾向会落到哪个模式 | [13](13-routing-preference.md) |
+| F1-11 `/flux preference` 调音台 | `SettingsList` 五维度调音 + 场景覆盖 | [13](13-routing-preference.md) |
+| F1-12 project-profile 采集 | git 取 LOC/file/commit,footer 显示 stage + role | [14](14-project-evolution.md) |
+| F1-13 `/flux project` 面板 | 成熟度信号面板 + 跃迁建议(suggest) | [14](14-project-evolution.md) |
 
 **验证指标**:
 - 对比 naive subagent,成本下降 ≥ 60%(锚点:librarian-demo $1.32→$0.45)
@@ -150,6 +154,8 @@
 - [x] pi 集成可行性分析(见 [10](10-pi-integration.md))
 - [x] 画最小可行架构图(extension ↔ core ↔ telemetry ↔ UI ↔ Python sidecar,见 [11](11-system-architecture.md))
 - [x] 给出 TUI/Web/Electron 用户端方向(见 [12](12-ui-direction.md))
-- [ ] 拆 Phase 1 的具体任务(F1-1 ~ F1-9)成 issue 清单
+- [x] 路由偏好可配置 + 可视化方向(见 [13](13-routing-preference.md))
+- [x] 项目演进 + 角色演进规划(见 [14](14-project-evolution.md))
+- [ ] 拆 Phase 1 的具体任务(F1-1 ~ F1-13)成 issue 清单
 - [ ] 做 V0 probe:cache footer + events.jsonl + context% 显示
 - [ ] 在真实 pi 环境跑通 `examples/extensions/subagent`,验证 Windows 子进程

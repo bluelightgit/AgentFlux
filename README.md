@@ -18,6 +18,8 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 - **六种工作模式**:单 agent、主+subagent、对话树 fork、持久 multi-agent、管道 handoff、异构团队
 - **三档配置**:预设档位 / 维度开关 / 细粒度参数
 - **三层自动路由**:任务结构信号(静态)→ 预算约束(ILP)→ 历史经验(RL)
+- **路由偏好可配置**:五维偏好画像 + 按场景覆盖,TUI 调音台 / Web Preference Studio 可视化调整
+- **项目演进驱动角色演进**:项目从 Seed 到 Mature,agent 从 doer 演进为 planner/orchestrator/reviewer
 - **缓存优先**:前缀布局优化 + mask 策略,优先保 prompt cache 命中
 - **用户端渐进路线**:先 pi TUI 验证,再 Web read-only dashboard,最后 Electron/Tauri 产品化
 
@@ -38,6 +40,8 @@ AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑
 | [10-pi-integration](docs/10-pi-integration.md) | pi 集成可行性分析 |
 | [11-system-architecture](docs/11-system-architecture.md) | 系统架构规划与数据流 |
 | [12-ui-direction](docs/12-ui-direction.md) | TUI/Web/Electron 用户界面方向 |
+| [13-routing-preference](docs/13-routing-preference.md) | 路由偏好与可视化配置 |
+| [14-project-evolution](docs/14-project-evolution.md) | 项目演进与角色演进 |
 
 ## 状态
 

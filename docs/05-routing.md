@@ -4,6 +4,11 @@
 
 ## 三层路由依据
 
+路由输入含三类偏置源,详见 [13](13-routing-preference.md)(偏好)与 [14](14-project-evolution.md)(项目成熟度):
+- **项目成熟度**:跨 session 累积,定默认模式基线 + agent 角色
+- **用户偏好**:主观取舍,在基线上偏置候选集
+- **单任务信号**:本次任务特征,做本次偏离
+
 ```
 任务输入
    │
@@ -46,6 +51,8 @@
 
 ### 决策规则(可硬编码起步)
 
+> 项目成熟度([14](14-project-evolution.md))先定基线,以下规则在基线上微调。如 Mature 项目基线 M4,但一行 typo 仍可降级 M1。
+
 ```
 单文件 + 低耦合 + bugfix/explore     → M1 单 agent
 多文件 + 低耦合 + feature            → M2 主+subagent(C2 stage 并行)
@@ -54,6 +61,8 @@
 固定流程(明确 plan→impl→test→review)→ M5 管道 handoff
 成本敏感 + 高质量要求                → M6 异构团队
 ```
+
+候选集生成后,用偏好向量([13](13-routing-preference.md))打分排序 + gate 出局。
 
 冷启动阶段只跑这一层,已能覆盖大多数场景。
 

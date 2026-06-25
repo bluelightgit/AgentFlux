@@ -91,8 +91,10 @@ routing:
 ## 配置优先级
 
 ```
-用户运行时覆盖 > Level 3 参数 > Level 2 开关 > Level 1 档位 > 默认(balanced)
+用户运行时覆盖 > 场景偏好覆盖 > 全局偏好 > Level 3 参数 > Level 2 开关 > Level 1 档位 > 默认(balanced)
 ```
+
+偏好层(场景覆盖 + 全局偏好)见 [13](13-routing-preference.md),项目成熟度基线见 [14](14-project-evolution.md)。
 
 - `override_mode: auto` —— 路由器全自动选模式,用户配置仅作约束
 - `override_mode: suggest` —— 路由器给出建议,用户确认后执行(默认)
