@@ -137,6 +137,7 @@ export interface FluxConfig {
 	budget: BudgetConfig;
 	routing: RoutingConfig;
 	pricing: PricingConfig;
+	sharedSkills?: string[];       // 所有角色共享的 skills (docs/19)
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {

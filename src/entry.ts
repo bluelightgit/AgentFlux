@@ -1,24 +1,24 @@
 /**
- * AgentFlux Phase 1 — pi extension 主入口
- * 文档依据: docs/07 Phase 1 (F1-1~F1-13), 10-pi-integration, 11-system-architecture
+ * AgentFlux Phase 1+2 — pi extension 主入口
+ * 文档依据: docs/07 Phase 1+2, docs/17-19 模型能力/角色/多agent架构
  *
  * 用法:
  *   pi -e src/entry.ts
  *   pi -e src/entry.ts -p "..."            # print 模式验证 telemetry
  *   /flux                                   # 状态摘要
- *   /flux why                               # route inspector
+ *   /flux why                               # route inspector (含复杂度信号)
  *   /flux mode <eco|fast|accurate|balanced> # 切换预设 (运行时覆盖)
  *   /flux preference                        # 偏好画像
  *   /flux project                           # 项目成熟度面板
- *
- * 覆盖 Phase 1 任务: F1-1 配置 / F1-4 cache监控 / F1-5 footer / F1-8 telemetry
- *   / F1-9 route inspector / F1-10 偏好落点 / F1-12 项目成熟度 / F1-13 项目面板
- *   F1-2 前缀布局 / F1-3 mask / F1-6 模式选择器 / F1-11 调音台 见 prefix-layout.ts (后续)
+ *   /flux fork [last|序号|entryId]          # M3 对话树 fork
+ *   /flux complexity                        # 显示 RGAO 复杂度信号
+ *   /flux team status|plan|build|review|abort|roles|models|affinity
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 
 import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "./core/types";
 import { loadConfig, loadPreference, applyRuntimeOverride, validateConfig } from "./core/config";
@@ -31,6 +31,7 @@ import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
 import { registerForkMode, handleForkCommand } from "./extension/fork-mode";
+import { handleTeamCommand, type TeamContext } from "./extension/team";
 import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { Type } from "typebox";
@@ -52,6 +53,7 @@ export default function (pi: ExtensionAPI) {
 	let runtimePreset: Preset | undefined;
 	let pricingTable: PricingTable | null = null;
 	let complexitySignal: TaskComplexitySignal | null = null;
+	let teamCtx: TeamContext | null = null;
 
 	const getState = () => state;
 
@@ -123,6 +125,19 @@ export default function (pi: ExtensionAPI) {
 		} catch (e: any) {
 			console.error(`[flux] complexity analysis failed: ${e?.message}`);
 		}
+
+		// Phase 2: 加载 models.json (模型 + 角色定义)
+		let modelsConfig: any = null;
+		try {
+			const modelsPath = join(fluxDir, "models.json");
+			if (existsSync(modelsPath)) {
+				modelsConfig = JSON.parse(readFileSync(modelsPath, "utf-8"));
+				console.error(`[flux] models.json loaded: ${Object.keys(modelsConfig.models ?? {}).length} models, ${Object.keys(modelsConfig.roles ?? {}).length} roles`);
+			}
+		} catch (e: any) {
+			console.error(`[flux] models.json load failed: ${e?.message}`);
+		}
+		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first" };
 
 		runRouter(ctx);
 		setFluxStatus(ctx, getState);
@@ -218,6 +233,14 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "project") return cmdProject(ctx);
 			if (sub === "fork") return handleForkCommand(parts.slice(1), ctx);
 			if (sub === "complexity") return cmdComplexity(ctx);
+			if (sub === "team") {
+				if (!teamCtx) {
+					const msg = "team 上下文未初始化 (session_start 未完成?)";
+					if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
+					return;
+				}
+				return handleTeamCommand(parts.slice(1), ctx, teamCtx);
+			}
 
 			// 默认: 摘要
 			refreshCache(ctx);
