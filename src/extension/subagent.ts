@@ -29,6 +29,7 @@ export interface SubagentDef {
 	description: string;
 	tools?: string[];
 	model?: string;
+	skills?: string[];      // F2: 角色特有 skills (如 ["planning", "code-review"])
 	systemPrompt: string;
 }
 
@@ -122,7 +123,15 @@ export async function runSubagent(opts: {
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-skills", "--no-prompt-templates", "--approve"];
+	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--approve"];
+	// skills: 如果角色定义了 skills, 用 --skill 逐个传入; 否则 --no-skills
+	if (agent.skills && agent.skills.length > 0) {
+		for (const skill of agent.skills) {
+			args.push("--skill", skill);
+		}
+	} else {
+		args.push("--no-skills");
+	}
 	if (prefixLayout) {
 		args.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
 	} else {

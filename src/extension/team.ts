@@ -27,6 +27,7 @@ export interface TeamContext {
 	modelsConfig: any;          // models.json 完整内容
 	sharedSkills?: string[];
 	prefixLayout: boolean;
+	pricing?: any;             // F1-14: PricingTable 用于子进程成本计算
 }
 
 // ──────────────────────────────── 命令处理 ────────────────────────────────
@@ -233,7 +234,7 @@ async function runTeamAgent(
 			sessionId: instance.session,
 			telemetry: teamCtx.telemetry,
 			prefixLayout: teamCtx.prefixLayout,
-			// 注: pricing 参数可选, 暂不传入
+			pricing: teamCtx.pricing,
 		});
 
 		// 更新实例状态

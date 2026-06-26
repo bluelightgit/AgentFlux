@@ -137,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 		} catch (e: any) {
 			console.error(`[flux] models.json load failed: ${e?.message}`);
 		}
-		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first" };
+		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
 
 		runRouter(ctx);
 		setFluxStatus(ctx, getState);

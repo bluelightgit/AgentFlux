@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { Mode } from "./types";
 
 export interface TaskComplexitySignal {
-	/** 文件数 (git ls-files) */
+	/** 代码文件数 (只计源码, 不含 docs/markdown) */
 	fileCount: number;
 	/** 代码行数 (LOC, 排除空行/注释行) */
 	loc: number;
@@ -35,6 +35,15 @@ export interface TaskComplexitySignal {
 	recommendedMode: Mode;
 	/** 推荐理由 */
 	reason: string[];
+	// ── F2-12 git 统计信号 ──
+	/** 热点文件数 (最近 30 天内被修改 >3 次的文件) */
+	hotspotFiles: number;
+	/** 最近 7 天提交数 */
+	recentCommits: number;
+	/** 测试覆盖率估算 (测试文件数 / 源码文件数, 0-1) */
+	testCoverageEstimate: number;
+	/** TODO/FIXME 密度 (每千行) */
+	todoDensity: number;
 }
 
 /**
@@ -44,23 +53,21 @@ export interface TaskComplexitySignal {
  */
 export function collectComplexitySignal(cwd: string, scope?: string): TaskComplexitySignal {
 	const reason: string[] = [];
-	let fileCount = 0;
 	let loc = 0;
 	let dependencyDepth = 0;
 	let crossModuleCoupling = 0;
 	let symbolDensity = 0;
 
-	// 1. 文件列表 (git ls-files, 排除 node_modules/dist)
+	// 1. 文件列表 (git ls-files, 只保留代码文件)
 	const trackedFiles = listTrackedFiles(cwd, scope);
-	fileCount = trackedFiles.length;
+	const codeFiles = trackedFiles.filter(f => isCodeFile(f));
+	const fileCount = codeFiles.length;  // 只统计代码文件
 
 	// 2. LOC + 符号密度 (读前 N 个代码文件, 零依赖正则)
-	const codeFiles = trackedFiles
-		.filter(f => /\.(ts|js|tsx|jsx|py|go|rs|java)$/.test(f))
-		.slice(0, 200); // 限制读取量, 避免大项目卡顿
+	const readFiles = codeFiles.slice(0, 200); // 限制读取量, 避免大项目卡顿
 
 	let totalSymbols = 0;
-	for (const f of codeFiles) {
+	for (const f of readFiles) {
 		try {
 			const content = readFileSyncSafe(join(cwd, f));
 			if (!content) continue;
@@ -74,30 +81,43 @@ export function collectComplexitySignal(cwd: string, scope?: string): TaskComple
 	symbolDensity = loc > 0 ? totalSymbols / loc : 0;
 
 	// 3. 依赖深度 + 跨模块耦合 (从 import 语句)
-	const importGraph = buildImportGraph(cwd, codeFiles);
+	const importGraph = buildImportGraph(cwd, readFiles);
 	dependencyDepth = importGraph.maxDepth;
 	crossModuleCoupling = importGraph.couplingRatio;
 
-	// 4. 复杂度等级判定 (RGAO 风格阈值)
+	// 4. F2-12: git 统计信号
+	const hotspotFiles = countHotspotFiles(cwd);
+	const recentCommits = countRecentCommits(cwd);
+	const testCoverageEstimate = estimateTestCoverage(codeFiles);
+	const todoDensity = countTodoDensity(cwd, readFiles, loc);
+
+	// 5. 复杂度等级判定 (RGAO 风格阈值, 基于代码文件数)
 	let tier: 0 | 1 | 2 | 3 = 0;
 	let mode: Mode = "M1";
 	if (fileCount <= 10 && loc <= 500 && dependencyDepth <= 2) {
 		tier = 0; mode = "M1";
-		reason.push("FastPath: 小型任务 (file<=10, loc<=500, depth<=2)");
+		reason.push("FastPath: 小型任务 (code<=10, loc<=500, depth<=2)");
 	} else if (fileCount <= 50 && dependencyDepth <= 4 && crossModuleCoupling < 0.3) {
 		tier = 1; mode = "M2";
-		reason.push("SubAgent: 中型任务 (file<=50, depth<=4, coupling<0.3)");
+		reason.push("SubAgent: 中型任务 (code<=50, depth<=4, coupling<0.3)");
 	} else if (dependencyDepth >= 6 || crossModuleCoupling >= 0.5 || fileCount > 200) {
 		tier = 3; mode = "M4";
-		reason.push(`DeepResearch: 高耦合任务 (depth>=6 或 coupling>=0.5 或 file>200)`);
+		reason.push(`DeepResearch: 高耦合任务 (depth>=6 或 coupling>=0.5 或 code>200)`);
 	} else {
 		tier = 2; mode = "M3";
 		reason.push("MultiAgent: 中高复杂度 (需 fork 探索或多视角)");
 	}
 
+	// git 信号补充理由
+	if (hotspotFiles > 5) reason.push(`热点文件多 (${hotspotFiles}), 倾向仔细 review`);
+	if (testCoverageEstimate < 0.2 && fileCount > 10) reason.push(`测试覆盖率低 (${(testCoverageEstimate*100).toFixed(0)}%), 倾向加 tester`);
+	if (todoDensity > 5) reason.push(`技术债高 (TODO/FIXME ${todoDensity.toFixed(1)}/kloc), 倾向 refactor`);
+	if (recentCommits > 20) reason.push(`活跃项目 (7天 ${recentCommits} commits), 倾向并行`);
+
 	return {
 		fileCount, loc, dependencyDepth, crossModuleCoupling, symbolDensity,
 		complexityTier: tier, recommendedMode: mode, reason,
+		hotspotFiles, recentCommits, testCoverageEstimate, todoDensity,
 	};
 }
 
@@ -120,6 +140,64 @@ function listTrackedFiles(cwd: string, scope?: string): string[] {
 	} catch {
 		return [];
 	}
+}
+
+/** 判断是否为代码文件 (排除 docs/markdown/config) */
+function isCodeFile(f: string): boolean {
+	return /\.(ts|js|tsx|jsx|py|go|rs|java|c|cpp|h|rb|php|swift|kt|scala|lua|sh)$/.test(f);
+}
+
+/** F2-12: 统计热点文件 (最近 30 天内被修改 >3 次的文件) */
+function countHotspotFiles(cwd: string): number {
+	try {
+		const out = execSync(
+			'git log --since="30 days ago" --format="" --name-only',
+			{ cwd, encoding: "utf-8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] },
+		);
+		const counts = new Map<string, number>();
+		for (const line of out.split("\n").filter(Boolean)) {
+			counts.set(line, (counts.get(line) ?? 0) + 1);
+		}
+		return Array.from(counts.values()).filter(c => c > 3).length;
+	} catch { return 0; }
+}
+
+/** F2-12: 最近 7 天提交数 */
+function countRecentCommits(cwd: string): number {
+	try {
+		const out = execSync(
+			'git log --since="7 days ago" --oneline',
+			{ cwd, encoding: "utf-8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] },
+		);
+		return out.split("\n").filter(Boolean).length;
+	} catch { return 0; }
+}
+
+/** F2-12: 测试覆盖率估算 (测试文件数 / 源码文件数) */
+function estimateTestCoverage(codeFiles: string[]): number {
+	const testFiles = codeFiles.filter(f =>
+		/test|spec/i.test(f) ||
+		f.endsWith(".test.ts") ||
+		f.endsWith(".spec.ts") ||
+		f.endsWith("_test.go") ||
+		f.endsWith("_test.py") ||
+		f.includes("/tests/") ||
+		f.includes("/test/")
+	);
+	return codeFiles.length > 0 ? testFiles.length / codeFiles.length : 0;
+}
+
+/** F2-12: TODO/FIXME 密度 (每千行代码) */
+function countTodoDensity(cwd: string, files: string[], loc: number): number {
+	if (loc === 0) return 0;
+	let todoCount = 0;
+	for (const f of files) {
+		const content = readFileSyncSafe(join(cwd, f));
+		if (!content) continue;
+		const matches = content.match(/\b(TODO|FIXME|HACK|XXX)\b/gi);
+		todoCount += matches?.length ?? 0;
+	}
+	return (todoCount / loc) * 1000;
 }
 
 function readFileSyncSafe(path: string): string | null {
@@ -192,11 +270,16 @@ export function formatComplexitySignal(s: TaskComplexitySignal): string {
 	const tierNames = ["FastPath", "SubAgent", "MultiAgent", "DeepResearch"];
 	return [
 		`复杂度信号 (RGAO 静态分析):`,
-		`  files    ${s.fileCount}`,
+		`  files    ${s.fileCount} (代码文件)`,
 		`  loc      ${s.loc}`,
 		`  depth    ${s.dependencyDepth} (最长 import 链)`,
 		`  coupling ${s.crossModuleCoupling.toFixed(2)} (被多文件引用的模块比)`,
 		`  symbols  ${s.symbolDensity.toFixed(3)}/line`,
+		`  ── git 信号 ──`,
+		`  hotspots ${s.hotspotFiles} (30天内修改>3次的文件)`,
+		`  recent   ${s.recentCommits} commits (7天)`,
+		`  testCov  ${(s.testCoverageEstimate * 100).toFixed(0)}% (测试文件/源码文件)`,
+		`  todo     ${s.todoDensity.toFixed(1)}/kloc (TODO/FIXME密度)`,
 		`  tier     ${tierNames[s.complexityTier]} → ${s.recommendedMode}`,
 		`  reason   ${s.reason.join("; ")}`,
 	].join("\n");
