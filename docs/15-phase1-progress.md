@@ -203,3 +203,42 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 - 角色定义的 tools 过滤尚未接入子进程 (当前继承全部工具)
 - skills 过滤尚未接入子进程 --skills 参数
 - 亲和度匹配对 2 模型场景的区分度有限 (cost_eff log scale 已缓解)
+
+## 基础功能完善 (commit 2f842af)
+
+### F2-12 Git 统计信号 (complexity.ts)
+- fileCount 修正: 只统计代码文件 (27), 不含 docs/markdown (之前 54 虚高)
+- 新增 4 个 git 统计信号:
+  - hotspotFiles: 30天内修改>3次的文件数 (4个)
+  - recentCommits: 7天内提交数 (16)
+  - testCoverageEstimate: 测试文件/源码文件比 (4%)
+  - todoDensity: TODO/FIXME每千行 (3.2/kloc)
+- 路由理由加入 git 信号补充 (如 "测试覆盖率低, 倾向加 tester")
+
+### Skills 角色隔离 (subagent.ts)
+- 角色有 skills 时: 用 `--skill <path>` 逐个传入子进程
+- 无 skills 时: `--no-skills` 全部禁用 (保持原有行为)
+- 支持 sharedSkills + role.skills 合并传递
+
+### Cost 修复 (team.ts)
+- TeamContext 加 pricing 字段
+- runTeamAgent 传 pricing 到子进程, cost 从 $0 变为真实计算
+
+### E2E 管道验证 (plan→build→review)
+完整三阶段管道测试通过:
+
+| Agent | turns | input | output | cacheRead | hit% | cost |
+|---|---|---|---|---|---|---|
+| planner | 2 | 3172 | 1050 | 3200 | 50% | $0.000538 |
+| implementer | 2 | 181 | 336 | 5760 | 97% | $0.000192 |
+| reviewer | 1 | 124 | 1733 | 4096 | 97% | $0.000405 |
+| **TOTAL** | | | | | | **$0.001135** |
+
+验证项:
+- ✅ 3 实例 (planner-1/implementer-1/reviewer-1) 全部 status=done
+- ✅ 3 handoff 文件正确生成
+- ✅ blackboard 3 agent 状态更新
+- ✅ registry.json 记录完整 (model/assignSource/status)
+- ✅ telemetry 3 个 subagent.run 事件, cost 正确计算
+- ✅ implementer/reviewer cache hit 97% (前缀布局 + subagent-entry.ts 生效)
+- ✅ 亲和度匹配: 3 角色都通过 affinity 匹配到 deepseek-v4-flash
