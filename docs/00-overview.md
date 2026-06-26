@@ -34,11 +34,12 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 | **六模式** | 维度组合出的六种典型工作模式 M1–M6 | [03](03-modes.md) |
 | **配置层** | 预设 / 开关 / 参数三档 | [04](04-config-schema.md) |
 | **路由层** | 静态信号 / 预算 / 经验三层依据 | [05](05-routing.md) |
-| **缓存策略** | 前缀布局 + mask | [06](06-cache-strategy.md) |
+| **缓存策略** | 前缀布局 + mask + 实测数据 | [06](06-cache-strategy.md) |
 | **价格层** | OpenRouter 远程 + 用户覆盖 + 兜底均值 | [16](16-pricing-layer.md) |
 | **模型能力** | 能力向量 × 角色需求 = 亲和度 | [17](17-model-capability.md) |
 | **角色设计** | 模板定义 + 实例化 + 自定义 | [18](18-agent-roles.md) |
 | **多 agent 架构** | 共享黑板 + 角色信箱 + 文件沟通 | [19](19-multi-agent-architecture.md) |
+| **实证数据** | 缓存实验 + 成本实验 + 工程发现 | [20](20-empirical-findings.md) |
 
 ## 命名说明
 
@@ -56,8 +57,13 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 2. **缓存为王**:成本优化的第一杠杆是 prompt cache,不是减 agent
 3. **渐进可控**:从预设档位到全自动路由,用户随时可介入
 4. **有据可依**:每个决策点引用学术/工业证据,不拍脑袋
-5. **先验证后扩展**:Phase 1 只做能立刻让成本可观测并优化的部分 (价格层 docs/16, 不套用第三方 60% 锚点)
+5. **先验证后扩展**:Phase 1 只做能立刻让成本可观测并优化的部分 (价格层 docs/16, 不套用第三方 60% 锚点)。实测数据见 [docs/20](20-empirical-findings.md)
+6. **多模式路由是核心**: 成本优化是次要, 智能路由决策 (何时用哪种模式) 才是护城河
 
 ## 项目状态
 
-🚧 Phase 1+2 实现中。Phase 1 核心 (缓存/路由/telemetry/价格层) 已完成, Phase 2 (M3 fork/RGAO 复杂度路由/subagent 精简入口) 已完成。下一步: 模型能力层 + 多 agent 架构。见 [roadmap](07-roadmap.md) 和 [Phase 1 进度](15-phase1-progress.md)。
+✅ Phase 1+2 完成。Phase 1 (14/14): 缓存/路由/telemetry/价格层/TUI 菜单。Phase 2 (12/12): M3 fork/RGAO 复杂度路由/模型能力/多 agent 架构/team 管道。
+
+**战略转向**: 核心价值是多模式智能路由, 不是成本优化。成本优化是次要 (compaction 避免 15%, prefix layout subagent 37.8%)。护城河在路由决策: 何时用哪种模式, 何时异构多 agent (M6) 有不可替代价值。见 [roadmap](07-roadmap.md)、[进度](15-phase1-progress.md)、[实证数据](20-empirical-findings.md)。
+
+下一步: Phase 3 (ILP/RL 路由、M6 异构团队、Python sidecar) 或用 AgentFlux 自迭代。

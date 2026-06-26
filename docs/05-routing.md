@@ -147,7 +147,7 @@ Zylos 研究:"every compaction event destroys the cached prefix and triggers a f
 4. 层3 经验 RL(若启用)→ 微调
 5. override_mode 判定:
      - auto:   直接执行
-     - suggest: 给用户建议,确认后执行
+     - suggest: 非侵入式 footer hint 提示路由建议, 不打断交互 (实测: 弹窗会打断菜单操作)
      - manual:  只展示分析,用户自选
 6. 执行中持续监控:
      - context 填充率 → 触发 B 维度自适应

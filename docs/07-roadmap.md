@@ -6,10 +6,10 @@
 
 | 阶段 | 周期 | 内容 | 预期收益 |
 |---|---|---|---|
-| Phase 0 | 当前 | 文档、架构、UI 方向 | 立论成立 |
-| Phase 1 | ~2 周 | M1/M2 + 前缀布局 + mask + pi TUI 验证 | 成本 −60% |
-| Phase 2 | ~1 月 | M3 fork + 静态路由 + Web read-only dashboard | 准确性×成本折中点 |
-| Phase 3 | ~2 月+ | M6 异构 + ILP/RL 路由 + Web control plane/Electron | 护城河 |
+| Phase 0 | ✅ 完成 | 文档、架构、UI 方向 | 立论成立 |
+| Phase 1 | ✅ 完成 | M1/M2 + 前缀布局 + mask + cache 监控 + 价格层 + TUI 菜单 | 成本可观测, prefix layout subagent 省 37.8% |
+| Phase 2 | ✅ 完成 | M3 fork + RGAO 复杂度路由 + 模型能力 + 多 agent 基础 | 多模式路由 + team 管道 |
+| Phase 3 | 规划中 | M6 异构 + ILP/RL 路由 + Web control plane/Electron | 护城河 |
 
 ## 用户端路线总览
 
@@ -22,9 +22,19 @@
 
 原则:先用 pi TUI 验证核心价值,但从 Phase 1 开始写统一 telemetry,为 Web/Electron 留接口。
 
+## 战略转向 (2026-06)
+
+用户反馈: 当前方向过于聚焦省钱, 但单 agent 理论上最省 token。**多模式系统和智能路由才是核心价值**, 不是成本优化。
+
+- 成本优化 (compaction 避免、mask、prefix layout) 是次要价值: 实测 compaction 避免 15%, prefix layout 主进程 2.6% / subagent 37.8%
+- **核心护城河是路由决策**: 何时用哪种模式、如何分解任务、何时异构多 agent (M6) 有不可替代价值
+- 实证依据: OneFlow 论文 (arxiv 2601.12307) 证明同构多 agent 可被单 agent 模拟, 异构才是多 agent 的唯一不可替代价值
+
+> 详见 [docs/20 实证数据](20-empirical-findings.md) 和 [docs/15 进度](15-phase1-progress.md)。
+
 ---
 
-## Phase 0:设计阶段(当前)
+## Phase 0:设计阶段 (✅ 完成)
 
 **目标**:立论成立,设计文档完整,技术栈与集成路径明确。
 
@@ -46,6 +56,8 @@
 
 **技术栈**:纯 TypeScript(pi extension),不引入 Python。
 
+**状态**: ✅ 14/14 任务完成 (含 F1-14 价格层)。详见 [docs/15](15-phase1-progress.md)。
+
 **交付物(按 pi 能力映射)**:
 
 | 任务 | pi 实现 | 文档依据 |
@@ -65,32 +77,35 @@
 | F1-13 `/flux project` 面板 | 成熟度信号面板 + 跃迁建议(suggest) | [14](14-project-evolution.md) |
 
 **验证指标**:
-- 对比 naive subagent,实测成本降幅 (基准 deepseek-v4-flash, 价格层 docs/16 提供 token×单价, 不再套用第三方 60% 锚点)
-- cache hit rate ≥ 85%,footer 实时显示
-- mask 策略下 solve rate 不下降(对照 JetBrains +2.6%)
-- Windows 下 subagent 子进程 spawn 正常
+- 对比 naive subagent,实测成本降幅 (基准 deepseek-v4-flash, 价格层 docs/16 提供 token×单价)
+  - 实测: prefix layout 在 subagent 多轮场景省 37.8%, 主进程单 agent 仅省 2.6% (见 [docs/20](20-empirical-findings.md))
+- cache hit rate ≥ 85%,footer 实时显示 ✅
+- mask 策略下 solve rate 不下降 — ⚠️ mask 需重设计 (见 [docs/06](06-cache-strategy.md) mask 策略重设计需求)
+- Windows 下 subagent 子进程 spawn 正常 ✅
 
 **风险与对冲**:
 - 前缀布局依赖 provider cache 行为 → 先验 Claude,`before_provider_request` 观测 payload
 - mask 误删关键信息 → keep last N 可配,默认 N=3
 - subagent 子进程 Windows 路径 → Phase 1 实测,必要时走 SDK 同进程
 
-**为什么先做这步**:Trilemma 三角上"成本"边最便宜的优化,几乎不动架构,ROI 最高。单 session 内闭环迭代(用户当前主流程)在此阶段就够用。
+**为什么先做这步**:成本可观测是基础, 但不是核心卖点 (见战略转向)。核心价值在 Phase 2 的多模式和路由。
 
 ---
 
-## Phase 2:对话树 + 静态路由 + 多 agent 基础 (1 月,纯 TS)
+## Phase 2:对话树 + 静态路由 + 多 agent 基础 (✅ 完成)
 
 **目标**:补上 Trilemma"准确性×成本"的最佳折中点(M3 fork),启用层 1 静态路由,并建立多 agent 基础 (模型能力层 + 角色定义 + 共享黑板)。
 
 **技术栈**:纯 TypeScript。
+
+**状态**: ✅ 12/12 任务完成。详见 [docs/15](15-phase1-progress.md)。
 
 **交付物**:
 
 | 任务 | pi 实现 | 文档依据 |
 |---|---|---|
 | F2-1 M3 对话树 fork | pi 原生 `ctx.fork` + `/tree` + branch summary(B4) | [10](10-pi-integration.md) §2 M3 |
-| F2-2 fork merge 逻辑 | 读两 session leaf,合并消息;参考 grit AST 锁 | [03](03-modes.md) |
+| F2-2 fork merge 逻辑 | 信息性指导 (手动/git/Phase 3 自动), 自动 merge 延至 Phase 3 | [03](03-modes.md) |
 | F2-3 层1 静态路由 | `input`+`before_agent_start` + bash/ls 收集代码信号 → 候选模式 | [05](05-routing.md) §层1 |
 | F2-4 模型能力层 | models.json 结构 + 能力向量 + 亲和度匹配 + 启发式兑底 | [17](17-model-capability.md) |
 | F2-5 角色定义层 | JSON/MD 角色定义 + 基础模板 + 实例注册表 | [18](18-agent-roles.md) |
@@ -98,7 +113,7 @@
 | F2-7 /flux team 命令 | team plan/build/review/status/abort | [19](19-multi-agent-architecture.md) |
 | F2-8 M5 管道 handoff | 基于 `examples/extensions/handoff.ts` 串联 | [10](10-pi-integration.md) §2 M5 |
 | F2-9 Level 2 维度开关 | 配置层 + 校验(软约束 warning) | [04](04-config-schema.md) |
-| F2-10 override_mode: suggest | `ctx.ui.confirm`/`select` 路由决策确认 | [05](05-routing.md) |
+| F2-10 override_mode: suggest | 非侵入式 footer hint (非弹窗), 路由建议显示在 footer 小字 | [05](05-routing.md) |
 | F2-11 运行时 B 维度自适应 | `session_before_compact` hook 拦截,按剩余工作选 mask/fork/compact/handoff | [10](10-pi-integration.md) §4 |
 | F2-12 git 统计信号扩展 | 变更频率/活跃度/文件大小/测试覆盖率/TODO密度 | 本文档 |
 
@@ -165,6 +180,6 @@
 - [x] 给出 TUI/Web/Electron 用户端方向(见 [12](12-ui-direction.md))
 - [x] 路由偏好可配置 + 可视化方向(见 [13](13-routing-preference.md))
 - [x] 项目演进 + 角色演进规划(见 [14](14-project-evolution.md))
-- [ ] 拆 Phase 1 的具体任务(F1-1 ~ F1-13)成 issue 清单
-- [ ] 做 V0 probe:cache footer + events.jsonl + context% 显示
-- [ ] 在真实 pi 环境跑通 `examples/extensions/subagent`,验证 Windows 子进程
+- [x] 拆 Phase 1 的具体任务(F1-1 ~ F1-13)成 issue 清单
+- [x] 做 V0 probe:cache footer + events.jsonl + context% 显示 (结论见 [docs/20](20-empirical-findings.md))
+- [x] 在真实 pi 环境跑通 `examples/extensions/subagent`,验证 Windows 子进程

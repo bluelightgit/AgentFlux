@@ -156,13 +156,12 @@ pi TUI 是第一验证场,它的任务不是“做成漂亮桌面”,而是**让
 
 ### 3. pi TUI 的核心组件
 
-- `setStatus`:顶部模式标签
-- `setFooter`:缓存/成本/上下文摘要
-- `setWidget`:执行 lane、todo、分支信息
-- `ctx.ui.custom(..., { overlay: true })`:路由选择、设置面板、解释面板
-- `SelectList`:模式切换
-- `SettingsList`:策略参数
-- `BorderedLoader`:长操作等待
+- `setFooter`: 缓存/成本/上下文摘要 + 路由提示 (非侵入式 hint)
+- ~~`setStatus`~~: 已弃用 — 会创建无法消除的持久状态栏, 改用 setFooter
+- `ctx.ui.custom(...)`: 路由选择、设置面板 (flat SelectList 模式, 非 SettingsList submenu)
+- `SelectList`: 模式切换、主菜单、team 子菜单 (参考 pi preset.ts)
+- ~~`SettingsList submenu`~~: 不使用 — Container 类无 handleInput 方法, submenu 委托失效
+- `BorderedLoader`: 长操作等待
 
 ### 4. TUI 必须具备的交互
 

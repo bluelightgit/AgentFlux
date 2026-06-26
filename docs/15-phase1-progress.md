@@ -2,10 +2,11 @@
 
 > Phase 1 目标(docs/07): 在 pi 上用前缀布局 + mask + cache 监控优化 subagent 流程成本。
 > 实测结论: prefix layout 边际收益取决于场景 (主进程5轮仅2.6%, subagent6轮37.8%)。
-> Phase 2: M3 fork + RGAO 复杂度路由 + subagent 精简入口。
+> Phase 2: M3 fork + RGAO 复杂度路由 + 模型能力层 + 多 agent 架构 + team 管道。
 > 技术栈: 纯 TypeScript(pi extension), 模块化 src/ 结构, pi 直接加载 entry.ts 无需构建。
 >
-> 成本基准: deepseek-v4-flash, 价格层见 docs/16。成本实验见 experiments/v0-probe/COST-CONCLUSIONS.md。
+> 成本基准: deepseek-v4-flash, 价格层见 docs/16。成本实验见 docs/20 实证数据。
+> **战略转向**: 核心价值是多模式智能路由, 不是成本优化 (见 docs/07 战略转向节)。
 
 ## M1.1 已实现 (src/)
 
@@ -15,50 +16,67 @@
 src/
 ├── core/
 │   ├── types.ts        类型定义: 维度/模式/配置/偏好/成熟度/路由决策 (docs/02,03,04,13,14)
-│   ├── config.ts       配置加载 + 优先级链 + 场景覆盖 + 软约束校验 (F1-1)
-│   └── routing.ts      Phase 1 规则路由: 成熟度基线 + 偏好偏置 (docs/05,13,14)
+│   ├── config.ts       配置加载 + 优先级链 + 场景覆盖 + 软约束校验 + savePreference (F1-1)
+│   ├── routing.ts      Phase 1 规则路由: 成熟度基线 + 偏好偏置 + 复杂度信号 (docs/05,13,14)
+│   ├── pricing.ts      价格层: OpenRouter + models.json + 兑底均值 (F1-14, docs/16)
+│   ├── complexity.ts   RGAO 静态分析: git churn + import graph + 复杂度等级 (F2-3,12)
+│   ├── model-capability.ts  模型能力向量 + 亲和度匹配 (F2-4, docs/17)
+│   ├── role-manager.ts      角色定义 + 内置模板 + 实例注册表 (F2-5, docs/18)
+│   └── shared-board.ts      共享黑板: tasks/handoffs/decisions (F2-6, docs/19)
 ├── telemetry/
 │   └── events.ts       统一事件模型 + JSONL writer (F1-8)
 ├── extension/
-│   ├── cache-monitor.ts    cache 累计 + context 占用采集 (F1-4)
+│   ├── cache-monitor.ts    cache 累计 + context 占用采集 + percent/100 归一化 (F1-4)
 │   ├── maturity.ts         git 信号 → stage/role + profile 持久化 (F1-12)
-│   ├── footer.ts           TUI footer/status + 摘要/inspector 文本 (F1-5,10)
+│   ├── footer.ts           TUI footer (setFooter only, setStatus 已弃用) + 摘要/inspector (F1-5,10)
 │   ├── prefix-layout.ts    before_provider_request 注入 cache_control (F1-2)
-│   └── mask.ts             context 事件 mask 旧 tool result (F1-3)
-└── entry.ts            主入口: 事件注册 + /flux 命令 (F1-9,13)
+│   ├── mask.ts             context 事件 mask 旧 tool result (F1-3, 需重设计)
+│   ├── fork-mode.ts        M3 对话树 fork + fork merge 指导 (F2-1,2)
+│   ├── compaction-advisor.ts  B 维度自适应: session_before_compact 拦截 (F2-11)
+│   ├── flux-menu.ts        全宽 /flux 菜单: flat SelectList + 进度条调音台 (F1-6,11)
+│   └── team.ts             /flux team 命令 + M5 管道 handoff 链 (F2-7,8)
+├── subagent-entry.ts   行为隔离的 subagent 入口 (不注册 flux_subagent tool)
+└── entry.ts            主入口: 事件注册 + /flux 命令 + 路由 + TUI菜单 (F1-9,13)
 ```
 
-## 验证结果 (pi 0.80.2 + octopus-anthropic/deepseek-v4-flash)
+## Phase 1 验证结果 (14/14 ✅)
 
 | 任务 | 状态 | 验证证据 |
 |---|---|---|
 | F1-1 配置加载 | ✅ | loadConfig/loadPreference 合并默认, applyScenarioOverride 场景覆盖 |
-| F1-2 前缀布局 | ✅ | 多轮对照: input 245→117(减半), hit 96%→98%, read 增量 +200 |
-| F1-3 mask | ✅ | 3 toolResult 保留最近2, 最早替换占位符, 消息结构不变(5→5) |
-| F1-4 cache 监控 | ✅ | cacheRead/cacheWrite/context% 实时采集, hit rate 计算 |
-| F1-5 footer | ✅ | setFooter API 正确(左 cache/mode/ctx/$ + 右 stage/role/preset) |
-| F1-8 telemetry | ✅ | routing.decision + cache.sample + context.event 写 events.jsonl |
-| F1-9 route inspector | ✅ | buildInspectorText 生成, TUI overlay 代码完成 |
-| F1-10 偏好落点 | ✅ | footer 显示 preset→expected, /flux preference 命令 |
-| F1-12 项目成熟度 | ✅ | git file/commit → stage/role, project-profile.json 持久化 |
-| F1-13 项目面板 | ✅ | /flux project 命令显示成熟度信号 + 跃迁阈值 |
-| F1-7 subagent 适配 | ✅ | flux_subagent 工具, 子进程加载 entry.ts, telemetry subagent.run |
-| F1-14 价格层 | ✅ | OpenRouter 远程+models.json 覆盖+兑底均值, cost 本地算 (token×单价), 见 docs/16 |
+| F1-2 前缀布局 | ✅ | subagent 6轮公平对照: input 减半, hit 68.5%→81.7%, 省 37.8% |
+| F1-3 mask | ✅ (需重设计) | 功能实现, 但实测发现三个问题, 见 docs/20 三.3 |
+| F1-4 cache 监控 | ✅ | cacheRead/cacheWrite/context% 实时采集, percent/100 归一化修复 |
+| F1-5 footer | ✅ | setFooter (setStatus 已弃用: 创建无法消除的持久栏) |
+| F1-6 模式选择器 | ✅ | flat SelectList 全宽菜单 (非 SettingsList submenu, 见 TUI 修复) |
+| F1-7 subagent 适配 | ✅ | flux_subagent 工具, 子进程加载 subagent-entry.ts, telemetry |
+| F1-8 telemetry | ✅ | routing.decision + cache.sample + subagent.run 写 events.jsonl |
+| F1-9 route inspector | ✅ | /flux why 文本展示, /flux 菜单信息项 |
+| F1-10 偏好落点 | ✅ | footer 显示 preset→expected |
+| F1-11 调音台 | ✅ | 进度条 + ←→ 调整 + 实时保存 (非 SettingsList, 自定义 Component) |
+| F1-12 项目成熟度 | ✅ | git file/commit → stage/role, project-profile.json |
+| F1-13 项目面板 | ✅ | /flux project + /flux 菜单信息项 |
+| F1-14 价格层 | ✅ | OpenRouter 远程 + models.json + 兑底均值, 见 docs/16 |
 
 ## 关键技术决策 (实证驱动)
 
-1. **模块化 .ts 直接加载**: pi 支持 `-e src/entry.ts` + 相对 import, 无需构建步骤 (验证通过)
-2. **前缀布局路径**: `before_provider_request` replace payload, 给历史末尾打 cache_control (CACHE-FINDINGS 实证)
-3. **mask 触发条件**: context >= compaction_threshold - 0.10 (默认 60%), 低占用零成本 noop
-4. **pi tool result 格式**: 独立消息 role="toolResult", 不在 user content block (dump 确认, mask 已适配)
+1. **模块化 .ts 直接加载**: pi 支持 `-e src/entry.ts` + 相对 import, 无需构建步骤
+2. **前缀布局路径**: `before_provider_request` replace payload, 给历史末尾打 cache_control
+3. **mask 触发条件**: context >= compaction_threshold - 0.10 (默认 60%), 低占用零成本 noop — 但需重设计 (docs/20 三.3)
+4. **pi tool result 格式**: 独立消息 role="toolResult", 不在 user content block
 5. **路由器展示优先**: Phase 1 路由计算 expected mode 并展示, 实际模式切换受限于已实现能力
+6. **percent 刻度归一化**: pi 返回 0-100, AgentFlux 统一 /100 转为 0-1 (曾导致 mask 0.6% 触发 + 显示 395%)
+7. **subagent 行为隔离**: subagent-entry.ts 不注册 flux_subagent tool, 避免 tool description 改变 LLM 行为
+8. **TUI flat SelectList**: 不用 SettingsList submenu (Container 无 handleInput, submenu 委托失效), 改用 ctx.ui.custom + SelectList (参考 pi preset.ts)
+9. **setStatus 弃用**: setStatus 创建无法消除的持久状态栏, 改用 setFooter 显示所有状态
+10. **override_mode 非侵入式**: 路由建议用 footer hint 小字显示, 不用弹窗 (弹窗打断菜单操作)
+11. **cost_eff log scale**: 线性映射 (1.0→0.1) 在 2 模型时差距太大, 改用 log scale (0.85→0.25)
+12. **git churn 复杂度**: 用 `git log --numstat` 替代硬编码后缀, 黑名单策略排除非代码文件
 
 ## 待实现
 
-| 任务 | 说明 | 依赖 |
-|---|---|---|
-| F1-6 模式选择器 | ctx.ui.custom overlay + SelectList (eco/balanced 切换) | TUI 验证 |
-| F1-11 调音台 | SettingsList 五维滑块 + 场景覆盖 | TUI 验证 |
+Phase 1: 14/14 ✅ 全部完成 (含 F1-6/F1-11 TUI 交互已实现)
+Phase 2: 12/12 ✅ 全部完成
 
 ## F1-7 subagent 适配验证
 
@@ -69,7 +87,7 @@ naive vs agentflux 对照 (2轮 task: read README.md + 总结):
 | naive (无前缀布局) | 2 | 152 | 3200 | 95% | $0 |
 | agentflux (有前缀布局) | 2 | 152 | 3200 | 95% | $0 |
 
-两者相同, 符合预期 (CACHE-FINDINGS 实验四): 短2轮历史, 隐式缓存已覆盖 system L1 (1536/轮),
+两者相同, 符合预期 (docs/20 实验四): 短2轮历史, 隐式缓存已覆盖 system L1 (1536/轮),
 显式 cache_control 边际不显著。AgentFlux subagent 增量价值在:
   1. telemetry 可观测 (cacheRead/cost/turns 跟踪, subagent.run 事件)
   2. 统一前缀布局 (为长历史/跨调用场景准备)
@@ -274,7 +292,31 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 - `--tools "read,ls"` 正确限制子进程工具: LLM 报告"没有 bash 工具可用"
 - 角色工具隔离 (planner 只读, implementer 可写) 可用
 
-### 剩余 UI 任务 (需要用户 TUI 交互测试)
-- F1-6 模式选择器 overlay (ctx.ui.custom + SelectList)
-- F1-11 偏好调音台 (SettingsList 五维度调节)
-- 这两个需要 TUI 交互模式, print/RPC 模式无法验证
+### TUI 菜单重写 (flux-menu.ts)
+
+**问题**: 原 /flux 菜单用 SettingsList submenu, 但 Container 类没有 handleInput 方法, 导致 Mode 子菜单卡住无法操作。setStatus 创建无法消除的持久状态栏。override_mode 弹窗打断菜单交互。
+
+**修复**: 
+- 改用 flat SelectList 模式 (参考 pi preset.ts), 每个菜单独立 ctx.ui.custom() overlay
+- 主题通过 closure 捕获传递给子菜单组件
+- setStatus 弃用, 所有状态走 setFooter
+- override_mode suggest 改为非侵入式 footer hint (路由建议小字显示在 footer)
+- 信息类选项 (Project/Complexity/Compaction/Route) 选择后通过 ctx.ui.notify 显示在对话栏并立即退出菜单
+- 全英文 TUI 文本
+
+### Phase 2 完成状态: 12/12 ✅
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| F2-1 M3 fork | ✅ | fork-mode.ts, ctx.fork() + withSession |
+| F2-2 fork merge | ✅ | 信息性指导, 自动 merge 延至 Phase 3 |
+| F2-3 静态路由 | ✅ | complexity.ts, git churn + import graph |
+| F2-4 模型能力 | ✅ | model-capability.ts, 5维向量 + 亲和度 |
+| F2-5 角色定义 | ✅ | role-manager.ts, JSON/MD + 4内置模板 |
+| F2-6 共享黑板 | ✅ | shared-board.ts, tasks/handoffs/decisions |
+| F2-7 team 命令 | ✅ | team.ts, 8个子命令 |
+| F2-8 M5 管道 | ✅ | handoff 自动链, plan→build→review |
+| F2-9 Level 2 开关 | ✅ | 配置层 + 软约束校验 |
+| F2-10 override suggest | ✅ | 非侵入式 footer hint (非弹窗) |
+| F2-11 B 维度自适应 | ✅ | compaction-advisor.ts, 5级建议 |
+| F2-12 git 统计信号 | ✅ | hotspot/recent/testCov/todo + git churn |

@@ -2,7 +2,7 @@
  * AgentFlux Extension — 前缀布局强制器 (F1-2)
  * 文档依据: docs/06-cache-strategy (前缀布局原则), 10-pi-integration §4
  *
- * 实证依据: experiments/v0-probe/cache-inject.ts + CACHE-FINDINGS.md
+ * 实证依据: docs/20-empirical-findings.md (实验二/四)
  *   - pi 默认只给 system + 最后 user 打 cache_control, 历史不打 → L2 靠隐式缓存
  *   - 主动给"最后一条历史消息"打 cache_control, 可控制缓存断点
  *

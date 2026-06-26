@@ -13,7 +13,7 @@
 
 ## 三层 cache 收益模型
 
-> ⚠️ 以下经 V0 实测修正(详见 `experiments/v0-probe/CACHE-FINDINGS.md`)。
+> ⚠️ 以下经 V0 实测修正(详见 [docs/20 实证数据](20-empirical-findings.md))。
 > 实测环境: pi 0.80.2 + octopus-anthropic(deepseek-v4-flash, supportsLongCacheRetention)。
 
 | 层次 | 内容 | 大小 | subagent(临时) | 持久 session |
@@ -105,11 +105,34 @@ L2 是持久 session 比 subagent 多省的部分,但被 compaction 限制(见�
 - **cold-every-call(跨多 dev/repo)**:librarian 模式赢
 - 启示:AgentFlux 路由器应检测调用模式,warm 用 cache 优化,cold 用 librarian 摘要
 
+## 成本实验结论 (A/B/C)
+
+> 完整数据见 [docs/20 实证数据](20-empirical-findings.md)。
+
+| 方向 | 价值 | 数据 |
+|---|---|---|
+| 避免 compaction | **最大** | compaction 后首轮成本 2.65x, cacheRead 暴跌 94.2% |
+| toolResult 管理 | **次大** | toolResult 是 prefix 破坏源 (cacheRead 掉到 system-only) |
+| prefix_layout (subagent) | **显著** | 公平对照: subagent 6轮省 37.8% (行为隔离后) |
+| prefix_layout (主进程) | **边际** | 单进程 5轮仅省 2.6%, 隐式缓存已覆盖 |
+
+> ⚠️ 早期实验 C 的 subagent 对比不公平 (加载 entry.ts 改变 LLM 行为, 1-2轮 vs 5-6轮)。
+> 已用 `subagent-entry.ts` (不注册 flux_subagent tool) 修复, 公平对照下 prefix layout 在多轮 subagent 场景有显著价值。
+
+## Mask 策略重设计需求
+
+当前 mask 策略 (F1-3) 有三个已实证的问题:
+1. **只对 toolResult 生效**: 纯 prompt 会话无 tool 调用, mask 从不激活
+2. **单次 prefix 破坏代价不免费**: 在 cacheRead 折扣高的模型 (如 deepseek-v4-flash 22.2%) 上, 破坏代价超过节省
+3. **1M 窗口下几乎不触发**: 85% 阈值需 ~850K token
+
+重设计方向: event-driven (按 toolResult 模式触发), batch-applied (一次性应用后让 cache 重建), model-aware (仅低 cacheRead 折扣模型值得用)。
+
 ## AgentFlux 的缓存守则
 
 1. 默认 `prefix_layout: static_first`,强制静态在前
 2. 禁止 cache 杀手(见清单)进入 system prompt
-3. context 满了优先 B2 mask,慎用 B1 compact
+3. context 满了优先 B2 mask,慎用 B1 compact — **但 mask 需重设计 (见上)**
 4. 监控 `target_hit_rate`,低于阈值告警
-5. subagent 调用统一前缀布局,跨调用复用 L1
+5. subagent 调用统一前缀布局,跨调用复用 L1 — **subagent 多轮场景有 37.8% 成本优势 (实测)**
 6. 异构(D2)场景接受 cache 失效,用 model 差价补偿
