@@ -242,3 +242,39 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 - ✅ telemetry 3 个 subagent.run 事件, cost 正确计算
 - ✅ implementer/reviewer cache hit 97% (前缀布局 + subagent-entry.ts 生效)
 - ✅ 亲和度匹配: 3 角色都通过 affinity 匹配到 deepseek-v4-flash
+
+## 基础功能完整 (commit 07c1b47)
+
+### Git Churn 复杂度检测 (complexity.ts 重写)
+- 用 `git log --numstat` 替代硬编码后缀, 黑名单策略排除非代码文件
+- fileCount: 53(含docs) → 27(纯代码) 更准确
+- 新增 totalChurn, topChurnFiles (churn最高的5个文件)
+- 基于 Michael Feathers 的 Churn × Complexity = Hotspots 方法论
+
+### M5 管道 Handoff 链 (team.ts)
+- `/flux team build` 自动查找最近 planner handoff 拼接到任务前
+- `/flux team review` 自动查找最近 implementer handoff + git diff
+- `/flux team pipeline <task>` 一键执行 plan→build→review 全链路
+- E2E 验证: build 拼接了 planner handoff (1960 chars), review 拼接了 implementer handoff (3409 chars)
+
+### B 维度 Compaction 自适应 (compaction-advisor.ts, F2-11)
+- session_before_compact 事件拦截, 5级建议:
+  - allow: 上下文 <60%, 正常放行
+  - suggest_mask: 60-85% + toolResult >10, 建议 mask 保 prefix
+  - suggest_fork: 60-85% + 轮次 >15, 建议 fork 新分支
+  - force_compact: >85%, 必须 compact
+- `/flux compact` 命令显示当前建议
+- 当前只建议不拦截, Phase 3 接入自动决策
+
+### Fork Merge (fork-mode.ts)
+- `/flux fork merge` 显示合并策略说明
+- 自动 merge 在 Phase 3 实现 (需要 LLM 合并两分支输出)
+
+### Tools 白名单验证
+- `--tools "read,ls"` 正确限制子进程工具: LLM 报告"没有 bash 工具可用"
+- 角色工具隔离 (planner 只读, implementer 可写) 可用
+
+### 剩余 UI 任务 (需要用户 TUI 交互测试)
+- F1-6 模式选择器 overlay (ctx.ui.custom + SelectList)
+- F1-11 偏好调音台 (SettingsList 五维度调节)
+- 这两个需要 TUI 交互模式, print/RPC 模式无法验证
