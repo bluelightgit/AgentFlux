@@ -79,9 +79,9 @@
 
 ---
 
-## Phase 2:对话树 + 静态路由(1 月,纯 TS)
+## Phase 2:对话树 + 静态路由 + 多 agent 基础 (1 月,纯 TS)
 
-**目标**:补上 Trilemma"准确性×成本"的最佳折中点(M3 fork),并启用层 1 静态路由。
+**目标**:补上 Trilemma"准确性×成本"的最佳折中点(M3 fork),启用层 1 静态路由,并建立多 agent 基础 (模型能力层 + 角色定义 + 共享黑板)。
 
 **技术栈**:纯 TypeScript。
 
@@ -92,20 +92,29 @@
 | F2-1 M3 对话树 fork | pi 原生 `ctx.fork` + `/tree` + branch summary(B4) | [10](10-pi-integration.md) §2 M3 |
 | F2-2 fork merge 逻辑 | 读两 session leaf,合并消息;参考 grit AST 锁 | [03](03-modes.md) |
 | F2-3 层1 静态路由 | `input`+`before_agent_start` + bash/ls 收集代码信号 → 候选模式 | [05](05-routing.md) §层1 |
-| F2-4 M5 管道 handoff | 基于 `examples/extensions/handoff.ts` 串联 | [10](10-pi-integration.md) §2 M5 |
-| F2-5 Level 2 维度开关 | 配置层 + 校验(软约束 warning) | [04](04-config-schema.md) |
-| F2-6 override_mode: suggest | `ctx.ui.confirm`/`select` 路由决策确认 | [05](05-routing.md) |
-| F2-7 运行时 B 维度自适应 | `session_before_compact` hook 拦截,按剩余工作选 mask/fork/compact/handoff | [10](10-pi-integration.md) §4 |
+| F2-4 模型能力层 | models.json 结构 + 能力向量 + 亲和度匹配 + 启发式兑底 | [17](17-model-capability.md) |
+| F2-5 角色定义层 | JSON/MD 角色定义 + 基础模板 + 实例注册表 | [18](18-agent-roles.md) |
+| F2-6 共享黑板 | blackboard.json + tasks/ + handoffs/ + decisions/ | [19](19-multi-agent-architecture.md) |
+| F2-7 /flux team 命令 | team plan/build/review/status/abort | [19](19-multi-agent-architecture.md) |
+| F2-8 M5 管道 handoff | 基于 `examples/extensions/handoff.ts` 串联 | [10](10-pi-integration.md) §2 M5 |
+| F2-9 Level 2 维度开关 | 配置层 + 校验(软约束 warning) | [04](04-config-schema.md) |
+| F2-10 override_mode: suggest | `ctx.ui.confirm`/`select` 路由决策确认 | [05](05-routing.md) |
+| F2-11 运行时 B 维度自适应 | `session_before_compact` hook 拦截,按剩余工作选 mask/fork/compact/handoff | [10](10-pi-integration.md) §4 |
+| F2-12 git 统计信号扩展 | 变更频率/活跃度/文件大小/测试覆盖率/TODO密度 | 本文档 |
 
 **验证指标**:
 - 多方案探索场景,wall-clock 比串行快 ≥ 40%
 - 静态路由 misrouting ≤ 15%(对照 RGAO 8.2%)
 - fork 分支 cache 命中 L1 + 部分 L2
 - 运行时自适应在迭代 5+ 轮场景成本优于固定 compact
+- 模型亲和度分配与用户直觉一致 (gpt 做规划, flash 做执行)
+- 多 agent 管道 (plan→build→review) 端到端跑通
 
 **风险与对冲**:
 - fork merge 冲突 → 参考 grit AST 级锁;先支持简单合并,复杂场景人工介入
 - 静态路由规则粗糙 → 硬编码起步,Phase 3 升级为学习型
+- 亲和度启发式不准 → 用户可手动覆盖,后续接 benchmark API
+- 多 agent 文件竞争 → handoff 文件名包含实例名,避免覆写
 
 ---
 

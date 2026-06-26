@@ -35,6 +35,10 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 | **配置层** | 预设 / 开关 / 参数三档 | [04](04-config-schema.md) |
 | **路由层** | 静态信号 / 预算 / 经验三层依据 | [05](05-routing.md) |
 | **缓存策略** | 前缀布局 + mask | [06](06-cache-strategy.md) |
+| **价格层** | OpenRouter 远程 + 用户覆盖 + 兜底均值 | [16](16-pricing-layer.md) |
+| **模型能力** | 能力向量 × 角色需求 = 亲和度 | [17](17-model-capability.md) |
+| **角色设计** | 模板定义 + 实例化 + 自定义 | [18](18-agent-roles.md) |
+| **多 agent 架构** | 共享黑板 + 角色信箱 + 文件沟通 | [19](19-multi-agent-architecture.md) |
 
 ## 命名说明
 
@@ -56,4 +60,4 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 
 ## 项目状态
 
-🚧 Phase 0:设计阶段。文档先行,代码待实现。见 [roadmap](07-roadmap.md)。
+🚧 Phase 1+2 实现中。Phase 1 核心 (缓存/路由/telemetry/价格层) 已完成, Phase 2 (M3 fork/RGAO 复杂度路由/subagent 精简入口) 已完成。下一步: 模型能力层 + 多 agent 架构。见 [roadmap](07-roadmap.md) 和 [Phase 1 进度](15-phase1-progress.md)。
