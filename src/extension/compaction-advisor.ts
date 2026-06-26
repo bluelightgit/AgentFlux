@@ -109,9 +109,7 @@ export function registerCompactionAdvisor(pi: ExtensionAPI, getState: () => { se
 	});
 }
 
-/**
- * 格式化 compaction 建议为可读文本 (用于 /flux 命令)
- */
+/** Format compaction advice as readable text (for /flux command) */
 export function formatCompactionAdvice(advice: CompactionAdvice): string {
 	const icons = {
 		allow: "✓",
@@ -121,7 +119,7 @@ export function formatCompactionAdvice(advice: CompactionAdvice): string {
 		force_compact: "!",
 	};
 	return [
-		`Compaction 建议 (B 维度自适应):`,
+		`Compaction Advice (B-dimension adaptive):`,
 		`  ${icons[advice.action]} action  ${advice.action}`,
 		`    reason  ${advice.reason}`,
 		`    ctx     ${(advice.contextPercent * 100).toFixed(1)}%`,

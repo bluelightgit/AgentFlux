@@ -87,41 +87,41 @@ export function getForkCandidates(ctx: any, count = 3): Array<{ entryId: string;
 
 /**
  * /flux fork 命令处理器:
- *   /flux fork           → 列出可选 fork 点
+ *   /flux fork           → 列出Available fork points
  *   /flux fork <entryId> → 从指定 entry fork
  *   /flux fork last      → 从最近一条用户消息 fork
- *   /flux fork merge     → 合并策略说明 (当前为手动合并)
+ *   /flux fork merge     → Merge strategy info (manual for now)
  */
 export async function handleForkCommand(args: string[], ctx: any): Promise<string> {
 	// /flux fork merge: 合并说明
 	if (args[0] === "merge") {
 		return [
 			"Fork Merge:",
-			"  pi 的 fork 创建独立分支, 分支间不自动合并.",
-			"  合并策略:",
-			"  1. 手动: 在目标分支复制输出, 切回主分支粘贴",
-			"  2. Git: 用 git merge 合并不同 worktree 的代码变更",
+			"  pi fork creates independent branches, no auto-merge between them.",
+			"  Merge strategies:",
+			"  1. Manual: copy output from target branch, paste back to main",
+			"  2. Git: Use git merge for different worktree code changes",
 			"  3. AgentFlux 自动 (Phase 3): 读取两分支的 last assistant message,",
-			"     用 LLM 合并后注入当前会话",
+			"     use LLM to merge then inject into current session",
 			"",
 			"  当前阶段请用手动或 git 方式. 自动 merge 在 Phase 3 实现.",
 		].join("\n");
 	}
 
 	if (!ctx.fork) {
-		return "M3 fork 不可用: 当前模式不支持 ctx.fork (需要 TUI 或 RPC 模式)";
+		return "M3 fork unavailable: current mode does not support ctx.fork (需要 TUI 或 RPC 模式)";
 	}
 
 	const candidates = getForkCandidates(ctx, 5);
 
 	if (args.length === 0) {
 		// 列出 fork 候选点
-		const lines = ["可选 fork 点 (最近 5 条用户消息):", "─".repeat(50)];
+		const lines = ["Available fork points (最近 5 条用户消息):", "─".repeat(50)];
 		for (let i = candidates.length - 1; i >= 0; i--) {
 			const c = candidates[i];
 			lines.push(`  [${i}] ${c.entryId.slice(0, 12)}  ${c.preview}`);
 		}
-		lines.push("", "用法: /flux fork <序号> 或 /flux fork last");
+		lines.push("", "Usage: /flux fork <index> or /flux fork last");
 		return lines.join("\n");
 	}
 
@@ -136,7 +136,7 @@ export async function handleForkCommand(args: string[], ctx: any): Promise<strin
 	}
 
 	if (!targetEntryId) {
-		return `未找到 fork 点: ${args[0]}`;
+		return `Fork point not found: ${args[0]}`;
 	}
 
 	const result = await ctx.fork(targetEntryId, {
@@ -146,8 +146,8 @@ export async function handleForkCommand(args: string[], ctx: any): Promise<strin
 	});
 
 	if (result?.cancelled) {
-		return "fork 被取消 (可能被其他扩展拦截)";
+		return "fork cancelled (possibly intercepted by another extension)";
 	}
 
-	return `fork 成功: 从 ${targetEntryId.slice(0, 12)} 创建了新分支. 当前会话已切换到新分支.`;
+	return `fork success: from ${targetEntryId.slice(0, 12)} created new branch. Current session switched to new branch.`;
 }

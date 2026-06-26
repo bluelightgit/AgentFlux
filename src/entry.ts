@@ -1,23 +1,23 @@
 /**
- * AgentFlux Phase 1+2 — pi extension 主入口
- * 文档依据: docs/07 Phase 1+2, docs/17-19 模型能力/角色/多agent架构
+ * AgentFlux Phase 1+2 — pi extension main entry
+ * Docs: docs/07 Phase 1+2, docs/17-19 model capability/roles/multi-agent
  *
- * 用法:
+ * Usage:
  *   pi -e src/entry.ts
- *   pi -e src/entry.ts -p "..."            # print 模式验证 telemetry
- *   /flux                                   # 状态摘要
- *   /flux why                               # route inspector (含复杂度信号)
- *   /flux mode <eco|fast|accurate|balanced> # 切换预设 (运行时覆盖)
- *   /flux preference                        # 偏好画像
- *   /flux project                           # 项目成熟度面板
- *   /flux fork [last|序号|entryId]          # M3 对话树 fork
- *   /flux complexity                        # 显示 RGAO 复杂度信号
- *   /flux team status|plan|build|review|abort|roles|models|affinity
+ *   pi -e src/entry.ts -p "..."            # print mode telemetry verification
+ *   /flux                                   # main menu (TUI) / summary (non-TUI)
+ *   /flux why                               # route inspector (with complexity + git signals)
+ *   /flux mode <eco|fast|accurate|balanced> # switch preset (runtime override)
+ *   /flux preference                        # preference tuner
+ *   /flux project                           # project maturity panel
+ *   /flux fork [last|index|entryId]         # M3 conversation tree fork
+ *   /flux complexity                        # show RGAO complexity signal
+ *   /flux team status|plan|build|review|abort|roles|models|affinity|pipeline
+ *   /flux compact                           # compaction advice (B-dimension adaptive)
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Key, truncateToWidth, Container, Text, type SelectItem, SelectList, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
-import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 
@@ -36,6 +36,8 @@ import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } 
 import { handleTeamCommand, type TeamContext } from "./extension/team";
 import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
 import { loadPricing, type PricingTable } from "./core/pricing";
+import { showFluxMenu, type FluxMenuState, type FluxMenuCallbacks } from "./extension/flux-menu";
+import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -225,7 +227,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache/mode/fork. subcommands: why | mode <preset> | preference | project | fork | complexity",
+		description: "AgentFlux: routing/cache/mode/fork. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -238,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "complexity") return cmdComplexity(ctx);
 			if (sub === "team") {
 				if (!teamCtx) {
-					const msg = "team 上下文未初始化 (session_start 未完成?)";
+					const msg = "team context not initialized (session_start incomplete?)";
 					if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
 					return;
 				}
@@ -251,7 +253,44 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// 默认: 摘要
+			// No subcommand: show main menu (TUI) or summary (non-TUI)
+			if (!sub) {
+				const menuState: FluxMenuState = {
+					preset: state.preset,
+					expectedMode: state.expectedMode,
+					mode: state.mode,
+					fallback: decision?.fallback ?? "M1",
+					stage: state.stage,
+					role: state.role,
+					reason: decision?.reason ?? [],
+					complexitySignal,
+					compactionAdvice: analyzeCompaction(ctx),
+				};
+				const menuCallbacks: FluxMenuCallbacks = {
+					onModeChange: (preset: Preset) => {
+						runtimePreset = preset;
+						runRouter(ctx);
+						refreshCache(ctx);
+						setFluxStatus(ctx, getState);
+					},
+					onPreferenceChange: (_pref: PreferenceConfig) => {
+						runRouter(ctx);
+						refreshCache(ctx);
+						setFluxStatus(ctx, getState);
+					},
+					onTeamCommand: (teamSub: string, task: string) => {
+						if (teamCtx) handleTeamCommand([teamSub, task], ctx, teamCtx);
+					},
+					onReroute: () => {
+						runRouter(ctx);
+						refreshCache(ctx);
+						setFluxStatus(ctx, getState);
+					},
+				};
+				return showFluxMenu(ctx, menuState, menuCallbacks);
+			}
+
+			// Default: summary
 			refreshCache(ctx);
 			const text = buildFluxSummary(state, telemetry.path, state.branch);
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
@@ -260,86 +299,30 @@ export default function (pi: ExtensionAPI) {
 
 	async function cmdMode(preset: Preset | undefined, ctx: any) {
 		if (preset) {
-			// 直接指定 preset
 			runtimePreset = preset;
 			runRouter(ctx);
 			refreshCache(ctx);
 			setFluxStatus(ctx, getState);
-			const text = `preset → ${preset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
+			const text = `preset -> ${preset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 			return;
 		}
-
-		// 无参数: TUI 模式弹出 SelectList, 非 TUI 显示文本
+		// No arg: TUI opens main menu, non-TUI shows text
 		if (ctx.mode !== "tui") {
-			const valid = "eco | fast | accurate | balanced | custom";
-			const text = `当前 preset: ${state.preset}\n可选: ${valid}\n用法: /flux mode <preset>`;
+			const text = `Current preset: ${state.preset}\nOptions: eco | fast | accurate | balanced | custom\nUsage: /flux mode <preset>`;
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 			return;
 		}
-
-		const presets: { value: Preset; label: string; description: string }[] = [
-			{ value: "eco",       label: "eco",       description: "M1 单 agent, 最省钱" },
-			{ value: "fast",      label: "fast",      description: "M3 fork 探索, wall-clock 优先" },
-			{ value: "balanced",  label: "balanced",  description: "M2 主+子 agent, 平衡" },
-			{ value: "accurate",  label: "accurate",  description: "M6 多 agent 多模型, 质量至上" },
-			{ value: "custom",    label: "custom",    description: "自定义 (Level 2/3 接管)" },
-		];
-
-		const items: SelectItem[] = presets.map(p => ({
-			value: p.value,
-			label: p.value === state.preset ? `${p.label} (active)` : p.label,
-			description: p.description,
-		}));
-
-		const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: () => void) => {
-			const container = new Container();
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-			container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux · Mode Selector")), 1, 0));
-
-			const selectList = new SelectList(items, Math.min(items.length, 10), {
-				selectedPrefix: (t: string) => theme.fg("accent", t),
-				selectedText: (t: string) => theme.fg("accent", t),
-				description: (t: string) => theme.fg("muted", t),
-				scrollInfo: (t: string) => theme.fg("dim", t),
-				noMatch: (t: string) => theme.fg("warning", t),
-			});
-			selectList.onSelect = (item: any) => done(item.value);
-			selectList.onCancel = () => done(null);
-			container.addChild(selectList);
-
-			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
-			return {
-				render(width: number) { return container.render(width); },
-				invalidate() { container.invalidate(); },
-				handleInput(data: string) { selectList.handleInput(data); tui.requestRender(); },
-			};
-		}, { overlay: true });
-
-		if (!result) return;
-
-		const newPreset = result as Preset;
-		runtimePreset = newPreset;
-		runRouter(ctx);
-		refreshCache(ctx);
-		setFluxStatus(ctx, getState);
-		const text = `preset → ${newPreset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
-		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+		return showFluxMenu(ctx, makeMenuState(ctx), makeMenuCallbacks(ctx));
 	}
 
 	async function cmdPreference(ctx: any) {
-		const pref = loadPreference(ctx.cwd);
-		const v = pref.vector;
-
-		// 非 TUI: 显示文本
 		if (ctx.mode !== "tui") {
+			const pref = loadPreference(ctx.cwd);
+			const v = pref.vector;
 			const text = [
-				`Preference (docs/13)`,
-				`  profile    ${pref.profile}  →  expected ${state.expectedMode}`,
-				`  escalate   ${pref.escalate_hint}`,
-				``,
+				`Preference`,
+				`  profile    ${pref.profile} -> expected ${state.expectedMode}`,
 				`  vector (0-1)`,
 				`  cost_sensitivity        ${v.cost_sensitivity}`,
 				`  accuracy_priority       ${v.accuracy_priority}`,
@@ -347,75 +330,23 @@ export default function (pi: ExtensionAPI) {
 				`  parallelism_willingness ${v.parallelism_willingness}`,
 				`  multi_agent_willingness ${v.multi_agent_willingness}`,
 				``,
-				`TUI 模式下可用 ↑↓ 切换, ←→ 调节. 非 TUI 请编辑 .agentflux/agentflux.json`,
+				`Edit .agentflux/agentflux.json or use TUI for interactive tuner`,
 			].join("\n");
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 			return;
 		}
-
-		// TUI: SettingsList 五维调音台
-		const dimLabels: { id: string; label: string; values: string[]; getVal: (v: any) => string }[] = [
-			{ id: "cost_sensitivity",        label: "Cost Sensitivity",        values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.cost_sensitivity.toFixed(1) },
-			{ id: "accuracy_priority",       label: "Accuracy Priority",       values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.accuracy_priority.toFixed(1) },
-			{ id: "latency_priority",        label: "Latency Priority",        values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.latency_priority.toFixed(1) },
-			{ id: "parallelism_willingness", label: "Parallelism Willingness", values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.parallelism_willingness.toFixed(1) },
-			{ id: "multi_agent_willingness", label: "Multi-Agent Willingness", values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.multi_agent_willingness.toFixed(1) },
-		];
-
-		const items: SettingItem[] = dimLabels.map(d => ({
-			id: d.id,
-			label: d.label,
-			currentValue: d.getVal(v),
-			values: d.values,
-		}));
-
-		await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
-			const container = new Container();
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-			container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux · Preference Tuner")), 1, 0));
-			container.addChild(new Text(theme.fg("dim", `profile: ${pref.profile} → expected ${state.expectedMode}`), 0, 1));
-
-			const settingsList = new SettingsList(
-				items,
-				Math.min(items.length + 2, 15),
-				getSettingsListTheme(),
-				(id: string, newValue: string) => {
-					const num = parseFloat(newValue);
-					(pref.vector as any)[id] = num;
-					savePreference(ctx.cwd, pref);
-				},
-				() => done(undefined),
-			);
-			container.addChild(settingsList);
-
-			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • ←→ adjust • enter toggle • esc close"), 1, 0));
-			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-
-			return {
-				render(width: number) { return container.render(width); },
-				invalidate() { container.invalidate(); },
-				handleInput(data: string) { settingsList.handleInput?.(data); },
-			};
-		}, { overlay: true });
-
-		// 调音后重新路由
-		runRouter(ctx);
-		refreshCache(ctx);
-		setFluxStatus(ctx, getState);
-		const after = loadPreference(ctx.cwd);
-		const msg = `偏好已保存\nprofile ${after.profile} → expected ${state.expectedMode}\nmode ${state.mode}`;
-		if (ctx.hasUI) ctx.ui.notify(msg, "info");
+		return showFluxMenu(ctx, makeMenuState(ctx), makeMenuCallbacks(ctx));
 	}
 
 	function cmdProject(ctx: any) {
 		const text = [
-			`Project Maturity (docs/14)`,
+			`Project Maturity`,
 			`  stage    ${state.stage}    role ${state.role}`,
 			`  signals  file ${maturitySignals.fileCount}  commit ${maturitySignals.commitCount}  session ${profile?.maturity.signals.session_history ?? 0}`,
 			`  baseline_mode  ${profile?.baseline_mode ?? "?"}`,
 			`  delegate_impl  ${profile?.role.delegate_impl ?? false}`,
 			``,
-			`跃迁阈值: Seed→Growth(50file/20commit) →Established(300file/100commit) →Mature(多PR, Phase2+)`,
+			`Thresholds: Seed->Growth(50file/20commit) ->Established(300file/100commit) ->Mature`,
 			``,
 			`profile: ${join(fluxDir, "project-profile.json")}`,
 		].join("\n");
@@ -424,12 +355,35 @@ export default function (pi: ExtensionAPI) {
 
 	function cmdComplexity(ctx: any) {
 		if (!complexitySignal) {
-			const text = "复杂度信号未收集 (session_start 失败?)";
+			const text = "Complexity signal not collected (session_start failed?)";
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 			return;
 		}
 		const text = formatComplexitySignal(complexitySignal);
 		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+	}
+
+	function makeMenuState(ctx: any): FluxMenuState {
+		return {
+			preset: state.preset,
+			expectedMode: state.expectedMode,
+			mode: state.mode,
+			fallback: decision?.fallback ?? "M1",
+			stage: state.stage,
+			role: state.role,
+			reason: decision?.reason ?? [],
+			complexitySignal,
+			compactionAdvice: analyzeCompaction(ctx),
+		};
+	}
+
+	function makeMenuCallbacks(ctx: any): FluxMenuCallbacks {
+		return {
+			onModeChange: (p: Preset) => { runtimePreset = p; runRouter(ctx); refreshCache(ctx); setFluxStatus(ctx, getState); },
+			onPreferenceChange: () => { runRouter(ctx); refreshCache(ctx); setFluxStatus(ctx, getState); },
+			onTeamCommand: (s: string, t: string) => { if (teamCtx) handleTeamCommand([s, t], ctx, teamCtx); },
+			onReroute: () => { runRouter(ctx); refreshCache(ctx); setFluxStatus(ctx, getState); },
+		};
 	}
 
 	async function showInspector(ctx: any) {
@@ -446,7 +400,7 @@ export default function (pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const out: string[] = [theme.fg("accent", "┌─ AgentFlux · Route Inspector ─")];
 					for (const ln of lines) out.push("  " + theme.fg("text", truncateToWidth(ln, width - 2)));
-					out.push(theme.fg("dim", "  esc / q 关闭"));
+					out.push(theme.fg("dim", "  esc / q to close"));
 					return out;
 				},
 				invalidate() {},

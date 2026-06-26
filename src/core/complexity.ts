@@ -114,23 +114,23 @@ export function collectComplexitySignal(cwd: string, scope?: string): TaskComple
 	let mode: Mode = "M1";
 	if (fileCount <= 10 && loc <= 500 && importGraph.maxDepth <= 2) {
 		tier = 0; mode = "M1";
-		reason.push("FastPath: 小型项目 (code<=10, loc<=500, depth<=2)");
+		reason.push("FastPath: small project (code<=10, loc<=500, depth<=2)");
 	} else if (fileCount <= 50 && importGraph.maxDepth <= 4 && importGraph.couplingRatio < 0.3) {
 		tier = 1; mode = "M2";
-		reason.push("SubAgent: 中型项目 (code<=50, depth<=4, coupling<0.3)");
+		reason.push("SubAgent: medium project (code<=50, depth<=4, coupling<0.3)");
 	} else if (importGraph.maxDepth >= 6 || importGraph.couplingRatio >= 0.5 || fileCount > 200) {
 		tier = 3; mode = "M4";
-		reason.push(`DeepResearch: 高耦合 (depth>=6 或 coupling>=0.5 或 code>200)`);
+		reason.push(`DeepResearch: high complexity (depth>=6 or coupling>=0.5 or code>200)`);
 	} else {
 		tier = 2; mode = "M3";
-		reason.push("MultiAgent: 中高复杂度 (需 fork 探索或多视角)");
+		reason.push("MultiAgent: medium-high complexity (needs fork exploration or multi-perspective)");
 	}
 
 	// git 信号补充
-	if (hotspotFiles > 5) reason.push(`热点文件多 (${hotspotFiles}), 倾向仔细 review`);
-	if (testCoverageEstimate < 0.2 && fileCount > 10) reason.push(`测试覆盖率低 (${(testCoverageEstimate*100).toFixed(0)}%), 倾向加 tester`);
-	if (todoDensity > 5) reason.push(`技术债高 (TODO/FIXME ${todoDensity.toFixed(1)}/kloc), 倾向 refactor`);
-	if (recentCommits > 20) reason.push(`活跃项目 (7天 ${recentCommits} commits), 倾向并行`);
+	if (hotspotFiles > 5) reason.push(`many hotspots (${hotspotFiles}), lean toward careful review`);
+	if (testCoverageEstimate < 0.2 && fileCount > 10) reason.push(`low test coverage (${(testCoverageEstimate*100).toFixed(0)}%), lean toward adding tester`);
+	if (todoDensity > 5) reason.push(`high tech debt (TODO/FIXME ${todoDensity.toFixed(1)}/kloc), lean toward refactor`);
+	if (recentCommits > 20) reason.push(`active project (${recentCommits} commits in 7d), lean toward parallel`);
 
 	return {
 		fileCount, loc, totalChurn,
@@ -280,21 +280,21 @@ function extractImports(content: string, filePath: string): string[] {
 	return imports.filter(i => i.startsWith(".") || i.startsWith("/") || i.startsWith("@/"));
 }
 
-/** 格式化复杂度信号 (用于 /flux why, /flux complexity) */
+/** Format complexity signal for display (used by /flux why, /flux complexity) */
 export function formatComplexitySignal(s: TaskComplexitySignal): string {
 	const tierNames = ["FastPath", "SubAgent", "MultiAgent", "DeepResearch"];
 	const lines = [
-		`复杂度信号 (git churn-based):`,
-		`  files    ${s.fileCount} (git churn 识别)`,
+		`Complexity Signal (git churn-based):`,
+		`  files    ${s.fileCount} (git churn detected)`,
 		`  loc      ${s.loc}`,
-		`  churn    ${s.totalChurn} (总变更行数)`,
-		`  depth    ${s.dependencyDepth} (最长 import 链)`,
-		`  coupling ${s.crossModuleCoupling.toFixed(2)} (被多文件引用的模块比)`,
+		`  churn    ${s.totalChurn} (total changed lines)`,
+		`  depth    ${s.dependencyDepth} (longest import chain)`,
+		`  coupling ${s.crossModuleCoupling.toFixed(2)} (multi-imported module ratio)`,
 		`  symbols  ${s.symbolDensity.toFixed(3)}/line`,
-		`  ── git 信号 ──`,
-		`  hotspots ${s.hotspotFiles} (commits>3 的文件)`,
-		`  recent   ${s.recentCommits} commits (7天)`,
-		`  testCov  ${(s.testCoverageEstimate * 100).toFixed(0)}% (测试文件/代码文件)`,
+		`  ── git signals ──`,
+		`  hotspots ${s.hotspotFiles} (files with >3 commits)`,
+		`  recent   ${s.recentCommits} commits (7d)`,
+		`  testCov  ${(s.testCoverageEstimate * 100).toFixed(0)}% (test/source ratio)`,
 		`  todo     ${s.todoDensity.toFixed(1)}/kloc`,
 		`  ── top churn ──`,
 	];

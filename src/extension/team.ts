@@ -3,14 +3,14 @@
  * 文档依据: docs/18-agent-roles.md, docs/19-multi-agent-architecture.md
  *
  * 命令:
- *   /flux team status        — 显示所有实例状态 + 黑板
- *   /flux team plan <task>   — 创建 planner 实例分析任务
- *   /flux team build <task>  — 创建 implementer 实例执行任务
- *   /flux team review        — 创建 reviewer 实例审查当前变更
- *   /flux team abort <name>  — 终止指定实例
- *   /flux team roles         — 列出所有角色定义
- *   /flux team models        — 列出所有模型 + 能力 + 分配
- *   /flux team affinity      — 显示每个角色的亲和度排名
+ *   /flux team status        — Show all agent instances + blackboard
+ *   /flux team plan <task>   — Launch planner agent for task analysis
+ *   /flux team build <task>  — 创建 implementer instance执行任务
+ *   /flux team review        — Launch reviewer agent for current changes
+ *   /flux team abort <name>  — Abort a specific instance
+ *   /flux team roles         — List all role definitions
+ *   /flux team models        — List all models + capability + assignment
+ *   /flux team affinity      — Show per-role model affinity ranking
  */
 
 import { loadAllRoles, createInstance, loadRegistry, saveRegistry, formatRoleList, formatInstanceList, type RoleDefinition, type RoleInstance } from "../core/role-manager";
@@ -52,15 +52,15 @@ export async function handleTeamCommand(
 	// 默认: 显示帮助
 	const help = [
 		"AgentFlux Team Commands:",
-		"  /flux team status         — 显示所有实例状态 + 黑板",
-		"  /flux team plan <task>    — 创建 planner 实例分析任务",
-		"  /flux team build <task>   — 创建 implementer 实例执行任务 (自动拼接 planner handoff)",
-		"  /flux team review         — 创建 reviewer 实例审查 (自动拼接 implementer handoff)",
-		"  /flux team pipeline <task>— M5 管道: plan→build→review 自动串联",
-		"  /flux team abort <name>   — 终止指定实例",
-		"  /flux team roles          — 列出所有角色定义",
-		"  /flux team models         — 列出所有模型 + 能力 + 分配",
-		"  /flux team affinity       — 显示每个角色的亲和度排名",
+		"  /flux team status         — Show all agent instances + blackboard",
+		"  /flux team plan <task>    — Launch planner agent for task analysis",
+		"  /flux team build <task>   — Launch implementer agent (auto-chains planner handoff)",
+		"  /flux team review         — Launch reviewer agent (auto-chains implementer handoff)",
+		"  /flux team pipeline <task>— M5 pipeline: plan->build->review auto-chain",
+		"  /flux team abort <name>   — Abort a specific instance",
+		"  /flux team roles          — List all role definitions",
+		"  /flux team models         — List all models + capability + assignment",
+		"  /flux team affinity       — Show per-role model affinity ranking",
 	].join("\n");
 	if (ctx.hasUI) ctx.ui.notify(help, "info");
 	else console.log(help);
@@ -100,7 +100,7 @@ function cmdTeamModels(ctx: any, teamCtx: TeamContext): void {
 		lines.push(`  ${name.padEnd(20)} ${formatCapability(cap)}`);
 		if (e.provider) lines.push(`    provider=${e.provider}  ctx=${e.contextWindow}`);
 	}
-	if (lines.length <= 2) lines.push("  (models.json 中无模型定义)");
+	if (lines.length <= 2) lines.push("  (models.json 中无models defined in models.json)");
 	if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
 	else console.log(lines.join("\n"));
 }
@@ -130,7 +130,7 @@ function cmdTeamAffinity(ctx: any, teamCtx: TeamContext): void {
 
 async function cmdTeamPlan(task: string, ctx: any, teamCtx: TeamContext): Promise<void> {
 	if (!task) {
-		const msg = "用法: /flux team plan <任务描述>";
+		const msg = "Usage: /flux team plan <task description>";
 		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 		return;
 	}
@@ -139,22 +139,22 @@ async function cmdTeamPlan(task: string, ctx: any, teamCtx: TeamContext): Promis
 
 async function cmdTeamBuild(task: string, ctx: any, teamCtx: TeamContext): Promise<void> {
 	if (!task) {
-		const msg = "用法: /flux team build <任务描述>";
+		const msg = "Usage: /flux team build <task description>";
 		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 		return;
 	}
-	// M5 管道: 自动查找最近的 planner handoff, 拼接到任务前
+	// M5 pipeline: auto-find latest planner handoff, prepend to task
 	const board = new SharedBoard(teamCtx.fluxDir);
 	const plannerHandoff = findLatestHandoff(teamCtx.fluxDir, "planner");
 	if (plannerHandoff) {
 		task = `[Previous Planner Handoff]\n${plannerHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\n${task}`;
-		console.error(`[flux team] build: 拼接了 planner handoff (${plannerHandoff.length} chars)`);
+		console.error(`[flux team] build: chained planner handoff (${plannerHandoff.length} chars)`);
 	}
 	await runTeamAgent("implementer", task, ctx, teamCtx, "planner");
 }
 
 async function cmdTeamReview(ctx: any, teamCtx: TeamContext): Promise<void> {
-	// M5 管道: 自动查找最近的 implementer handoff
+	// M5 pipeline: auto-find latest implementer handoff
 	const board = new SharedBoard(teamCtx.fluxDir);
 	const implHandoff = findLatestHandoff(teamCtx.fluxDir, "implementer");
 
@@ -172,7 +172,7 @@ async function cmdTeamReview(ctx: any, teamCtx: TeamContext): Promise<void> {
 	if (implHandoff) {
 		task = `[Previous Implementer Handoff]\n${implHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\nReview the implementation described above.`;
 		if (diff) task += `\n\nAlso review the current git diff:\n\n\`\`\`diff\n${diff.slice(0, 6000)}\n\`\`\``;
-		console.error(`[flux team] review: 拼接了 implementer handoff (${implHandoff.length} chars)`);
+		console.error(`[flux team] review: chained implementer handoff (${implHandoff.length} chars)`);
 	} else if (diff) {
 		task = `Review the following git diff:\n\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\`\n\nProvide structured review.`;
 	} else {
@@ -183,11 +183,11 @@ async function cmdTeamReview(ctx: any, teamCtx: TeamContext): Promise<void> {
 
 async function cmdTeamPipeline(task: string, ctx: any, teamCtx: TeamContext): Promise<void> {
 	if (!task) {
-		const msg = "用法: /flux team pipeline <任务描述>\n自动执行 plan→build→review 管道";
+		const msg = "Usage: /flux team pipeline <task description>\nauto-run plan→build→review pipeline";
 		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 		return;
 	}
-	const banner = `M5 Pipeline: plan → build → review\n任务: ${task.slice(0, 200)}`;
+	const banner = `M5 Pipeline: plan → build → review\nTask: ${task.slice(0, 200)}`;
 	if (ctx.hasUI) ctx.ui.notify(banner, "info");
 	console.error(`[flux team] === ${banner} ===`);
 
@@ -220,21 +220,21 @@ async function cmdTeamPipeline(task: string, ctx: any, teamCtx: TeamContext): Pr
 	}
 	await runTeamAgent("reviewer", reviewTask, ctx, teamCtx, "implementer");
 
-	const done = "M5 Pipeline 完成. 用 /flux team status 查看结果.";
+	const done = "M5 Pipeline Done. use /flux team status to see results.";
 	if (ctx.hasUI) ctx.ui.notify(done, "info");
 	console.error(`[flux team] === ${done} ===`);
 }
 
 async function cmdTeamAbort(name: string, ctx: any, teamCtx: TeamContext): Promise<void> {
 	if (!name) {
-		const msg = "用法: /flux team abort <实例名>";
+		const msg = "Usage: /flux team abort <instance name>";
 		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 		return;
 	}
 	const registry = loadRegistry(teamCtx.fluxDir);
 	const inst = registry.instances.find(i => i.name === name);
 	if (!inst) {
-		const msg = `实例 ${name} 不存在`;
+		const msg = `instance ${name} does not exist`;
 		if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
 		return;
 	}
@@ -242,7 +242,7 @@ async function cmdTeamAbort(name: string, ctx: any, teamCtx: TeamContext): Promi
 	saveRegistry(teamCtx.fluxDir, registry);
 	const board = new SharedBoard(teamCtx.fluxDir);
 	board.updateAgentStatus(name, { status: "failed" });
-	const msg = `实例 ${name} 已终止`;
+	const msg = `instance ${name} 已终止`;
 	if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 }
 
@@ -258,31 +258,31 @@ async function runTeamAgent(
 	const roles = loadAllRoles(teamCtx.cwd, teamCtx.modelsConfig);
 	const role = roles.get(roleName);
 	if (!role) {
-		const msg = `角色 ${roleName} 不存在。可用角色: ${[...roles.keys()].join(", ")}`;
+		const msg = `role ${roleName} does not exist。可用role: ${[...roles.keys()].join(", ")}`;
 		if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
 		return;
 	}
 
 	const models = teamCtx.modelsConfig?.models ?? {};
 	if (Object.keys(models).length === 0) {
-		const msg = "models.json 中无模型定义, 无法启动 team agent";
+		const msg = "models.json 中无models defined in models.json, 无法Launching team agent";
 		if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
 		return;
 	}
 
-	// 创建实例
+	// 创建instance
 	const sessionId = `flux-team-${roleName}-${Date.now()}`;
 	const instance = createInstance(roleName, role, models, task, sessionId);
 	const registry = loadRegistry(teamCtx.fluxDir);
 	registry.instances.push(instance);
 	saveRegistry(teamCtx.fluxDir, registry);
 
-	// 更新黑板
+	// 更新blackboard
 	const board = new SharedBoard(teamCtx.fluxDir);
 	board.updateAgentStatus(instance.name, { status: "running", workingOn: task.slice(0, 100) });
 
 	const modelInfo = `${instance.model} (${instance.assignSource.source})`;
-	const startMsg = `启动 ${instance.name} [${roleName}] → ${modelInfo}\n任务: ${task.slice(0, 200)}`;
+	const startMsg = `Launching ${instance.name} [${roleName}] → ${modelInfo}\nTask: ${task.slice(0, 200)}`;
 	if (ctx.hasUI) ctx.ui.notify(startMsg, "info");
 	console.error(`[flux team] ${startMsg}`);
 
@@ -300,7 +300,7 @@ async function runTeamAgent(
 			pricing: teamCtx.pricing,
 		});
 
-		// 更新实例状态
+		// 更新instance状态
 		const reg = loadRegistry(teamCtx.fluxDir);
 		const inst = reg.instances.find(i => i.name === instance.name);
 		if (inst) {
@@ -309,8 +309,8 @@ async function runTeamAgent(
 			saveRegistry(teamCtx.fluxDir, reg);
 		}
 
-		// 更新黑板
-		board.updateAgentStatus(instance.name, { status: "done", output: "完成" });
+		// 更新blackboard
+		board.updateAgentStatus(instance.name, { status: "done", output: "Done" });
 
 		// 写 handoff (如果有输出)
 		if (result.output) {
@@ -326,7 +326,7 @@ async function runTeamAgent(
 		if (ctx.hasUI) ctx.ui.notify(summary, "info");
 		console.error(`[flux team] ${instance.name} done:\n${summary}`);
 	} catch (e: any) {
-		// 更新实例状态为失败
+		// 更新instance状态为失败
 		const reg = loadRegistry(teamCtx.fluxDir);
 		const inst = reg.instances.find(i => i.name === instance.name);
 		if (inst) {
@@ -342,7 +342,7 @@ async function runTeamAgent(
 
 // ──────────────────────────────── 辅助 ────────────────────────────────
 
-/** 查找最近的某个角色的 handoff 文件内容 */
+/** 查找最近的某个role的 handoff 文件内容 */
 function findLatestHandoff(fluxDir: string, rolePrefix: string): string | null {
 	const { existsSync, readdirSync, readFileSync, statSync } = require("node:fs");
 	const dir = join(fluxDir, "shared", "handoffs");
