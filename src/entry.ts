@@ -55,6 +55,7 @@ export default function (pi: ExtensionAPI) {
 	let decision: RoutingDecision | null = null;
 	let maturitySignals = { fileCount: 0, commitCount: 0 };
 	let runtimePreset: Preset | undefined;
+	let routeHint: string | null = null;  // non-intrusive route suggestion for footer
 	let pricingTable: PricingTable | null = null;
 	let complexitySignal: TaskComplexitySignal | null = null;
 	let teamCtx: TeamContext | null = null;
@@ -94,22 +95,14 @@ export default function (pi: ExtensionAPI) {
 		const warnings = validateConfig(config);
 		for (const w of warnings) decision.reason.push(`warn:${w}`);
 
-		// F2-10: override_mode suggest — ask user if recommended mode differs from preset expectation
-		if (config.routing.override_mode === "suggest" && ctx.mode === "tui" && decision.confidence >= 0.7) {
+		// F2-10: override_mode suggest — non-intrusive footer hint (no popup)
+		if (config.routing.override_mode === "suggest" && decision.confidence >= 0.7) {
 			const expected = presetToExpectedMode(state.preset);
 			if (decision.mode !== expected) {
-				const msg = `AgentFlux route suggestion:\n  preset ${state.preset} expects ${expected}\n  router recommends ${decision.mode} (confidence ${(decision.confidence*100).toFixed(0)}%)\n  reason: ${decision.reason.join("; ")}\n\nAccept ${decision.mode}?`;
-				ctx.ui.confirm("AgentFlux Route Override", msg, { timeout: 10000 }).then((accepted: boolean) => {
-					if (accepted) {
-						console.error(`[flux] override: user accepted ${decision.mode}`);
-					} else {
-						// Revert to expected mode
-						decision!.mode = expected;
-						state.mode = expected;
-						console.error(`[flux] override: user rejected, keeping ${expected}`);
-					}
-					setFluxStatus(ctx, getState);
-				}).catch(() => {});
+			routeHint = `router suggests ${decision.mode} (${(decision.confidence*100).toFixed(0)}%) | preset ${state.preset} expects ${expected}`;
+			console.error(`[flux] route hint: ${routeHint}`);
+			} else {
+			routeHint = null;
 			}
 		}
 
@@ -164,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 
 		runRouter(ctx);
 		setFluxStatus(ctx, getState);
-		installFooter(ctx, getState);
+		installFooter(ctx, getState, () => routeHint);
 		if (ctx.hasUI) ctx.ui.notify(`AgentFlux · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode} · ${state.mode}`, "info");
 		else console.error(`[flux] init · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode} · mode ${state.mode}`);
 	});

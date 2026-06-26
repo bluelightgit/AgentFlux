@@ -1,30 +1,25 @@
 /**
  * AgentFlux Extension — Main /flux menu (TUI)
  *
- * Full-width settings-style menu (not overlay) with submenus:
+ * Full-width overlay menu with submenus:
  *   - Mode: SelectList submenu (eco/fast/balanced/accurate/custom)
- *   - Preference: Custom progress-bar tuner with ←→ adjustment
- *   - Project: Info display
- *   - Complexity: Info display
- *   - Compact: Info display
- *   - Team: Submenu (plan/build/review/status)
+ *   - Preference: Custom progress-bar tuner with <-/-> adjustment
+ *   - Team: Submenu (plan/build/review/pipeline/status)
+ *   - Info items: Project, Complexity, Compaction, Route, Reason
  *
- * All text in English per user request.
+ * All text in English.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import {
 	Container, Spacer, Text, type SelectItem, SelectList, type SettingItem, SettingsList,
 	type Component, truncateToWidth,
 } from "@earendil-works/pi-tui";
-import { join } from "node:path";
 import { loadPreference, savePreference } from "../core/config";
 import type { Preset, PreferenceConfig, PreferenceVector } from "../core/types";
-import { formatComplexitySignal, type TaskComplexitySignal } from "../core/complexity";
-import { formatCompactionAdvice, type CompactionAdvice } from "./compaction-advisor";
-
-// ── State passed from entry.ts ──
+import type { TaskComplexitySignal } from "../core/complexity";
+import type { CompactionAdvice } from "./compaction-advisor";
 
 export interface FluxMenuState {
 	preset: Preset;
@@ -53,10 +48,9 @@ export async function showFluxMenu(
 	callbacks: FluxMenuCallbacks,
 ): Promise<void> {
 	if (ctx.mode !== "tui") {
-		// Non-TUI fallback: print summary
 		const lines = [
 			"AgentFlux Menu (TUI required for interactive mode)",
-			`  mode         ${state.preset} → ${state.mode}`,
+			`  mode         ${state.preset} -> ${state.mode}`,
 			`  stage        ${state.stage} / ${state.role}`,
 			`  reason       ${state.reason.join("; ")}`,
 			"",
@@ -68,13 +62,17 @@ export async function showFluxMenu(
 
 	const pref = loadPreference(ctx.cwd);
 
+	// Capture tui + theme for submenus (closure)
+	let tuiRef: any = null;
+	let themeRef: any = null;
+
 	const items: SettingItem[] = [
 		{
 			id: "mode",
 			label: "Mode",
-			description: "Select working mode preset. eco=M1 single-agent, fast=M3 fork, balanced=M2 subagent, accurate=M6 heterogeneous team, custom=manual",
+			description: "Working mode preset. eco=M1 single-agent, fast=M3 fork, balanced=M2 subagent, accurate=M6 team, custom=manual",
 			currentValue: state.preset,
-			submenu: (_current, done) => new ModeSubmenu(state.preset, (preset) => {
+			submenu: (_current, done) => new ModeSubmenu(state.preset, themeRef, (preset) => {
 				callbacks.onModeChange(preset);
 				done(preset);
 			}, () => done()),
@@ -82,9 +80,9 @@ export async function showFluxMenu(
 		{
 			id: "preference",
 			label: "Preference",
-			description: "5-dimension routing preference tuner: cost sensitivity, accuracy priority, latency priority, parallelism willingness, multi-agent willingness",
+			description: "5-dimension routing preference tuner. Use <-/-> to adjust, Up/Down to navigate.",
 			currentValue: pref.profile,
-			submenu: (_current, done) => new PreferenceSubmenu(ctx.cwd, pref, (newPref) => {
+			submenu: (_current, done) => new PreferenceSubmenu(ctx.cwd, pref, themeRef, (newPref) => {
 				callbacks.onPreferenceChange(newPref);
 				callbacks.onReroute();
 			}, () => done()),
@@ -99,10 +97,10 @@ export async function showFluxMenu(
 			id: "complexity",
 			label: "Complexity",
 			description: state.complexitySignal
-				? `tier ${state.complexitySignal.complexityTier} → ${state.complexitySignal.recommendedMode} · ${state.complexitySignal.fileCount} files, ${state.complexitySignal.loc} LOC, depth ${state.complexitySignal.dependencyDepth}`
+				? `tier ${state.complexitySignal.complexityTier} -> ${state.complexitySignal.recommendedMode} | ${state.complexitySignal.fileCount} files, ${state.complexitySignal.loc} LOC, depth ${state.complexitySignal.dependencyDepth}`
 				: "Not collected",
 			currentValue: state.complexitySignal
-				? `tier${state.complexitySignal.complexityTier} → ${state.complexitySignal.recommendedMode}`
+				? `tier${state.complexitySignal.complexityTier} -> ${state.complexitySignal.recommendedMode}`
 				: "N/A",
 		},
 		{
@@ -112,9 +110,9 @@ export async function showFluxMenu(
 			currentValue: state.compactionAdvice?.action ?? "N/A",
 		},
 		{
-			id: "route-info",
+			id: "route",
 			label: "Route",
-			description: `Mode ${state.mode} (fallback ${state.fallback}) · expected ${state.expectedMode}`,
+			description: `Mode ${state.mode} (fallback ${state.fallback}) | expected ${state.expectedMode}`,
 			currentValue: `${state.mode}`,
 		},
 		{
@@ -128,7 +126,7 @@ export async function showFluxMenu(
 			label: "Team",
 			description: "Multi-agent team operations: plan, build, review, pipeline, status",
 			currentValue: "open",
-			submenu: (_current, done) => new TeamSubmenu((sub, task) => {
+			submenu: (_current, done) => new TeamSubmenu(themeRef, (sub, task) => {
 				callbacks.onTeamCommand(sub, task);
 				done();
 			}, () => done()),
@@ -136,42 +134,46 @@ export async function showFluxMenu(
 	];
 
 	await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
+		tuiRef = _tui;
+		themeRef = theme;
+
 		const container = new Container();
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux Control Panel")), 0, 0));
-		container.addChild(new Text(theme.fg("dim", `stage: ${state.stage} · role: ${state.role} · mode: ${state.mode}`), 0, 1));
+		container.addChild(new Text(theme.fg("dim", `stage: ${state.stage} | role: ${state.role} | mode: ${state.mode}`), 0, 1));
 		container.addChild(new Spacer(1));
 
 		const settingsList = new SettingsList(
 			items,
 			Math.min(items.length + 2, 15),
 			getSettingsListTheme(),
-			(_id: string, _newValue: string) => {},
+			(_id: string, _newValue: string) => { tuiRef.requestRender(); },
 			() => done(),
 		);
 		container.addChild(settingsList);
-		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 
 		return {
 			render(width: number) { return container.render(width); },
 			invalidate() { container.invalidate(); },
-			handleInput(data: string) { settingsList.handleInput?.(data); },
+			handleInput(data: string) {
+				settingsList.handleInput?.(data);
+				tuiRef.requestRender();
+			},
 		};
-	});
+	}, { overlay: true, overlayOptions: { width: "100%" } });
 }
 
-// ── Mode Submenu (SelectList) ──
+// ── Mode Submenu ──
 
 class ModeSubmenu extends Container {
-	constructor(currentPreset: Preset, onSelect: (preset: Preset) => void, onCancel: () => void) {
+	constructor(currentPreset: Preset, theme: any, onSelect: (preset: Preset) => void, onCancel: () => void) {
 		super();
 
 		const presets: { value: Preset; label: string; description: string }[] = [
-			{ value: "eco",      label: "eco",      description: "M1 single-agent · lowest cost" },
-			{ value: "fast",     label: "fast",     description: "M3 fork exploration · wall-clock priority" },
-			{ value: "balanced", label: "balanced", description: "M2 main + subagent · balanced" },
-			{ value: "accurate", label: "accurate", description: "M6 heterogeneous team · quality first" },
-			{ value: "custom",   label: "custom",   description: "Manual · Level 2/3 takes over" },
+			{ value: "eco",      label: "eco",      description: "M1 single-agent | lowest cost" },
+			{ value: "fast",     label: "fast",     description: "M3 fork exploration | wall-clock priority" },
+			{ value: "balanced", label: "balanced", description: "M2 main + subagent | balanced" },
+			{ value: "accurate", label: "accurate", description: "M6 heterogeneous team | quality first" },
+			{ value: "custom",   label: "custom",   description: "Manual | Level 2/3 takes over" },
 		];
 
 		const items: SelectItem[] = presets.map(p => ({
@@ -180,19 +182,17 @@ class ModeSubmenu extends Container {
 			description: p.description,
 		}));
 
-		this.addChild(new Text("", 0, 0));
-		this.addChild(new Text("Select Mode Preset", 0, 0));
+		this.addChild(new Text(theme ? theme.fg("accent", "Select Mode Preset") : "Select Mode Preset", 0, 0));
 		this.addChild(new Spacer(1));
 
 		const selectList = new SelectList(items, Math.min(items.length, 10), {
-			selectedPrefix: (t: string) => t,
-			selectedText: (t: string) => t,
-			description: (t: string) => t,
-			scrollInfo: (t: string) => t,
-			noMatch: (t: string) => t,
+			selectedPrefix: (t: string) => theme ? theme.fg("accent", t) : t,
+			selectedText: (t: string) => theme ? theme.fg("accent", t) : t,
+			description: (t: string) => theme ? theme.fg("muted", t) : t,
+			scrollInfo: (t: string) => theme ? theme.fg("dim", t) : t,
+			noMatch: (t: string) => theme ? theme.fg("warning", t) : t,
 		});
 
-		// Pre-select current
 		const idx = presets.findIndex(p => p.value === currentPreset);
 		if (idx >= 0) selectList.setSelectedIndex(idx);
 
@@ -201,11 +201,11 @@ class ModeSubmenu extends Container {
 		this.addChild(selectList);
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text("Up/Down navigate · Enter select · Esc cancel", 0, 0));
+		this.addChild(new Text(theme ? theme.fg("dim", "Up/Down navigate | Enter select | Esc cancel") : "Up/Down navigate | Enter select | Esc cancel", 0, 0));
 	}
 }
 
-// ── Preference Submenu (progress bar + ←→ adjustment) ──
+// ── Preference Submenu (progress bar + <-/-> adjustment) ──
 
 interface PrefDimension {
 	key: keyof PreferenceVector;
@@ -224,24 +224,25 @@ const PREF_DIMENSIONS: PrefDimension[] = [
 class PreferenceSubmenu implements Component {
 	private cwd: string;
 	private pref: PreferenceConfig;
+	private theme: any;
 	private onChange: (pref: PreferenceConfig) => void;
 	private onCancel: () => void;
 	private selectedIdx = 0;
-	private theme: any;
 
-	constructor(cwd: string, pref: PreferenceConfig, onChange: (pref: PreferenceConfig) => void, onCancel: () => void) {
+	constructor(cwd: string, pref: PreferenceConfig, theme: any, onChange: (pref: PreferenceConfig) => void, onCancel: () => void) {
 		this.cwd = cwd;
 		this.pref = { ...pref, vector: { ...pref.vector } };
+		this.theme = theme;
 		this.onChange = onChange;
 		this.onCancel = onCancel;
 	}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
-
+		const th = this.theme;
 		lines.push("");
-		lines.push(this.theme ? this.theme.fg("accent", this.theme.bold("Preference Tuner")) : "Preference Tuner");
-		lines.push(this.theme ? this.theme.fg("dim", `profile: ${this.pref.profile} · ←→ adjust · ↑↓ navigate · Esc save & close`) : `profile: ${this.pref.profile}`);
+		lines.push(th ? th.fg("accent", th.bold("Preference Tuner")) : "Preference Tuner");
+		lines.push(th ? th.fg("dim", `profile: ${this.pref.profile} | <-/-> adjust | Up/Down navigate | Esc save & close`) : `profile: ${this.pref.profile}`);
 		lines.push("");
 
 		for (let i = 0; i < PREF_DIMENSIONS.length; i++) {
@@ -258,112 +259,97 @@ class PreferenceSubmenu implements Component {
 			const labelPad = dim.label.padEnd(24);
 			const line = `${prefix}${labelPad} [${bar}] ${valStr}`;
 
-			if (this.theme) {
-				const styled = selected
-					? this.theme.fg("accent", line)
-					: line;
-				lines.push(truncateToWidth(styled, width));
+			if (th) {
+				lines.push(truncateToWidth(selected ? th.fg("accent", line) : line, width));
 			} else {
 				lines.push(truncateToWidth(line, width));
 			}
 
 			if (selected) {
-				lines.push(this.theme ? this.theme.fg("dim", `    ${dim.description}`) : `    ${dim.description}`);
+				lines.push(th ? th.fg("dim", `    ${dim.description}`) : `    ${dim.description}`);
 			}
 		}
 
 		lines.push("");
-		lines.push(this.theme ? this.theme.fg("dim", "  ←→ adjust · ↑↓ navigate · Esc save & close") : "  ←→ adjust · ↑↓ navigate · Esc save & close");
-
+		lines.push(th ? th.fg("dim", "  <-/-> adjust | Up/Down navigate | Esc save & close") : "  <-/-> adjust | Up/Down navigate | Esc save & close");
 		return lines;
 	}
 
 	invalidate(): void {}
 
 	handleInput(data: string): void {
-		// Up/Down: navigate dimensions
-		if (data === "\x1b[A" || data === "k") { // Up
+		if (data === "\x1b[A" || data === "k") {
 			this.selectedIdx = (this.selectedIdx - 1 + PREF_DIMENSIONS.length) % PREF_DIMENSIONS.length;
 			return;
 		}
-		if (data === "\x1b[B" || data === "j") { // Down
+		if (data === "\x1b[B" || data === "j") {
 			this.selectedIdx = (this.selectedIdx + 1) % PREF_DIMENSIONS.length;
 			return;
 		}
-		// Left/Right: adjust value
-		if (data === "\x1b[D" || data === "h") { // Left
+		if (data === "\x1b[D" || data === "h") {
 			const dim = PREF_DIMENSIONS[this.selectedIdx];
-			const cur = this.pref.vector[dim.key];
-			const newVal = Math.max(0, Math.round((cur - 0.1) * 10) / 10);
-			this.pref.vector[dim.key] = newVal;
-			this.save();
+			this.pref.vector[dim.key] = Math.max(0, Math.round((this.pref.vector[dim.key] - 0.1) * 10) / 10);
+			savePreference(this.cwd, this.pref);
 			return;
 		}
-		if (data === "\x1b[C" || data === "l") { // Right
+		if (data === "\x1b[C" || data === "l") {
 			const dim = PREF_DIMENSIONS[this.selectedIdx];
-			const cur = this.pref.vector[dim.key];
-			const newVal = Math.min(1, Math.round((cur + 0.1) * 10) / 10);
-			this.pref.vector[dim.key] = newVal;
-			this.save();
+			this.pref.vector[dim.key] = Math.min(1, Math.round((this.pref.vector[dim.key] + 0.1) * 10) / 10);
+			savePreference(this.cwd, this.pref);
 			return;
 		}
-		// Esc: save & close
 		if (data === "\x1b" || data === "\x1b\x1b") {
-			this.save();
 			this.onChange(this.pref);
 			this.onCancel();
 			return;
 		}
-	}
-
-	private save(): void {
-		savePreference(this.cwd, this.pref);
-		this.onChange(this.pref);
 	}
 }
 
 // ── Team Submenu ──
 
 class TeamSubmenu implements Component {
+	private theme: any;
 	private onSelect: (sub: string, task: string) => void;
 	private onCancel: () => void;
 	private selectedIdx = 0;
-	private theme: any;
 
 	private options = [
-		{ value: "status",    label: "Team Status",       description: "Show all agent instances + blackboard" },
-		{ value: "plan",      label: "Plan",              description: "Launch planner agent for task analysis" },
-		{ value: "build",     label: "Build",             description: "Launch implementer agent (auto-chains planner handoff)" },
-		{ value: "review",    label: "Review",            description: "Launch reviewer agent (auto-chains implementer handoff + git diff)" },
-		{ value: "pipeline",  label: "Pipeline",          description: "Run plan→build→review in sequence" },
-		{ value: "roles",     label: "Roles",             description: "List all role definitions" },
-		{ value: "models",    label: "Models",            description: "List all models + capability vectors" },
-		{ value: "affinity",  label: "Affinity",          description: "Show per-role model affinity ranking" },
+		{ value: "status",   label: "Status",    description: "Show all agent instances + blackboard" },
+		{ value: "plan",     label: "Plan",       description: "Launch planner agent for task analysis" },
+		{ value: "build",    label: "Build",      description: "Launch implementer (auto-chains planner handoff)" },
+		{ value: "review",   label: "Review",     description: "Launch reviewer (auto-chains implementer handoff)" },
+		{ value: "pipeline", label: "Pipeline",   description: "Run plan->build->review in sequence" },
+		{ value: "roles",    label: "Roles",      description: "List all role definitions" },
+		{ value: "models",   label: "Models",     description: "List all models + capability vectors" },
+		{ value: "affinity", label: "Affinity",   description: "Show per-role model affinity ranking" },
 	];
 
-	constructor(onSelect: (sub: string, task: string) => void, onCancel: () => void) {
+	constructor(theme: any, onSelect: (sub: string, task: string) => void, onCancel: () => void) {
+		this.theme = theme;
 		this.onSelect = onSelect;
 		this.onCancel = onCancel;
 	}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		const th = this.theme;
 		lines.push("");
-		lines.push(this.theme ? this.theme.fg("accent", this.theme.bold("Team Operations")) : "Team Operations");
+		lines.push(th ? th.fg("accent", th.bold("Team Operations")) : "Team Operations");
 		lines.push("");
 
 		for (let i = 0; i < this.options.length; i++) {
 			const opt = this.options[i];
 			const selected = i === this.selectedIdx;
 			const prefix = selected ? "▶ " : "  ";
-			const line = `${prefix}${opt.label.padEnd(16)} ${opt.description}`;
-			lines.push(this.theme
-				? (selected ? this.theme.fg("accent", truncateToWidth(line, width)) : truncateToWidth(line, width))
+			const line = `${prefix}${opt.label.padEnd(14)} ${opt.description}`;
+			lines.push(th
+				? truncateToWidth(selected ? th.fg("accent", line) : line, width)
 				: truncateToWidth(line, width));
 		}
 
 		lines.push("");
-		lines.push(this.theme ? this.theme.fg("dim", "  Up/Down navigate · Enter select · Esc back") : "  Up/Down navigate · Enter select · Esc back");
+		lines.push(th ? th.fg("dim", "  Up/Down navigate | Enter select | Esc back") : "  Up/Down navigate | Enter select | Esc back");
 		return lines;
 	}
 

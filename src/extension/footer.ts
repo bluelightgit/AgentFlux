@@ -10,7 +10,7 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FluxRuntimeState } from "../core/types";
 import { fmt, fmtCost, pct } from "./cache-monitor";
 
-export function installFooter(ctx: any, getState: () => FluxRuntimeState): void {
+export function installFooter(ctx: any, getState: () => FluxRuntimeState, getRouteHint?: () => string | null): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setFooter((_tui: any, theme: any, _footerData: any) => {
 		return {
@@ -18,21 +18,26 @@ export function installFooter(ctx: any, getState: () => FluxRuntimeState): void 
 			render(width: number): string[] {
 				const s = getState();
 				const left = theme.fg("dim",
-					`flux ${s.mode} · cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% · ctx ${pct(s.cache.contextPercent)} · ${fmtCost(s.cache.costUsd)}`);
-				const right = theme.fg("dim", `${s.stage}/${s.role} · ${s.preset}→${s.expectedMode}`);
+					`flux ${s.mode} | cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% | ctx ${pct(s.cache.contextPercent)} | ${fmtCost(s.cache.costUsd)}`);
+				const right = theme.fg("dim", `${s.stage}/${s.role} | ${s.preset}->${s.expectedMode}`);
 				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-				return [truncateToWidth(left + pad + right, width)];
+				const line1 = truncateToWidth(left + pad + right, width);
+				// Route hint line (only when router suggests different mode)
+				const hint = getRouteHint?.();
+				if (hint) {
+					const hintLine = truncateToWidth(theme.fg("accent", `  hint: ${hint}`), width);
+					return [line1, hintLine];
+				}
+				return [line1];
 			},
 		};
 	});
 }
 
 export function setFluxStatus(ctx: any, getState: () => FluxRuntimeState): void {
-	if (!ctx.hasUI) return;
-	const s = getState();
-	const t = ctx.ui.theme;
-	ctx.ui.setStatus("flux", t.fg("dim",
-		`flux · ${s.mode} · ${s.stage}/${s.role} · ${s.preset}→${s.expectedMode}`));
+	// No-op: we use setFooter for all status display.
+	// setStatus creates a persistent bar above the editor that's hard to dismiss.
+	// Footer already shows mode/stage/role/preset, so no separate status needed.
 }
 
 /** 构造 /flux 摘要文本 (TUI notify + 非 TUI stdout 共用) */
@@ -41,7 +46,7 @@ export function buildFluxSummary(s: FluxRuntimeState, telemetryPath: string, bra
 		`AgentFlux`,
 		`  mode      ${s.mode}  (fallback ${s.mode === "M1" ? "M1" : "M1"})`,
 		`  stage     ${s.stage}  /  role ${s.role}`,
-		`  preset    ${s.preset}  →  expected ${s.expectedMode}`,
+		`  preset    ${s.preset}  ->  expected ${s.expectedMode}`,
 		`  branch    ${branch ?? "-"}`,
 		``,
 		`Cache Ledger (cumulative)`,
@@ -77,16 +82,16 @@ export function buildInspectorText(
 		lines.push(`  confidence ${decision.confidence}`);
 		lines.push(`  expected   cost:${decision.expected.cost} latency:${decision.expected.latency} acc:${decision.expected.accuracy}`);
 	} else {
-		lines.push(`  - 路由器未运行 (Phase 1 规则路由)`);
+		lines.push(`  - router not yet run (Phase 1 rule routing)`);
 	}
-	lines.push(``, `Project Maturity (docs/14)`,
+	lines.push(``, `Project Maturity`,
 		`  stage ${s.stage}   role ${s.role}`,
 		`  signals  file ${maturitySignals.fileCount}  commit ${maturitySignals.commitCount}`,
-		``, `Preference (docs/13)`,
-		`  preset  ${s.preset}  →  ${s.expectedMode}`,
+		``, `Preference`,
+		`  preset  ${s.preset}  ->  ${s.expectedMode}`,
 		``, `Cache Ledger`,
 		`  input ${fmt(s.cache.input)}  read ${fmt(s.cache.cacheRead)}  write ${fmt(s.cache.cacheWrite)}`,
-		`  hit ${(s.cache.cacheHitRate * 100).toFixed(1)}%  ·  ctx ${pct(s.cache.contextPercent)}  ·  ${fmtCost(s.cache.costUsd)}`,
+		`  hit ${(s.cache.cacheHitRate * 100).toFixed(1)}%  |  ctx ${pct(s.cache.contextPercent)}  |  ${fmtCost(s.cache.costUsd)}`,
 		``, `telemetry → ${telemetryPath}`);
 	return lines.join("\n");
 }
