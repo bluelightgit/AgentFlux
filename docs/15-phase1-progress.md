@@ -159,3 +159,47 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 3. 路由优化: file_count 只统计代码文件, 复杂度阈值调优
 4. M4/M6 持久 team: 异构模型分工 (Phase 3)
 5. F1-6 模式选择器 overlay, F1-11 偏好调音台 (TUI 交互验证)
+
+## Phase 2: 模型能力层 + 多 agent 基础 (commit 557370a)
+
+### 模型能力层 (src/core/model-capability.ts, docs/17)
+- 5 维能力向量: coding/reasoning/speed/context/cost_eff
+- 亲和度 = 加权点积 (requirement × capability)
+- 四层降级: 用户手填 > 家族启发式 > 自动计算(context/cost) > 均值
+- cost_eff 用 log scale 归一化, 避免极便宜模型在所有角色上全赢
+- rankModels 排序 + cost_eff 破平局 (差值 < 0.05)
+- assignModel 三路径: model 指定 / affinity 匹配 / single 退化
+
+### 角色定义层 (src/core/role-manager.ts, docs/18)
+- 角色定义来源: .agentflux/agents/*.md > models.json roles > 内置 4 模板
+- MD frontmatter: name/description/tools/model/requirement/skills + body=systemPrompt
+- 实例注册表: .agentflux/runtime/registry.json
+- createInstance: 角色模板 → 运行时实例 (含模型分配详情)
+
+### 共享黑板 (src/core/shared-board.ts, docs/19)
+- .agentflux/shared/blackboard.json — 全局状态 (所有 agent 可读)
+- tasks/ — 任务队列 (leader 分配, worker 认领)
+- handoffs/ — 交接文档 (结构化, 不是塞对话历史)
+- decisions/ — 决策记录 (append-only, 审计用)
+
+### Team 命令 (src/extension/team.ts)
+- /flux team status — 黑板 + 任务 + 实例状态
+- /flux team plan <task> — 创建 planner 实例分析任务
+- /flux team build <task> — 创建 implementer 实例执行任务
+- /flux team review — 创建 reviewer 实例审查 git diff
+- /flux team abort <name> — 终止实例
+- /flux team roles — 列出所有角色定义
+- /flux team models — 列出模型 + 能力向量
+- /flux team affinity — 亲和度排名
+
+### E2E 验证
+- planner-1 (deepseek-v4-flash) 成功分析 model-capability.ts 代码结构
+- handoff 写入 handoffs/planner-1→next.md
+- blackboard 更新 planner-1 status=done
+- registry.json 记录实例完成
+
+### 已知限制
+- /flux team 命令在 RPC/print 模式下不执行 (pi 限制), 需 TUI 交互模式
+- 角色定义的 tools 过滤尚未接入子进程 (当前继承全部工具)
+- skills 过滤尚未接入子进程 --skills 参数
+- 亲和度匹配对 2 模型场景的区分度有限 (cost_eff log scale 已缓解)
