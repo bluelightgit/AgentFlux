@@ -16,12 +16,13 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
+import { matchesKey, Key, truncateToWidth, Container, Text, type SelectItem, SelectList, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import { DynamicBorder, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "./core/types";
-import { loadConfig, loadPreference, applyRuntimeOverride, validateConfig } from "./core/config";
+import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig } from "./core/config";
 import { route } from "./core/routing";
 import { TelemetryWriter, cacheStatsToSample } from "./telemetry/events";
 import { collectCacheStats, fmt, fmtCost, pct } from "./extension/cache-monitor";
@@ -258,40 +259,152 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function cmdMode(preset: Preset | undefined, ctx: any) {
-		if (!preset) {
+		if (preset) {
+			// 直接指定 preset
+			runtimePreset = preset;
+			runRouter(ctx);
+			refreshCache(ctx);
+			setFluxStatus(ctx, getState);
+			const text = `preset → ${preset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
+			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+			return;
+		}
+
+		// 无参数: TUI 模式弹出 SelectList, 非 TUI 显示文本
+		if (ctx.mode !== "tui") {
 			const valid = "eco | fast | accurate | balanced | custom";
 			const text = `当前 preset: ${state.preset}\n可选: ${valid}\n用法: /flux mode <preset>`;
 			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 			return;
 		}
-		runtimePreset = preset;
+
+		const presets: { value: Preset; label: string; description: string }[] = [
+			{ value: "eco",       label: "eco",       description: "M1 单 agent, 最省钱" },
+			{ value: "fast",      label: "fast",      description: "M3 fork 探索, wall-clock 优先" },
+			{ value: "balanced",  label: "balanced",  description: "M2 主+子 agent, 平衡" },
+			{ value: "accurate",  label: "accurate",  description: "M6 多 agent 多模型, 质量至上" },
+			{ value: "custom",    label: "custom",    description: "自定义 (Level 2/3 接管)" },
+		];
+
+		const items: SelectItem[] = presets.map(p => ({
+			value: p.value,
+			label: p.value === state.preset ? `${p.label} (active)` : p.label,
+			description: p.description,
+		}));
+
+		const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: () => void) => {
+			const container = new Container();
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux · Mode Selector")), 1, 0));
+
+			const selectList = new SelectList(items, Math.min(items.length, 10), {
+				selectedPrefix: (t: string) => theme.fg("accent", t),
+				selectedText: (t: string) => theme.fg("accent", t),
+				description: (t: string) => theme.fg("muted", t),
+				scrollInfo: (t: string) => theme.fg("dim", t),
+				noMatch: (t: string) => theme.fg("warning", t),
+			});
+			selectList.onSelect = (item: any) => done(item.value);
+			selectList.onCancel = () => done(null);
+			container.addChild(selectList);
+
+			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"), 1, 0));
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+			return {
+				render(width: number) { return container.render(width); },
+				invalidate() { container.invalidate(); },
+				handleInput(data: string) { selectList.handleInput(data); tui.requestRender(); },
+			};
+		}, { overlay: true });
+
+		if (!result) return;
+
+		const newPreset = result as Preset;
+		runtimePreset = newPreset;
 		runRouter(ctx);
 		refreshCache(ctx);
 		setFluxStatus(ctx, getState);
-		const text = `preset → ${preset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
+		const text = `preset → ${newPreset}\nmode ${state.mode} (fallback ${decision?.fallback})\nexpected ${state.expectedMode}\nreason: ${decision?.reason.join("; ")}`;
 		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 	}
 
-	function cmdPreference(ctx: any) {
+	async function cmdPreference(ctx: any) {
 		const pref = loadPreference(ctx.cwd);
 		const v = pref.vector;
-		const text = [
-			`Preference (docs/13)`,
-			`  profile    ${pref.profile}  →  expected ${state.expectedMode}`,
-			`  escalate   ${pref.escalate_hint}`,
-			``,
-			`  vector (0-1)`,
-			`  cost_sensitivity        ${v.cost_sensitivity}`,
-			`  accuracy_priority       ${v.accuracy_priority}`,
-			`  latency_priority        ${v.latency_priority}`,
-			`  parallelism_willingness ${v.parallelism_willingness}`,
-			`  multi_agent_willingness ${v.multi_agent_willingness}`,
-			``,
-			`  scenarios ${Object.keys(pref.scenarios).length ? Object.keys(pref.scenarios).join(", ") : "(none)"}`,
-			``,
-			`调音台 (五维滑块) Phase 1 F1-11 待实现; 现可编辑 .agentflux/agentflux.json`,
-		].join("\n");
-		if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+
+		// 非 TUI: 显示文本
+		if (ctx.mode !== "tui") {
+			const text = [
+				`Preference (docs/13)`,
+				`  profile    ${pref.profile}  →  expected ${state.expectedMode}`,
+				`  escalate   ${pref.escalate_hint}`,
+				``,
+				`  vector (0-1)`,
+				`  cost_sensitivity        ${v.cost_sensitivity}`,
+				`  accuracy_priority       ${v.accuracy_priority}`,
+				`  latency_priority        ${v.latency_priority}`,
+				`  parallelism_willingness ${v.parallelism_willingness}`,
+				`  multi_agent_willingness ${v.multi_agent_willingness}`,
+				``,
+				`TUI 模式下可用 ↑↓ 切换, ←→ 调节. 非 TUI 请编辑 .agentflux/agentflux.json`,
+			].join("\n");
+			if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+			return;
+		}
+
+		// TUI: SettingsList 五维调音台
+		const dimLabels: { id: string; label: string; values: string[]; getVal: (v: any) => string }[] = [
+			{ id: "cost_sensitivity",        label: "Cost Sensitivity",        values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.cost_sensitivity.toFixed(1) },
+			{ id: "accuracy_priority",       label: "Accuracy Priority",       values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.accuracy_priority.toFixed(1) },
+			{ id: "latency_priority",        label: "Latency Priority",        values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.latency_priority.toFixed(1) },
+			{ id: "parallelism_willingness", label: "Parallelism Willingness", values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.parallelism_willingness.toFixed(1) },
+			{ id: "multi_agent_willingness", label: "Multi-Agent Willingness", values: ["0.0", "0.1", "0.2", "0.3", "0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], getVal: v => v.multi_agent_willingness.toFixed(1) },
+		];
+
+		const items: SettingItem[] = dimLabels.map(d => ({
+			id: d.id,
+			label: d.label,
+			currentValue: d.getVal(v),
+			values: d.values,
+		}));
+
+		await ctx.ui.custom((_tui: any, theme: any, _kb: any, done: () => void) => {
+			const container = new Container();
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+			container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux · Preference Tuner")), 1, 0));
+			container.addChild(new Text(theme.fg("dim", `profile: ${pref.profile} → expected ${state.expectedMode}`), 0, 1));
+
+			const settingsList = new SettingsList(
+				items,
+				Math.min(items.length + 2, 15),
+				getSettingsListTheme(),
+				(id: string, newValue: string) => {
+					const num = parseFloat(newValue);
+					(pref.vector as any)[id] = num;
+					savePreference(ctx.cwd, pref);
+				},
+				() => done(undefined),
+			);
+			container.addChild(settingsList);
+
+			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • ←→ adjust • enter toggle • esc close"), 1, 0));
+			container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+
+			return {
+				render(width: number) { return container.render(width); },
+				invalidate() { container.invalidate(); },
+				handleInput(data: string) { settingsList.handleInput?.(data); },
+			};
+		}, { overlay: true });
+
+		// 调音后重新路由
+		runRouter(ctx);
+		refreshCache(ctx);
+		setFluxStatus(ctx, getState);
+		const after = loadPreference(ctx.cwd);
+		const msg = `偏好已保存\nprofile ${after.profile} → expected ${state.expectedMode}\nmode ${state.mode}`;
+		if (ctx.hasUI) ctx.ui.notify(msg, "info");
 	}
 
 	function cmdProject(ctx: any) {

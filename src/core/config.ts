@@ -7,7 +7,7 @@
  * 配置文件: <cwd>/.agentflux/agentflux.json (零依赖, 不引入 yaml)
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
 	DEFAULT_CONFIG, DEFAULT_PREFERENCE, PRESET_TO_MODE,
@@ -52,6 +52,17 @@ export function loadPreference(cwd: string): PreferenceConfig {
 	const raw = loadRawConfig(cwd);
 	const pref = raw.preference ?? {};
 	return deepMerge(DEFAULT_PREFERENCE, pref as Partial<PreferenceConfig>);
+}
+
+/** 保存偏好配置回 .agentflux/agentflux.json (合并写入) */
+export function savePreference(cwd: string, pref: PreferenceConfig): void {
+	const dir = join(cwd, ".agentflux");
+	const path = join(dir, CONFIG_FILENAME);
+	let raw: any = {};
+	try { raw = JSON.parse(readFileSync(path, "utf-8")); } catch {}
+	raw.preference = pref;
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(path, JSON.stringify(raw, null, 2), "utf-8");
 }
 
 /** preset → 期望落点模式 (docs/13 预设映射) */
