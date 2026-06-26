@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "./core/types";
-import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig } from "./core/config";
+import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig, presetToExpectedMode } from "./core/config";
 import { route } from "./core/routing";
 import { TelemetryWriter, cacheStatsToSample } from "./telemetry/events";
 import { collectCacheStats, fmt, fmtCost, pct } from "./extension/cache-monitor";
@@ -90,9 +90,28 @@ export default function (pi: ExtensionAPI) {
 		state.mode = decision.mode;
 		state.expectedMode = decision.biasSources.preference ?? state.mode;
 
-		// 校验 warnings → reason (Phase 1 只记录)
+		// 校验 warnings → reason
 		const warnings = validateConfig(config);
 		for (const w of warnings) decision.reason.push(`warn:${w}`);
+
+		// F2-10: override_mode suggest — ask user if recommended mode differs from preset expectation
+		if (config.routing.override_mode === "suggest" && ctx.mode === "tui" && decision.confidence >= 0.7) {
+			const expected = presetToExpectedMode(state.preset);
+			if (decision.mode !== expected) {
+				const msg = `AgentFlux route suggestion:\n  preset ${state.preset} expects ${expected}\n  router recommends ${decision.mode} (confidence ${(decision.confidence*100).toFixed(0)}%)\n  reason: ${decision.reason.join("; ")}\n\nAccept ${decision.mode}?`;
+				ctx.ui.confirm("AgentFlux Route Override", msg, { timeout: 10000 }).then((accepted: boolean) => {
+					if (accepted) {
+						console.error(`[flux] override: user accepted ${decision.mode}`);
+					} else {
+						// Revert to expected mode
+						decision!.mode = expected;
+						state.mode = expected;
+						console.error(`[flux] override: user rejected, keeping ${expected}`);
+					}
+					setFluxStatus(ctx, getState);
+				}).catch(() => {});
+			}
+		}
 
 		telemetry.writeRoutingDecision({
 			sessionId, mode: state.mode, preset: state.preset, stage: state.stage, role: state.role,
