@@ -47,14 +47,16 @@ export async function handleTeamCommand(
 	if (sub === "roles") return cmdTeamRoles(ctx, teamCtx);
 	if (sub === "models") return cmdTeamModels(ctx, teamCtx);
 	if (sub === "affinity") return cmdTeamAffinity(ctx, teamCtx);
+	if (sub === "pipeline") return cmdTeamPipeline(parts.slice(1).join(" "), ctx, teamCtx);
 
 	// 默认: 显示帮助
 	const help = [
 		"AgentFlux Team Commands:",
 		"  /flux team status         — 显示所有实例状态 + 黑板",
 		"  /flux team plan <task>    — 创建 planner 实例分析任务",
-		"  /flux team build <task>   — 创建 implementer 实例执行任务",
-		"  /flux team review         — 创建 reviewer 实例审查当前变更",
+		"  /flux team build <task>   — 创建 implementer 实例执行任务 (自动拼接 planner handoff)",
+		"  /flux team review         — 创建 reviewer 实例审查 (自动拼接 implementer handoff)",
+		"  /flux team pipeline <task>— M5 管道: plan→build→review 自动串联",
 		"  /flux team abort <name>   — 终止指定实例",
 		"  /flux team roles          — 列出所有角色定义",
 		"  /flux team models         — 列出所有模型 + 能力 + 分配",
@@ -141,10 +143,21 @@ async function cmdTeamBuild(task: string, ctx: any, teamCtx: TeamContext): Promi
 		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 		return;
 	}
-	await runTeamAgent("implementer", task, ctx, teamCtx);
+	// M5 管道: 自动查找最近的 planner handoff, 拼接到任务前
+	const board = new SharedBoard(teamCtx.fluxDir);
+	const plannerHandoff = findLatestHandoff(teamCtx.fluxDir, "planner");
+	if (plannerHandoff) {
+		task = `[Previous Planner Handoff]\n${plannerHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\n${task}`;
+		console.error(`[flux team] build: 拼接了 planner handoff (${plannerHandoff.length} chars)`);
+	}
+	await runTeamAgent("implementer", task, ctx, teamCtx, "planner");
 }
 
 async function cmdTeamReview(ctx: any, teamCtx: TeamContext): Promise<void> {
+	// M5 管道: 自动查找最近的 implementer handoff
+	const board = new SharedBoard(teamCtx.fluxDir);
+	const implHandoff = findLatestHandoff(teamCtx.fluxDir, "implementer");
+
 	// 获取当前 git diff 作为审查对象
 	const { execSync } = require("node:child_process");
 	let diff = "";
@@ -152,15 +165,64 @@ async function cmdTeamReview(ctx: any, teamCtx: TeamContext): Promise<void> {
 		diff = execSync("git diff HEAD", { cwd: teamCtx.cwd, encoding: "utf-8", maxBuffer: 1024 * 1024 }).trim();
 	} catch {}
 	if (!diff) {
-		// 尝试 unstaged
-		try {
-			diff = execSync("git diff", { cwd: teamCtx.cwd, encoding: "utf-8", maxBuffer: 1024 * 1024 }).trim();
-		} catch {}
+		try { diff = execSync("git diff", { cwd: teamCtx.cwd, encoding: "utf-8", maxBuffer: 1024 * 1024 }).trim(); } catch {}
 	}
-	const task = diff
-		? `Review the following git diff:\n\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\`\n\nProvide structured review.`
-		: "Review the current codebase for issues. No uncommitted changes found, review recent commits.";
-	await runTeamAgent("reviewer", task, ctx, teamCtx);
+
+	let task: string;
+	if (implHandoff) {
+		task = `[Previous Implementer Handoff]\n${implHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\nReview the implementation described above.`;
+		if (diff) task += `\n\nAlso review the current git diff:\n\n\`\`\`diff\n${diff.slice(0, 6000)}\n\`\`\``;
+		console.error(`[flux team] review: 拼接了 implementer handoff (${implHandoff.length} chars)`);
+	} else if (diff) {
+		task = `Review the following git diff:\n\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\`\n\nProvide structured review.`;
+	} else {
+		task = "Review the current codebase for issues. No uncommitted changes found, review recent commits.";
+	}
+	await runTeamAgent("reviewer", task, ctx, teamCtx, "implementer");
+}
+
+async function cmdTeamPipeline(task: string, ctx: any, teamCtx: TeamContext): Promise<void> {
+	if (!task) {
+		const msg = "用法: /flux team pipeline <任务描述>\n自动执行 plan→build→review 管道";
+		if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
+		return;
+	}
+	const banner = `M5 Pipeline: plan → build → review\n任务: ${task.slice(0, 200)}`;
+	if (ctx.hasUI) ctx.ui.notify(banner, "info");
+	console.error(`[flux team] === ${banner} ===`);
+
+	// Step 1: plan
+	console.error("[flux team] pipeline step 1/3: plan");
+	await runTeamAgent("planner", task, ctx, teamCtx);
+
+	// Step 2: build (自动拼接 planner handoff)
+	console.error("[flux team] pipeline step 2/3: build");
+	const plannerHandoff = findLatestHandoff(teamCtx.fluxDir, "planner");
+	const buildTask = plannerHandoff
+		? `[Previous Planner Handoff]\n${plannerHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\n${task}`
+		: task;
+	await runTeamAgent("implementer", buildTask, ctx, teamCtx, "planner");
+
+	// Step 3: review (自动拼接 implementer handoff + git diff)
+	console.error("[flux team] pipeline step 3/3: review");
+	const implHandoff = findLatestHandoff(teamCtx.fluxDir, "implementer");
+	const { execSync } = require("node:child_process");
+	let diff = "";
+	try { diff = execSync("git diff HEAD", { cwd: teamCtx.cwd, encoding: "utf-8", maxBuffer: 1024 * 1024 }).trim(); } catch {}
+	let reviewTask: string;
+	if (implHandoff) {
+		reviewTask = `[Previous Implementer Handoff]\n${implHandoff.slice(0, 3000)}\n\n---\n\n[Your Task]\nReview the implementation described above.`;
+		if (diff) reviewTask += `\n\nAlso review the current git diff:\n\n\`\`\`diff\n${diff.slice(0, 6000)}\n\`\`\``;
+	} else if (diff) {
+		reviewTask = `Review the following git diff:\n\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\`\n\nProvide structured review.`;
+	} else {
+		reviewTask = "Review the current codebase for issues.";
+	}
+	await runTeamAgent("reviewer", reviewTask, ctx, teamCtx, "implementer");
+
+	const done = "M5 Pipeline 完成. 用 /flux team status 查看结果.";
+	if (ctx.hasUI) ctx.ui.notify(done, "info");
+	console.error(`[flux team] === ${done} ===`);
 }
 
 async function cmdTeamAbort(name: string, ctx: any, teamCtx: TeamContext): Promise<void> {
@@ -191,6 +253,7 @@ async function runTeamAgent(
 	task: string,
 	ctx: any,
 	teamCtx: TeamContext,
+	handoffFromRole?: string,
 ): Promise<void> {
 	const roles = loadAllRoles(teamCtx.cwd, teamCtx.modelsConfig);
 	const role = roles.get(roleName);
@@ -278,6 +341,18 @@ async function runTeamAgent(
 }
 
 // ──────────────────────────────── 辅助 ────────────────────────────────
+
+/** 查找最近的某个角色的 handoff 文件内容 */
+function findLatestHandoff(fluxDir: string, rolePrefix: string): string | null {
+	const { existsSync, readdirSync, readFileSync, statSync } = require("node:fs");
+	const dir = join(fluxDir, "shared", "handoffs");
+	if (!existsSync(dir)) return null;
+	const files = readdirSync(dir).filter((f: string) => f.endsWith(".md") && f.startsWith(rolePrefix));
+	if (files.length === 0) return null;
+	// 按修改时间降序, 取最新
+	files.sort((a: string, b: string) => statSync(join(dir, b)).mtimeMs - statSync(join(dir, a)).mtimeMs);
+	return readFileSync(join(dir, files[0]), "utf-8");
+}
 
 /**
  * 将 RoleDefinition 转换为 subagent.ts 的 AgentDefinition 格式

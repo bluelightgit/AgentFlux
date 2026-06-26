@@ -90,8 +90,24 @@ export function getForkCandidates(ctx: any, count = 3): Array<{ entryId: string;
  *   /flux fork           → 列出可选 fork 点
  *   /flux fork <entryId> → 从指定 entry fork
  *   /flux fork last      → 从最近一条用户消息 fork
+ *   /flux fork merge     → 合并策略说明 (当前为手动合并)
  */
 export async function handleForkCommand(args: string[], ctx: any): Promise<string> {
+	// /flux fork merge: 合并说明
+	if (args[0] === "merge") {
+		return [
+			"Fork Merge:",
+			"  pi 的 fork 创建独立分支, 分支间不自动合并.",
+			"  合并策略:",
+			"  1. 手动: 在目标分支复制输出, 切回主分支粘贴",
+			"  2. Git: 用 git merge 合并不同 worktree 的代码变更",
+			"  3. AgentFlux 自动 (Phase 3): 读取两分支的 last assistant message,",
+			"     用 LLM 合并后注入当前会话",
+			"",
+			"  当前阶段请用手动或 git 方式. 自动 merge 在 Phase 3 实现.",
+		].join("\n");
+	}
+
 	if (!ctx.fork) {
 		return "M3 fork 不可用: 当前模式不支持 ctx.fork (需要 TUI 或 RPC 模式)";
 	}

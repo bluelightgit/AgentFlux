@@ -31,6 +31,7 @@ import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
 import { registerForkMode, handleForkCommand } from "./extension/fork-mode";
+import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } from "./extension/compaction-advisor";
 import { handleTeamCommand, type TeamContext } from "./extension/team";
 import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
 import { loadPricing, type PricingTable } from "./core/pricing";
@@ -195,6 +196,7 @@ export default function (pi: ExtensionAPI) {
 	// ---------- M3 fork 事件 (Phase 2) ----------
 
 	registerForkMode(pi, () => ({ sessionId, telemetry }));
+	registerCompactionAdvisor(pi, () => ({ sessionId, telemetry }));
 
 	// ---------- 命令 ----------
 
@@ -240,6 +242,12 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				return handleTeamCommand(parts.slice(1), ctx, teamCtx);
+			}
+			if (sub === "compact") {
+				const advice = analyzeCompaction(ctx);
+				const text = formatCompactionAdvice(advice);
+				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
 			}
 
 			// 默认: 摘要
