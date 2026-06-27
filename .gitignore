@@ -37,5 +37,6 @@ data/local/
 
 # AgentFlux runtime telemetry (local, per-machine)
 .agentflux/
+.pi/npm/
+.pi/git/
 or-models.json
-.agentflux/pricing-cache.json

@@ -1,54 +1,83 @@
 # AgentFlux
 
-> Agent 工作模式路由器:把 LLM agent 的执行拓扑做成可配置、可自动路由的维度,在 **准确性 / 成本 / 效率** 三难中按任务特性取舍。
+Agent working mode router — multi-mode orchestration + intelligent routing for [pi](https://github.com/earendil-works/pi-coding-agent) coding agent.
 
-**AgentFlux** = Agent + Flux(流变)。寓意 agent 的工作模式如流变般可路由、可切换,多 agent 流动协作。
+## Quick Start
 
-> 名称暂定,后续可改。
+### Option 1: Project-local auto-load (current setup)
 
-## 为什么做这个
+AgentFlux is configured in `.pi/settings.json` to auto-load when you run `pi` in this project:
 
-LLM agent 部署面临一个根本性三难(**Agent System Trilemma**,EvoRoute, ACL 2026):准确性、成本、效率三者不可兼得。现有工具大多锁定单一工作模式(单 agent / subagent / multi-agent),用户无法按任务特性取舍——简单任务多花钱,复杂任务做不到位,中等任务缓存全失效。
+```bash
+cd E:/agent-projects/AgentFlux
+pi --provider octopus-anthropic --model deepseek-v4-flash
+```
 
-AgentFlux 的核心思路:把工作模式拆成三个正交维度(Context 拓扑 × 生命周期 × 并行度),让用户显式选择组合,或由路由器根据 **任务复杂度 / 预算 / 历史** 自动选择。
+No `-e` flag needed. The extension loads automatically.
 
-## 核心特性(规划中)
+### Option 2: Manual load (any directory)
 
-- **三维度拆解**:Context 拓扑、Context 生命周期、并行度,正交可组合
-- **六种工作模式**:单 agent、主+subagent、对话树 fork、持久 multi-agent、管道 handoff、异构团队
-- **三档配置**:预设档位 / 维度开关 / 细粒度参数
-- **三层自动路由**:任务结构信号(静态)→ 预算约束(ILP)→ 历史经验(RL)
-- **路由偏好可配置**:五维偏好画像 + 按场景覆盖,TUI 调音台 / Web Preference Studio 可视化调整
-- **项目演进驱动角色演进**:项目从 Seed 到 Mature,agent 从 doer 演进为 planner/orchestrator/reviewer
-- **缓存优先**:前缀布局优化 + mask 策略,优先保 prompt cache 命中
-- **用户端渐进路线**:先 pi TUI 验证,再 Web read-only dashboard,最后 Electron/Tauri 产品化
+```bash
+pi -e E:/agent-projects/AgentFlux/src/entry.ts --provider octopus-anthropic --model deepseek-v4-flash
+```
 
-## 文档导航
+### Option 3: Install as pi package (for other projects)
 
-| 文档 | 内容 |
-|---|---|
-| [00-overview](docs/00-overview.md) | 项目概览、愿景、核心概念 |
-| [01-trilemma](docs/01-trilemma.md) | 三难问题形式化与学术依据 |
-| [02-dimensions](docs/02-dimensions.md) | 三维度拆解 |
-| [03-modes](docs/03-modes.md) | 六种工作模式详解 |
-| [04-config-schema](docs/04-config-schema.md) | 配置层设计 |
-| [05-routing](docs/05-routing.md) | 自动路由层 |
-| [06-cache-strategy](docs/06-cache-strategy.md) | 缓存策略 |
-| [07-roadmap](docs/07-roadmap.md) | 落地路线 |
-| [08-references](docs/08-references.md) | 参考文献与前例 |
-| [09-tech-stack](docs/09-tech-stack.md) | 技术栈选型与主流框架调研 |
-| [10-pi-integration](docs/10-pi-integration.md) | pi 集成可行性分析 |
-| [11-system-architecture](docs/11-system-architecture.md) | 系统架构规划与数据流 |
-| [12-ui-direction](docs/12-ui-direction.md) | TUI/Web/Electron 用户界面方向 |
-| [13-routing-preference](docs/13-routing-preference.md) | 路由偏好与可视化配置 |
-| [14-project-evolution](docs/14-project-evolution.md) | 项目演进与角色演进 |
-| [15-phase1-progress](docs/15-phase1-progress.md) | Phase 1 实现进度 |
-| [16-pricing-layer](docs/16-pricing-layer.md) | 价格层与成本计算 (F1-14) |
+```bash
+# From local path
+pi install E:/agent-projects/AgentFlux
 
-## 状态
+# Or from git (when published)
+pi install git:github.com/agentflux/agentflux@v0.1.0
+```
 
-🚧 Phase 1:实现中。价格层 + cache + mask + 前缀布局 + subagent + telemetry 已验证。技术栈已定(TypeScript + Python sidecar),集成目标已定(内置 pi),用户端路线已定(pi TUI → Web → Electron/Tauri)。见 [roadmap](docs/07-roadmap.md)。
+After installation, AgentFlux loads automatically in any pi session.
 
-## License
+## Commands
 
-TBD
+| Command | Description |
+|---------|-------------|
+| `/flux` | Open control panel menu (mode/preference/team/info) |
+| `/flux why` | Route inspector — why this mode was chosen |
+| `/flux mode <preset>` | Switch mode preset (eco/fast/balanced/accurate/custom) |
+| `/flux preference` | 5-dimension routing preference tuner |
+| `/flux project` | Project maturity panel |
+| `/flux complexity` | Code complexity analysis |
+| `/flux compact` | Compaction advisor |
+| `/flux fork` | M3 conversation tree fork |
+| `/flux fork merge` | Fork merge strategies |
+| `/flux team plan <task>` | Launch planner agent |
+| `/flux team build <task>` | Launch implementer agent |
+| `/flux team review` | Launch reviewer agent |
+| `/flux team pipeline <task>` | Run plan→build→review in sequence |
+| `/flux team status` | Show agent instances + blackboard |
+| `/flux team roles` | List role definitions |
+| `/flux team models` | List models + capability vectors |
+| `/flux team affinity` | Per-role model affinity ranking |
+
+## Configuration
+
+```
+.agentflux/
+├── agentflux.json       # User config (mode, cache, context, preference)
+├── models.json          # Model pricing + capability + role definitions
+├── pricing-cache.json   # OpenRouter price cache (auto, 24h TTL)
+├── project-profile.json # Project maturity (auto-generated)
+├── events.jsonl         # Telemetry log
+├── runtime/             # Agent instance registry
+└── shared/              # Multi-agent blackboard (tasks/handoffs/decisions)
+```
+
+## Documentation
+
+See `docs/` for 21 design documents covering trilemma formalization, six work modes, routing layers, cache strategy, multi-agent architecture, and empirical findings.
+
+## Update
+
+```bash
+# If installed as local path — just git pull
+cd E:/agent-projects/AgentFlux && git pull
+
+# If installed as pi package
+pi update --extensions
+```
