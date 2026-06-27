@@ -32,6 +32,7 @@ export interface RoleInstance {
 	name: string;                // 唯一实例名
 	role: string;                // 角色模板名
 	model: string;               // 运行时解析出的模型
+	provider?: string;           // pi provider 名称
 	assignSource: AssignResult;  // 模型分配详情
 	session: string;             // pi session ID
 	status: "idle" | "running" | "blocked" | "done" | "failed";
@@ -243,11 +244,13 @@ export function createInstance(
 ): RoleInstance {
 	const assign = assignModel(roleName, role, models);
 	const name = generateInstanceName(roleName, customName);
+	const provider = models[assign.model]?.provider;
 
 	return {
 		name,
 		role: roleName,
 		model: assign.model,
+		provider,
 		assignSource: assign,
 		session: sessionId,
 		status: "idle",

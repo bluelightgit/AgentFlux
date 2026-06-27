@@ -14,7 +14,7 @@
 ## 三层 cache 收益模型
 
 > ⚠️ 以下经 V0 实测修正(详见 [docs/20 实证数据](20-empirical-findings.md))。
-> 实测环境: pi 0.80.2 + octopus-anthropic(deepseek-v4-flash, supportsLongCacheRetention)。
+> 实测环境: pi 0.80.2 + Anthropic-messages API relay(deepseek-v4-flash, supportsLongCacheRetention)。
 
 | 层次 | 内容 | 大小 | subagent(临时) | 持久 session |
 |---|---|---|---|---|

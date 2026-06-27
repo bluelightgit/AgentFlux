@@ -116,12 +116,12 @@ naive vs agentflux 对照 (2轮 task: read README.md + 总结):
 ## 用法
 
 ```bash
-cd E:/agent-projects/AgentFlux
+cd <agentflux-dir>
 # 交互式 (TUI, footer + 命令)
-pi -e src/entry.ts
+pi -e src/entry.ts --provider <your-provider> --model <your-model>
 # print 模式验证 telemetry
 pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
-   --provider octopus-anthropic --model deepseek-v4-flash --thinking off -p "..."
+   --provider <your-provider> --model <your-model> --thinking off -p "..."
 # 命令 (TUI/RPC 交互模式)
 /flux                 # 状态摘要
 /flux why             # route inspector

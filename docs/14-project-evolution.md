@@ -134,7 +134,7 @@ Established/Mature 阶段,路由器在 `before_agent_start` 注入角色提示,�
 version: 1
 project:
   name: AgentFlux
-  root: E:/agent-projects/AgentFlux
+  root: <project-root-path>
 
 maturity:
   stage: Growth          # Seed|Growth|Established|Mature

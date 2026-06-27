@@ -110,7 +110,7 @@ Qwen 家族:    coding=0.75, reasoning=0.75, speed=0.75, cost_eff=0.60
 {
   "models": {
     "gpt-5.5": {
-      "provider": "octopus-anthropic",
+      "provider": "anthropic",
       "contextWindow": 900000,
       "pricing": {
         "input": 5e-6,
@@ -125,7 +125,7 @@ Qwen 家族:    coding=0.75, reasoning=0.75, speed=0.75, cost_eff=0.60
       }
     },
     "deepseek-v4-flash": {
-      "provider": "octopus-anthropic",
+      "provider": "anthropic",
       "contextWindow": 1000000,
       "pricing": {
         "input": 9e-8,

@@ -4,7 +4,7 @@
 
 ## 1. 问题: cost.total 不可靠
 
-pi 的 per-message `usage.cost.total` 由上游 provider 返回. 实测用户的 octopus relay 返回 `cost.total = 0` (relay 不计费或不下发成本). 导致:
+pi 的 per-message `usage.cost.total` 由上游 provider 返回. 实测用户 relay 返回 `cost.total = 0` (relay 不计费或不下发成本). 导致:
 
 - `events.jsonl` 的 `costUsd` 恒为 0
 - 降幅无从计算 (分子分母都是 0)
@@ -28,7 +28,7 @@ reduction = (cost_naive − cost_flux) / cost_naive
 
 ### 官方价格比率一致假设
 
-用户 relay (octopus) 是二次分发, 实际价格可能 ≠ 官方价. 但关键洞察: 降幅是**比值**, 若 relay 对所有单价乘统一系数 k, 则 k 在分子分母同时出现被约掉 → 官方价算出的降幅 == relay 真实降幅. **只有当 relay 对 input 和 cacheRead 用不同系数时** (如 input 打折、cacheRead 不打折), 官方价才算偏. 在"比率一致"假设下, 用官方价 (OpenRouter) 做成本验证是可行的.
+用户 relay 是二次分发, 实际价格可能 ≠ 官方价. 但关键洞察: 降幅是**比值**, 若 relay 对所有单价乘统一系数 k, 则 k 在分子分母同时出现被约掉 → 官方价算出的降幅 == relay 真实降幅. **只有当 relay 对 input 和 cacheRead 用不同系数时** (如 input 打折、cacheRead 不打折), 官方价才算偏. 在"比率一致"假设下, 用官方价 (OpenRouter) 做成本验证是可行的.
 
 ## 3. 四层降级
 
@@ -55,7 +55,7 @@ relay 名通常是 `分组/模型名` (如 `oa/deepseek-v4-flash`). 映射逻辑
 3. 模糊匹配 (key 的 model 部分 contains 候选)
 4. 兜底均值
 
-实测 octopus relay 模型全部命中 OpenRouter:
+实测 relay 模型全部命中 OpenRouter:
 
 | relay 名 | OpenRouter id | 命中 |
 |---|---|---|

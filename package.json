@@ -7,7 +7,7 @@
   "author": "AgentFlux",
   "repository": {
     "type": "git",
-    "url": "https://github.com/agentflux/agentflux"
+    "url": ""
   },
   "files": [
     "src/**/*.ts",

@@ -4,13 +4,13 @@ Agent working mode router — multi-mode orchestration + intelligent routing for
 
 ## Quick Start
 
-### Option 1: Project-local auto-load (current setup)
+### Option 1: Project-local auto-load
 
 AgentFlux is configured in `.pi/settings.json` to auto-load when you run `pi` in this project:
 
 ```bash
-cd E:/agent-projects/AgentFlux
-pi --provider octopus-anthropic --model deepseek-v4-flash
+cd <agentflux-dir>
+pi --provider <your-provider> --model <your-model>
 ```
 
 No `-e` flag needed. The extension loads automatically.
@@ -18,17 +18,17 @@ No `-e` flag needed. The extension loads automatically.
 ### Option 2: Manual load (any directory)
 
 ```bash
-pi -e E:/agent-projects/AgentFlux/src/entry.ts --provider octopus-anthropic --model deepseek-v4-flash
+pi -e ./src/entry.ts --provider <your-provider> --model <your-model>
 ```
 
 ### Option 3: Install as pi package (for other projects)
 
 ```bash
 # From local path
-pi install E:/agent-projects/AgentFlux
+pi install ./
 
 # Or from git (when published)
-pi install git:github.com/agentflux/agentflux@v0.1.0
+pi install git:github.com/user/agentflux@v0.1.0
 ```
 
 After installation, AgentFlux loads automatically in any pi session.
@@ -76,7 +76,7 @@ See `docs/` for 21 design documents covering trilemma formalization, six work mo
 
 ```bash
 # If installed as local path — just git pull
-cd E:/agent-projects/AgentFlux && git pull
+cd <agentflux-dir> && git pull
 
 # If installed as pi package
 pi update --extensions

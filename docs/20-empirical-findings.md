@@ -1,6 +1,6 @@
 # 20 - 实证数据与工程发现
 
-> 本文档汇总 AgentFlux 在 pi 0.80.2 + octopus-anthropic (deepseek-v4-flash) 环境下的全部实验结论。
+> 本文档汇总 AgentFlux 在 pi 0.80.2 + Anthropic-messages API relay (deepseek-v4-flash) 环境下的全部实验结论。
 > 原 `experiments/v0-probe/` 目录中的 CACHE-FINDINGS.md 和 COST-CONCLUSIONS.md 内容已合并到本文档, 实验脚本已移除。
 > 所有数据可复现 (复现脚本见 git 历史 commit 120b402, 2b0176a)。
 

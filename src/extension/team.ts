@@ -287,7 +287,7 @@ async function runTeamAgent(
 	console.error(`[flux team] ${startMsg}`);
 
 	// 加载 agent 定义 (转换为 subagent.ts 可用的格式)
-	const agent = roleToSubagent(role, instance.model, teamCtx);
+	const agent = roleToSubagent(role, instance.model, teamCtx, instance.provider);
 
 	try {
 		const result = await runSubagent({
@@ -357,7 +357,7 @@ function findLatestHandoff(fluxDir: string, rolePrefix: string): string | null {
 /**
  * 将 RoleDefinition 转换为 subagent.ts 的 AgentDefinition 格式
  */
-function roleToSubagent(role: RoleDefinition, model: string, teamCtx: TeamContext): any {
+function roleToSubagent(role: RoleDefinition, model: string, teamCtx: TeamContext, provider?: string): any {
 	const skills = [
 		...(teamCtx.sharedSkills ?? []),
 		...(role.skills ?? []),
@@ -368,6 +368,7 @@ function roleToSubagent(role: RoleDefinition, model: string, teamCtx: TeamContex
 		description: role.description ?? role.name,
 		tools: role.tools,           // undefined 时 subagent.ts 用全部工具
 		model,
+		provider,                   // undefined 时子进程继承 pi 默认 provider
 		systemPrompt: role.systemPrompt ?? `You are a ${role.name}.`,
 		skills: skills.length > 0 ? skills : undefined,
 	};

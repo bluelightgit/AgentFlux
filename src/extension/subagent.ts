@@ -29,6 +29,7 @@ export interface SubagentDef {
 	description: string;
 	tools?: string[];
 	model?: string;
+	provider?: string;    // pi provider name; if omitted, child inherits pi default
 	skills?: string[];      // F2: 角色特有 skills (如 ["planning", "code-review"])
 	systemPrompt: string;
 }
@@ -137,9 +138,11 @@ export async function runSubagent(opts: {
 	} else {
 		args.push("--no-extensions");
 	}
-	const model = opts.model ?? agent.model ?? "deepseek-v4-flash";
-	const provider = opts.provider ?? "octopus-anthropic";
-	args.push("--provider", provider, "--model", model, "--thinking", "off");
+	const model = opts.model ?? agent.model ?? null;
+	const provider = opts.provider ?? agent.provider ?? null;
+	if (provider) args.push("--provider", provider);
+	if (model) args.push("--model", model);
+	args.push("--thinking", "off");
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
 	// 注入 agent system prompt (写到临时文件, 避免命令行长度/分词问题)
