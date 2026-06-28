@@ -348,7 +348,7 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | M2-2 subagent 持久化 | ✅ | `persistent` + `sessionDir` 参数, `--session-id` 替代 `--no-session`, 实测 cache hit 99% |
 | M2-3 工具白名单执行 | ✅ | `--tools` 参数验证: read-only agent 无法写入, bash agent 可执行命令 |
 | M2-4 reasoning effort 传递 | ✅ | `--thinking` 参数按角色/调用配置, 内置角色 planner/reviewer=high, implementer=medium |
-| M2-5 subagent 结果质量检查 | ⬜ | 轻量级 LLM 调用验证产出 |
+| M2-5 subagent 结果质量检查 | ✅ | `quality-gate.ts`: LLM 检查产出是否满足 criteria, 通过/失败+反馈, 实测 $0.0001/次 |
 
 #### M3 增强: 对话树 fork 工作流
 
