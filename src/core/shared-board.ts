@@ -12,7 +12,7 @@
  * 设计: 文件-based, 不做 IPC, 可审计, git 友好
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
@@ -57,6 +57,18 @@ export interface Decision {
 	timestamp: string;
 }
 
+// M4-2: agent 间消息传递
+
+export interface AgentMessage {
+	id: string;
+	from: string;                // 发送者实例名
+	to: string;                   // 接收者实例名 或 "broadcast"
+	type: string;                // "task_update" | "question" | "result" | "handoff"
+	content: string;
+	timestamp: string;
+	read: boolean;                // 接收者是否已读
+}
+
 // ──────────────────────────────── 黑板 ────────────────────────────────
 
 export class SharedBoard {
@@ -68,7 +80,7 @@ export class SharedBoard {
 	}
 
 	private ensureDirs(): void {
-		for (const sub of ["", "tasks", "handoffs", "decisions"]) {
+		for (const sub of ["", "tasks", "handoffs", "decisions", "messages"]) {
 			const dir = join(this.sharedDir, sub);
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		}
@@ -161,6 +173,109 @@ export class SharedBoard {
 		return readdirSync(dir).filter((f: string) => f.endsWith(".md"));
 	}
 
+	// ── M4-2: Messages (agent 间消息传递) ──
+
+	sendMessage(from: string, to: string, type: string, content: string): AgentMessage {
+		const existing = this.listMessages();
+		const num = existing.length + 1;
+		const id = `msg-${String(num).padStart(3, "0")}`;
+		const msg: AgentMessage = {
+			id, from, to, type, content,
+			timestamp: new Date().toISOString(),
+			read: false,
+		};
+		// 文件名: {id}__{from}→{to}.json (便于按收件人过滤)
+		const safeName = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
+		const filename = `${id}__${safeName(from)}→${safeName(to)}.json`;
+		writeFileSync(join(this.sharedDir, "messages", filename), JSON.stringify(msg, null, 2));
+		return msg;
+	}
+
+	/** 获取指定 agent 的收件箱 (发给它的 + 广播) */
+	getInbox(agentName: string): AgentMessage[] {
+		const dir = join(this.sharedDir, "messages");
+		if (!existsSync(dir)) return [];
+		return readdirSync(dir)
+			.filter((f: string) => f.endsWith(".json"))
+			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as AgentMessage)
+			.filter((m: AgentMessage) => m.to === agentName || m.to === "broadcast")
+			.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
+	}
+
+	/** 获取未读消息 */
+	getUnreadMessages(agentName: string): AgentMessage[] {
+		return this.getInbox(agentName).filter(m => !m.read);
+	}
+
+	/** 标记消息为已读 */
+	markMessageRead(msgId: string): void {
+		const dir = join(this.sharedDir, "messages");
+		if (!existsSync(dir)) return;
+		for (const file of readdirSync(dir)) {
+			if (!file.endsWith(".json") || !file.startsWith(msgId)) continue;
+			const path = join(dir, file);
+			const msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
+			msg.read = true;
+			writeFileSync(path, JSON.stringify(msg, null, 2));
+			break;
+		}
+	}
+
+	/** 列出所有消息 */
+	listMessages(): AgentMessage[] {
+		const dir = join(this.sharedDir, "messages");
+		if (!existsSync(dir)) return [];
+		return readdirSync(dir)
+			.filter((f: string) => f.endsWith(".json"))
+			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as AgentMessage)
+			.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
+	}
+
+	// ── M4-3: Task Queue (任务队列消费) ──
+
+	/** 认领一个就绪任务 (依赖已完成, 状态为 pending) */
+	claimNextTask(agentName: string): Task | null {
+		const tasks = this.listTasks();
+		for (const task of tasks) {
+			if (task.status !== "pending") continue;
+			// 检查依赖是否都完成
+			const depsDone = task.dependsOn.every(depId => {
+				const dep = this.getTask(depId);
+				return dep?.status === "done";
+			});
+			if (!depsDone) continue;
+			// 认领任务
+			this.updateTask(task.id, { status: "in_progress", assignedTo: agentName });
+			return this.getTask(task.id);
+		}
+		return null;
+	}
+
+	/** 完成任务并通知依赖者 (M4-4: 状态同步) */
+	completeTask(taskId: string, result: { output?: string; verdict?: string }): void {
+		this.updateTask(taskId, { status: "done" });
+		const task = this.getTask(taskId);
+		if (!task) return;
+
+		// M4-4: 通知依赖此任务的其他 agent
+		const allTasks = this.listTasks();
+		for (const dependent of allTasks) {
+			if (dependent.dependsOn.includes(taskId) && dependent.status === "blocked") {
+				// 检查是否所有依赖都完成了
+				const allDepsDone = dependent.dependsOn.every(d => this.getTask(d)?.status === "done");
+				if (allDepsDone) {
+					this.updateTask(dependent.id, { status: "pending" }); // 解锁
+				}
+			}
+		}
+
+		// M4-2: 发送结果消息给广播
+		if (task.assignedTo) {
+			this.sendMessage(task.assignedTo, "broadcast", "task_complete",
+				`Task ${taskId} completed. ${result.verdict ? `Verdict: ${result.verdict}.` : ""} ${result.output ? `Output: ${result.output.slice(0, 200)}` : ""}`);
+		}
+	}
+
 	// ── Decisions ──
 
 	writeDecision(decision: Omit<Decision, "id" | "timestamp">): Decision {
@@ -245,6 +360,16 @@ export function formatBlackboard(bb: Blackboard): string {
 	for (const [name, status] of Object.entries(bb.agentStatuses)) {
 		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗" }[status.status] ?? "?";
 		lines.push(`    ${icon} ${name}: ${status.status}${status.workingOn ? ` (${status.workingOn})` : ""}`);
+	}
+	return lines.join("\n");
+}
+
+export function formatMessages(msgs: AgentMessage[]): string {
+	if (msgs.length === 0) return "No messages.";
+	const lines = ["Messages:", ""];
+	for (const m of msgs) {
+		const readIcon = m.read ? "✓" : "●";
+		lines.push(`  ${readIcon} ${m.id}: ${m.from}→${m.to} [${m.type}] ${m.content.slice(0, 80)}`);
 	}
 	return lines.join("\n");
 }

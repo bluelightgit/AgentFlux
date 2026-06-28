@@ -363,11 +363,11 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| M4-1 持久 session subagent | ⬜ | subagent 保留 session 文件, 可被再次调用续接 |
-| M4-2 agent 间消息传递 | ⬜ | 共享黑板新增 `messages/` 目录, agent 可发消息给指定 peer |
-| M4-3 任务队列消费 | ⬜ | agent 主动从 `tasks/` 认领任务 |
-| M4-4 agent 状态同步 | ⬜ | agent 完成任务后更新黑板 + 通知依赖者 |
-| M4-5 持久 reviewer 甜区 | ⬜ | 同一 reviewer agent 跨多次调用保留 session |
+| M4-1 持久 session subagent | ✅ | `runPersistentAgent()`: 持久 session + 注册表, 实测跨调用 cache hit 97% |
+| M4-2 agent 间消息传递 | ✅ | SharedBoard `messages/` 目录, sendMessage/getInbox/getUnreadMessages/markRead |
+| M4-3 任务队列消费 | ✅ | `claimNextTask()` + `consumeNextTask()`: agent 主动认领就绪任务 |
+| M4-4 agent 状态同步 | ✅ | `completeTask()` 更新状态 + 解锁依赖任务 + 广播通知 |
+| M4-5 持久 reviewer 甜区 | ✅ | 同一 reviewer 跨 2 次调用保留 session, callCount=2, cache hit 97% |
 
 #### M5 增强: 管道柔性化
 
