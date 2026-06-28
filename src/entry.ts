@@ -31,7 +31,8 @@ import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } fr
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, type ParallelSubagentTask } from "./extension/subagent";
-import { registerForkMode, handleForkCommand } from "./extension/fork-mode";
+import { registerForkMode, handleForkCommand, getForkCandidates } from "./extension/fork-mode";
+import { handleForkExploreCommand, handleForkCompareCommand, handleForkPruneCommand } from "./extension/fork-workflow";
 import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } from "./extension/compaction-advisor";
 import { handleTeamCommand, type TeamContext } from "./extension/team";
 import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
@@ -303,7 +304,40 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "mode") return cmdMode(parts[1] as Preset | undefined, ctx);
 			if (sub === "preference") return cmdPreference(ctx);
 			if (sub === "project") return cmdProject(ctx);
-			if (sub === "fork") return handleForkCommand(parts.slice(1), ctx);
+			if (sub === "fork") {
+				const forkArgs = parts.slice(1);
+				// M3-1: /flux fork explore <task>
+				if (forkArgs[0] === "explore") {
+					const exploreTask = forkArgs.slice(1).join(" ");
+					const result = await handleForkExploreCommand(exploreTask, ctx, {
+						sessionId, telemetry,
+						model: ctx.model?.id,
+						provider: teamCtx?.modelsConfig?.models?.[ctx.model?.id ?? ""]?.provider,
+					});
+					if (ctx.hasUI) ctx.ui.notify(result, "info"); else console.log(result);
+					return;
+				}
+				// M3-2/M3-3: /flux fork compare
+				if (forkArgs[0] === "compare") {
+					const result = await handleForkCompareCommand(ctx, {
+						sessionId, telemetry,
+						model: ctx.model?.id,
+						provider: teamCtx?.modelsConfig?.models?.[ctx.model?.id ?? ""]?.provider,
+					});
+					if (ctx.hasUI) ctx.ui.notify(result, "info"); else console.log(result);
+					return;
+				}
+				// M3-4: /flux fork prune <branchId|A|B> [reason]
+				if (forkArgs[0] === "prune") {
+					const result = await handleForkPruneCommand(forkArgs.slice(1), ctx, { sessionId, telemetry });
+					if (ctx.hasUI) ctx.ui.notify(result, "info"); else console.log(result);
+					return;
+				}
+				// 原有 fork 命令
+				const result = await handleForkCommand(forkArgs, ctx);
+				if (ctx.hasUI) ctx.ui.notify(result, "info"); else console.log(result);
+				return;
+			}
 			if (sub === "complexity") return cmdComplexity(ctx);
 			if (sub === "team") {
 				if (!teamCtx) {

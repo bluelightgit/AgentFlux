@@ -354,10 +354,10 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| M3-1 fork 工作流封装 | ⬜ | `/flux fork explore <task>` 一键 fork A/B |
-| M3-2 fork 结果比较 | ⬜ | LLM 对比两分支输出, 推荐胜者 |
-| M3-3 fork merge 自动化 | ⬜ | 读取两分支 last assistant message, LLM 合并注入主分支 |
-| M3-4 fork prune | ⬜ | 一键丢弃失败分支 + 记录原因 |
+| M3-1 fork 工作流封装 | ✅ | `/flux fork explore <task>` 一键 fork A/B, fork-workflow.ts |
+| M3-2 fork 结果比较 | ✅ | `compareAndMergeForks()` LLM 对比两分支输出, 推荐胜者 |
+| M3-3 fork merge 自动化 | ✅ | LLM 合并最佳部分, 注入当前分支 via appendEntry |
+| M3-4 fork prune | ✅ | `/flux fork prune <A|B|id>` 标记分支为 pruned + 记录原因 |
 
 #### M4 实现: 持久 multi-agent (从零搭建)
 
