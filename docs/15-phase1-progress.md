@@ -390,3 +390,6 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | F3-3 反馈闭环 | ✅ | `ExperienceStore`: record/querySimilar/suggest/importFromTelemetry, 统计版 "穷人 RL" |
 | F3-4 step-level model routing | ✅ | `selectModelForStep()`: 按步骤复杂度选 model + thinking, 预算约束降级 |
 | F3-8 override_mode: auto | ✅ | `route()` 集成 overrideMode + experienceRecommendation, auto 模式高置信度经验直接覆盖 |
+| F3-5 Python sidecar | ✅ | `SidecarClient` stdio JSON 协议, Python 不可用时 TS 启发式回退 |
+| F3-6 层2 预算路由 | ✅ | `optimizeBudget()` 启发式降级: 非关键角色先降, 关键角色保底能力 |
+| F3-7 层3 经验路由 | ✅ | `SidecarClient.suggestMode/rlUpdate` 回退到 ExperienceStore 统计 (穷人 RL) |
