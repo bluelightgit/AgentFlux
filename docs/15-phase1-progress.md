@@ -373,8 +373,8 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
-| M5-1 动态任务分解 | ⬜ | planner 输出结构化任务 DAG (JSON) |
-| M5-2 DAG 执行器 | ⬜ | 按拓扑序执行, 独立节点并行 |
-| M5-3 条件分支 | ⬜ | review 失败 → 回 implementer 修复 → 重新 review |
-| M5-4 质量门 | ⬜ | acceptance criteria 检查, 不通过自动重试 (≤2 次) |
-| M5-5 管道中断/恢复 | ⬜ | 保存执行状态到黑板, 中断后可从断点续跑 |
+| M5-1 动态任务分解 | ✅ | `generateTaskDAG()`: planner 输出结构化任务 DAG (JSON), 实测 3 节点 |
+| M5-2 DAG 执行器 | ✅ | `executeDAG()`: 拓扑序执行, 独立节点并行, 2 节点 DAG 全通过 |
+| M5-3 条件分支 | ✅ | reviewer 失败 → 重跑 implementer, 实测验证 |
+| M5-4 质量门 | ✅ | acceptance criteria 检查 + 自动重试, t2 首次失败重试后通过 |
+| M5-5 管道中断/恢复 | ✅ | `dag-state.json` 保存执行状态到黑板 |
