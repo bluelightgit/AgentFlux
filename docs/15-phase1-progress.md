@@ -345,9 +345,9 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | M2-1 并行 subagent | ✅ | `runSubagentsParallel` + `flux_subagent_parallel` 工具, 实测 1.80x 加速 |
-| M2-2 subagent 持久化 | ⬜ | 可选保留 session 文件, 为 M4 持久 agent 打基础 |
-| M2-3 工具白名单执行 | ⬜ | 验证 `--tools` 参数实际限制子进程工具 |
-| M2-4 reasoning effort 传递 | ⬜ | subagent 按角色传 `--thinking` 参数, 见 [docs/21](21-reasoning-effort.md) |
+| M2-2 subagent 持久化 | ✅ | `persistent` + `sessionDir` 参数, `--session-id` 替代 `--no-session`, 实测 cache hit 99% |
+| M2-3 工具白名单执行 | ✅ | `--tools` 参数验证: read-only agent 无法写入, bash agent 可执行命令 |
+| M2-4 reasoning effort 传递 | ✅ | `--thinking` 参数按角色/调用配置, 内置角色 planner/reviewer=high, implementer=medium |
 | M2-5 subagent 结果质量检查 | ⬜ | 轻量级 LLM 调用验证产出 |
 
 #### M3 增强: 对话树 fork 工作流

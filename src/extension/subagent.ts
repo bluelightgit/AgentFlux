@@ -157,6 +157,7 @@ export interface SubagentDef {
 	provider?: string;    // pi provider name; if omitted, child inherits pi default
 	skills?: string[];      // F2: 角色特有 skills (如 ["planning", "code-review"])
 	systemPrompt: string;
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
 }
 
 export interface SubagentRunResult {
@@ -185,10 +186,12 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 			const { frontmatter, body } = parseFrontmatter<Record<string, string>>(readFileSync(file, "utf-8"));
 			if (!frontmatter.name) return null;
 			const tools = frontmatter.tools?.split(",").map((t) => t.trim()).filter(Boolean);
+			const thinking = frontmatter.thinking as SubagentDef["thinking"] | undefined;
 			return {
 				name: frontmatter.name, description: frontmatter.description ?? "",
 				tools: tools?.length ? tools : undefined, model: frontmatter.model,
 				systemPrompt: body,
+				thinking: thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinking) ? thinking : undefined,
 			};
 		} catch { /* fall through */ }
 	}
@@ -250,7 +253,12 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * @param sessionId 主 session id (telemetry 关联)
  * @param telemetry telemetry writer (可选, 不传则不写)
  * @param prefixLayout 是否加载 entry.ts (true=AgentFlux优化, false=naive对照)
- * @param onLine stdout 行回调 (可选)
+ * @param model 覆盖 agent.model
+ * @param provider 覆盖 agent.provider
+ * @param pricing 父进程用价格表重算子进程成本
+ * @param persistent M2-2: true=保留 session 文件可续接, false=一次性 ephemeral
+ * @param sessionDir M2-2: 持久 session 存储目录, 默认 .agentflux/runtime/sessions/
+ * @param thinking M2-4: 覆盖 agent.thinking 的 reasoning effort 级别
  */
 export async function runSubagent(opts: {
 	cwd: string;
@@ -262,10 +270,23 @@ export async function runSubagent(opts: {
 	model?: string;
 	provider?: string;
 	pricing?: PricingTable;  // F1-14: 父进程用价格表重算子进程成本
+	persistent?: boolean;     // M2-2: 持久 session
+	sessionDir?: string;      // M2-2: 自定义 session 目录
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--approve"];
+	const args: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--approve"];
+
+	// M2-2: 持久 session vs 一次性 ephemeral
+	if (opts.persistent) {
+		const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
+		const agentSessionId = `flux-${agent.name}`;
+		args.push("--session-dir", sDir);
+		args.push("--session-id", agentSessionId);
+	} else {
+		args.push("--no-session");
+	}
 	// skills: 如果角色定义了 skills, 用 --skill 逐个传入; 否则 --no-skills
 	if (agent.skills && agent.skills.length > 0) {
 		for (const skill of agent.skills) {
@@ -283,7 +304,9 @@ export async function runSubagent(opts: {
 	const provider = opts.provider ?? agent.provider ?? null;
 	if (provider) args.push("--provider", provider);
 	if (model) args.push("--model", model);
-	args.push("--thinking", "off");
+	// M2-4: reasoning effort — 优先 opts.thinking > agent.thinking > 默认 off
+	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
+	args.push("--thinking", thinkingLevel);
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
 	// 注入 agent system prompt (写到临时文件, 避免命令行长度/分词问题)
@@ -369,6 +392,7 @@ export async function runSubagent(opts: {
 		cacheRead: result.usage.cacheRead, cacheWrite: result.usage.cacheWrite,
 		costUsd: Number(result.usage.cost.toFixed(6)), contextTokens: result.usage.contextTokens,
 		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: result.exitCode,
+		persistent: opts.persistent ?? false, thinking: thinkingLevel,
 	});
 
 	return result;

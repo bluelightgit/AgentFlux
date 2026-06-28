@@ -26,6 +26,7 @@ export interface RoleDefinition {
 	skills?: string[];           // 角色特有 skills
 	systemPrompt?: string;       // 角色 system prompt
 	source: "md" | "json" | "builtin";  // 来源
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
 }
 
 export interface RoleInstance {
@@ -55,6 +56,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "grep", "find", "ls", "bash"],
 		systemPrompt: "You are a senior planner. Analyze the requirement, break it down into implementation steps, identify risks and dependencies. Output a structured plan with clear task boundaries. Do not write implementation code.",
 		source: "builtin",
+		thinking: "high",       // M2-4: planner 需要深度思考
 	},
 	implementer: {
 		name: "implementer",
@@ -63,6 +65,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "write", "edit", "bash", "grep", "find"],
 		systemPrompt: "You are a senior developer. Implement the task according to the plan. Write clean, maintainable code. Run tests to verify. If you encounter issues, document them.",
 		source: "builtin",
+		thinking: "medium",     // M2-4: 实现需要中等思考
 	},
 	reviewer: {
 		name: "reviewer",
@@ -71,6 +74,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "grep", "bash"],
 		systemPrompt: "You are a code reviewer. Review the diff for: correctness, security, performance, maintainability. Output: ## Issues (must fix) / ## Suggestions (should consider) / ## Looks Good. Do not modify code directly.",
 		source: "builtin",
+		thinking: "high",       // M2-4: 审查需要深度思考
 	},
 	tester: {
 		name: "tester",
@@ -130,6 +134,10 @@ function loadRolesFromMD(agentsDir: string): Map<string, RoleDefinition> {
 		const requirementRaw = frontmatter.requirement;
 		const requirement = requirementRaw ? tryParseJSON(requirementRaw) : undefined;
 
+		const thinkingRaw = frontmatter.thinking;
+		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinkingRaw)
+			? thinkingRaw as RoleDefinition["thinking"] : undefined;
+
 		roles.set(name, {
 			name,
 			description: frontmatter.description,
@@ -139,6 +147,7 @@ function loadRolesFromMD(agentsDir: string): Map<string, RoleDefinition> {
 			skills: frontmatter.skills ? parseList(frontmatter.skills) : undefined,
 			systemPrompt: body || undefined,
 			source: "md",
+			thinking,
 		});
 	}
 	return roles;
@@ -154,6 +163,9 @@ function loadRolesFromJSON(modelsConfig: any): Map<string, RoleDefinition> {
 
 	for (const [name, def] of Object.entries(rolesObj)) {
 		const d = def as any;
+		const thinkingRaw = d.thinking;
+		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinkingRaw)
+			? thinkingRaw as RoleDefinition["thinking"] : undefined;
 		roles.set(name, {
 			name,
 			description: d.description,
@@ -163,6 +175,7 @@ function loadRolesFromJSON(modelsConfig: any): Map<string, RoleDefinition> {
 			skills: d.skills,
 			systemPrompt: d.systemPrompt,
 			source: "json",
+			thinking,
 		});
 	}
 	return roles;
@@ -267,7 +280,8 @@ export function formatRoleList(roles: Map<string, RoleDefinition>): string {
 		const source = def.source === "builtin" ? "(内置)" : def.source === "json" ? "(json)" : "(md)";
 		const modelInfo = def.model ? `model=${def.model}` : def.requirement ? `req={${Object.entries(def.requirement).map(([k, v]) => `${k}:${v}`).join(",")}}` : "???";
 		const toolsInfo = def.tools ? `tools=[${def.tools.join(",")}]` : "tools=all";
-		lines.push(`  ${name.padEnd(16)} ${source}  ${modelInfo}  ${toolsInfo}`);
+		const thinkInfo = def.thinking ? `thinking=${def.thinking}` : "";
+		lines.push(`  ${name.padEnd(16)} ${source}  ${modelInfo}  ${toolsInfo}${thinkInfo ? "  " + thinkInfo : ""}`);
 		if (def.description) lines.push(`  ${"".padEnd(16)} ${def.description}`);
 	}
 	return lines.join("\n");

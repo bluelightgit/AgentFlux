@@ -218,10 +218,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_subagent",
 		label: "Flux Subagent",
-		description: "Delegate a task to a specialized AgentFlux subagent (e.g. reviewer). 子进程加载前缀布局+cache监控, 跨调用共享 L1。参数: agent (reviewer 或 .agentflux/agents/*.md 定义的), task (任务描述)",
+		description: "Delegate a task to a specialized AgentFlux subagent (e.g. reviewer). 子进程加载前缀布局+cache监控, 跨调用共享 L1。参数: agent (reviewer 或 .agentflux/agents/*.md 定义的), task (任务描述), persistent (可选, 持久 session 可续接), thinking (可选, reasoning effort: off/low/medium/high)",
 		parameters: Type.Object({
 			agent: Type.String({ description: "subagent 名称, 如 reviewer" }),
 			task: Type.String({ description: "任务描述" }),
+			persistent: Type.Optional(Type.Boolean({ description: "M2-2: 持久 session, 可跨调用续接 (默认 false)" })),
+			thinking: Type.Optional(Type.String({ description: "M2-4: reasoning effort (off/minimal/low/medium/high/xhigh), 默认跟随 agent 定义" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
 			const agent = loadSubagent(ctx.cwd, params.agent);
@@ -229,10 +231,14 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `AgentFlux: unknown subagent '${params.agent}'. 可用: reviewer (内建) 或 .agentflux/agents/*.md` }], details: {} };
 			}
 			const config = loadConfig(ctx.cwd);
+			const validThinking = params.thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(params.thinking)
+				? params.thinking as any : undefined;
 			const r = await runSubagent({
 				cwd: ctx.cwd, agent, task: params.task, sessionId,
 				telemetry, prefixLayout: config.cache.prefix_layout === "static_first",
 				pricing: pricingTable ?? undefined,
+				persistent: params.persistent ?? false,
+				thinking: validThinking,
 			});
 			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
 		},

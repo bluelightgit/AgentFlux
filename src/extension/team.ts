@@ -371,5 +371,6 @@ function roleToSubagent(role: RoleDefinition, model: string, teamCtx: TeamContex
 		provider,                   // undefined 时子进程继承 pi 默认 provider
 		systemPrompt: role.systemPrompt ?? `You are a ${role.name}.`,
 		skills: skills.length > 0 ? skills : undefined,
+		thinking: role.thinking,      // M2-4: 传递 reasoning effort
 	};
 }

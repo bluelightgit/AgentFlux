@@ -73,6 +73,8 @@ export interface SubagentRunEvent extends BaseEvent {
 	cacheHitRate: number;
 	prefixLayout: boolean;
 	exitCode: number;
+	persistent?: boolean;   // M2-2: 是否使用持久 session
+	thinking?: string;     // M2-4: reasoning effort 级别
 }
 
 export type FluxEvent = RoutingDecisionEvent | CacheSampleEvent | ContextEvent | SubagentRunEvent;
