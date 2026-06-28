@@ -320,3 +320,61 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | F2-10 override suggest | ✅ | 非侵入式 footer hint (非弹窗) |
 | F2-11 B 维度自适应 | ✅ | compaction-advisor.ts, 5级建议 |
 | F2-12 git 统计信号 | ✅ | hotspot/recent/testCov/todo + git churn |
+
+---
+
+## Phase 2.5: 模式执行能力补全 (进行中)
+
+> 战略调整 (2026-07): 先把 M2-M5 执行能力做扎实, 再做智能路由。详见 [docs/22](22-mode-capability-roadmap.md)。
+
+### 当前模式执行能力差距
+
+| 模式 | 路由器能选 | 实际执行能力 | 差距 |
+|---|---|---|---|
+| M1 单 agent | ✅ | ✅ pi 原生 | 无 |
+| M2 主+subagent | ✅ | ⚠️ 基础 | 串行、不持久、无并行、无质量门 |
+| M3 对话树 fork | ✅ | ⚠️ 基础 | merge 手动、无 A/B 自动比较 |
+| M4 持久 multi-agent | ✅ | ❌ 几乎没有 | team 命令只是串行临时 subagent |
+| M5 管道 handoff | ✅ | ⚠️ 刚性 | 硬编码三步、无条件分支/并行/重试 |
+| M6 异构团队 | ✅ | ❌ 空白 | Phase 3 |
+
+### Phase 2.5 任务清单
+
+#### M2 增强: subagent 能力补全
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| M2-1 并行 subagent | ✅ | `runSubagentsParallel` + `flux_subagent_parallel` 工具, 实测 1.80x 加速 |
+| M2-2 subagent 持久化 | ⬜ | 可选保留 session 文件, 为 M4 持久 agent 打基础 |
+| M2-3 工具白名单执行 | ⬜ | 验证 `--tools` 参数实际限制子进程工具 |
+| M2-4 reasoning effort 传递 | ⬜ | subagent 按角色传 `--thinking` 参数, 见 [docs/21](21-reasoning-effort.md) |
+| M2-5 subagent 结果质量检查 | ⬜ | 轻量级 LLM 调用验证产出 |
+
+#### M3 增强: 对话树 fork 工作流
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| M3-1 fork 工作流封装 | ⬜ | `/flux fork explore <task>` 一键 fork A/B |
+| M3-2 fork 结果比较 | ⬜ | LLM 对比两分支输出, 推荐胜者 |
+| M3-3 fork merge 自动化 | ⬜ | 读取两分支 last assistant message, LLM 合并注入主分支 |
+| M3-4 fork prune | ⬜ | 一键丢弃失败分支 + 记录原因 |
+
+#### M4 实现: 持久 multi-agent (从零搭建)
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| M4-1 持久 session subagent | ⬜ | subagent 保留 session 文件, 可被再次调用续接 |
+| M4-2 agent 间消息传递 | ⬜ | 共享黑板新增 `messages/` 目录, agent 可发消息给指定 peer |
+| M4-3 任务队列消费 | ⬜ | agent 主动从 `tasks/` 认领任务 |
+| M4-4 agent 状态同步 | ⬜ | agent 完成任务后更新黑板 + 通知依赖者 |
+| M4-5 持久 reviewer 甜区 | ⬜ | 同一 reviewer agent 跨多次调用保留 session |
+
+#### M5 增强: 管道柔性化
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| M5-1 动态任务分解 | ⬜ | planner 输出结构化任务 DAG (JSON) |
+| M5-2 DAG 执行器 | ⬜ | 按拓扑序执行, 独立节点并行 |
+| M5-3 条件分支 | ⬜ | review 失败 → 回 implementer 修复 → 重新 review |
+| M5-4 质量门 | ⬜ | acceptance criteria 检查, 不通过自动重试 (≤2 次) |
+| M5-5 管道中断/恢复 | ⬜ | 保存执行状态到黑板, 中断后可从断点续跑 |

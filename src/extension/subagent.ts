@@ -24,6 +24,131 @@ import { calcCost, lookupPrice } from "../core/pricing";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { TelemetryWriter } from "../telemetry/events";
 
+// ──────────────────────────────── M2-1: 并行 subagent ────────────────────────────────
+
+export interface ParallelSubagentTask {
+	agent: SubagentDef;
+	task: string;
+	label?: string;             // 可选标签, 用于结果区分 (默认用 agent.name)
+}
+
+export interface ParallelRunResult {
+	results: SubagentRunResult[];
+	wallClockMs: number;        // 并行总耗时
+	sumIndividualMs: number;    // 各 agent 耗时之和 (用于计算加速比)
+	speedupRatio: number;       // sumIndividual / wallClock (1.0=无加速, 2.0=理想双线程)
+	totalCost: number;
+	allSucceeded: boolean;
+	errors: string[];           // 失败 agent 的错误信息
+}
+
+/**
+ * 并行运行多个 subagent (M2-1).
+ *
+ * 每个 subagent 是独立子进程, 天然并行.
+ * 一个 agent 失败不影响其他 agent (隔离错误).
+ *
+ * @param tasks 要并行执行的 agent 任务列表
+ * @param common 共享参数 (cwd, sessionId, telemetry, prefixLayout, pricing)
+ * @returns ParallelRunResult 包含所有结果 + 并行性能指标
+ */
+export async function runSubagentsParallel(
+	tasks: ParallelSubagentTask[],
+	common: {
+		cwd: string;
+		sessionId: string;
+		telemetry?: TelemetryWriter;
+		prefixLayout: boolean;
+		pricing?: PricingTable;
+	},
+): Promise<ParallelRunResult> {
+	const wallStart = Date.now();
+
+	// 为每个 task 记录独立开始时间, 用于计算 sumIndividualMs
+	const timings: Array<{ start: number; end: number }> = [];
+
+	// Promise.all 包装: 每个 subagent 独立运行, 错误隔离
+	const settled = await Promise.allSettled(
+		tasks.map((t, i) => {
+			const individualStart = Date.now();
+			return runSubagent({
+				cwd: common.cwd,
+				agent: t.agent,
+				task: t.task,
+				sessionId: common.sessionId,
+				telemetry: common.telemetry,
+				prefixLayout: common.prefixLayout,
+				pricing: common.pricing,
+			}).then(result => {
+				timings[i] = { start: individualStart, end: Date.now() };
+				return result;
+			});
+		}),
+	);
+
+	const wallClockMs = Date.now() - wallStart;
+
+	// 收集结果
+	const results: SubagentRunResult[] = [];
+	const errors: string[] = [];
+	let totalCost = 0;
+	let allSucceeded = true;
+
+	for (let i = 0; i < settled.length; i++) {
+		const s = settled[i];
+		if (s.status === "fulfilled") {
+			results.push(s.value);
+			totalCost += s.value.usage.cost;
+			if (s.value.exitCode !== 0 || s.value.errorMessage) {
+				allSucceeded = false;
+				errors.push(`${tasks[i].label ?? tasks[i].agent.name}: exit=${s.value.exitCode} ${s.value.errorMessage ?? ""}`);
+			}
+		} else {
+			// rejected (spawn error etc)
+			allSucceeded = false;
+			const errMsg = `${tasks[i].label ?? tasks[i].agent.name}: ${s.reason?.message ?? s.reason}`;
+			errors.push(errMsg);
+			results.push({
+				agent: tasks[i].agent.name, exitCode: -1, output: "",
+				usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+				model: null, errorMessage: errMsg,
+			});
+		}
+	}
+
+	const sumIndividualMs = timings.reduce((sum, t) => sum + (t ? (t.end - t.start) : 0), 0);
+	const speedupRatio = wallClockMs > 0 ? sumIndividualMs / wallClockMs : 1;
+
+	return {
+		results, wallClockMs, sumIndividualMs, speedupRatio,
+		totalCost: Number(totalCost.toFixed(6)), allSucceeded, errors,
+	};
+}
+
+/** 格式化并行 subagent 结果为工具返回 content */
+export function formatParallelResults(r: ParallelRunResult): string {
+	const lines: string[] = [
+		`[AgentFlux parallel: ${r.results.length} agents]`,
+		`wall ${(r.wallClockMs / 1000).toFixed(1)}s · sum ${(r.sumIndividualMs / 1000).toFixed(1)}s · speedup ${r.speedupRatio.toFixed(2)}x · $${r.totalCost.toFixed(4)} · ${r.allSucceeded ? "all ok" : `${r.errors.length} failed`}`,
+	];
+	for (const res of r.results) {
+		const hitRate = res.usage.cacheRead / (res.usage.cacheRead + res.usage.input + 1e-9);
+		lines.push(`  ── ${res.agent}: turns ${res.usage.turns} · in ${res.usage.input} · read ${res.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${res.usage.cost.toFixed(4)}${res.errorMessage ? ` · ERROR: ${res.errorMessage.slice(0, 100)}` : ""}`);
+	}
+	if (r.errors.length > 0) {
+		lines.push("", "Errors:");
+		for (const e of r.errors) lines.push(`  - ${e}`);
+	}
+	// 各 agent 输出摘要
+	lines.push("", "Outputs:");
+	for (const res of r.results) {
+		const preview = (res.output || "(no output)").slice(0, 500);
+		lines.push(`  ── ${res.agent} ──`);
+		lines.push(preview);
+	}
+	return lines.join("\n");
+}
+
 export interface SubagentDef {
 	name: string;
 	description: string;
@@ -91,13 +216,29 @@ function getSubagentEntryPath(cwd: string): string {
 /** 决定 pi 可执行路径: 用 node + pi 的 cli.js (shell:false, 避免 Windows shell 分词) */
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const req = createRequire(import.meta.url);
-	let cliPath: string;
+	let cliPath: string = "";
+
+	// Method 1: 直接 resolve (如果 exports 字段允许)
 	try {
 		cliPath = req.resolve("@earendil-works/pi-coding-agent/dist/cli.js");
-	} catch {
-		// fallback: 用 process.argv[1] (主进程入口)
+	} catch { /* exports 限制, 继续尝试 */ }
+
+	// Method 2: 通过 resolve.paths 找到 node_modules 目录, 手动拼接
+	if (!cliPath) {
+		try {
+			const searchPaths = req.resolve.paths("@earendil-works/pi-coding-agent") ?? [];
+			for (const p of searchPaths) {
+				const candidate = join(p, "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+				if (existsSync(candidate)) { cliPath = candidate; break; }
+			}
+		} catch { /* 继续回退 */ }
+	}
+
+	// Method 3: 最终回退 — process.argv[1] (主进程入口)
+	if (!cliPath) {
 		cliPath = process.argv[1] ?? "";
 	}
+
 	return { command: process.execPath, args: [cliPath, ...args] };
 }
 

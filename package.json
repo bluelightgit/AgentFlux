@@ -2,7 +2,13 @@
   "name": "agentflux",
   "version": "0.1.0",
   "description": "Agent working mode router — multi-mode orchestration + intelligent routing for pi coding agent",
-  "keywords": ["pi-package", "agent", "routing", "multi-agent", "orchestration"],
+  "keywords": [
+    "pi-package",
+    "agent",
+    "routing",
+    "multi-agent",
+    "orchestration"
+  ],
   "license": "MIT",
   "author": "AgentFlux",
   "repository": {
@@ -16,11 +22,16 @@
     "README.md"
   ],
   "pi": {
-    "extensions": ["./src/entry.ts"]
+    "extensions": [
+      "./src/entry.ts"
+    ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "@earendil-works/pi-ai": "*"
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4"
   }
 }

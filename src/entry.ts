@@ -30,7 +30,7 @@ import { collectMaturity, loadOrCreateProfile, bumpSessionHistory } from "./exte
 import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } from "./extension/footer";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
-import { loadSubagent, runSubagent, formatSubagentResult } from "./extension/subagent";
+import { loadSubagent, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, type ParallelSubagentTask } from "./extension/subagent";
 import { registerForkMode, handleForkCommand } from "./extension/fork-mode";
 import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } from "./extension/compaction-advisor";
 import { handleTeamCommand, type TeamContext } from "./extension/team";
@@ -235,6 +235,55 @@ export default function (pi: ExtensionAPI) {
 				pricing: pricingTable ?? undefined,
 			});
 			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
+		},
+	});
+
+	// ---------- M2-1: 并行 subagent 工具 ----------
+
+	pi.registerTool({
+		name: "flux_subagent_parallel",
+		label: "Flux Parallel Subagents",
+		description: "Launch multiple AgentFlux subagents in parallel (M2-1). Each agent runs as an independent child process. One failure does not affect others. Use for independent tasks like parallel code review of multiple files, or running reviewer + tester simultaneously. Returns combined results with wall-clock vs sum timing and speedup ratio.",
+		parameters: Type.Object({
+			agents: Type.Array(Type.Object({
+				agent: Type.String({ description: "subagent 名称, 如 reviewer" }),
+				task: Type.String({ description: "该 agent 的任务描述" }),
+				label: Type.Optional(Type.String({ description: "可选标签用于区分结果" })),
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+			if (!params.agents || params.agents.length === 0) {
+				return { content: [{ type: "text", text: "AgentFlux: no agents specified for parallel execution" }], details: {} };
+			}
+			if (params.agents.length > 5) {
+				return { content: [{ type: "text", text: `AgentFlux: too many parallel agents (${params.agents.length}), max 5` }], details: {} };
+			}
+
+			const config = loadConfig(ctx.cwd);
+			const tasks: ParallelSubagentTask[] = [];
+			const loadErrors: string[] = [];
+
+			for (const a of params.agents) {
+				const agent = loadSubagent(ctx.cwd, a.agent);
+				if (!agent) {
+					loadErrors.push(`unknown subagent '${a.agent}'`);
+					continue;
+				}
+				tasks.push({ agent, task: a.task, label: a.label });
+			}
+
+			if (tasks.length === 0) {
+				return { content: [{ type: "text", text: `AgentFlux: no valid agents loaded. Errors: ${loadErrors.join("; ")}` }], details: {} };
+			}
+
+			console.error(`[flux] parallel subagent: launching ${tasks.length} agents`);
+			const result = await runSubagentsParallel(tasks, {
+				cwd: ctx.cwd, sessionId, telemetry,
+				prefixLayout: config.cache.prefix_layout === "static_first",
+				pricing: pricingTable ?? undefined,
+			});
+			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
+			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };
 		},
 	});
 

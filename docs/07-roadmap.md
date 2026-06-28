@@ -1,6 +1,6 @@
 # 07 - 落地路线
 
-分四个阶段,按 ROI 排序。每阶段都有可验证的交付物和量化指标,前一阶段不达标不进入下一阶段。
+分五个阶段,按 ROI 排序。每阶段都有可验证的交付物和量化指标,前一阶段不达标不进入下一阶段。
 
 ## 阶段总览
 
@@ -9,7 +9,12 @@
 | Phase 0 | ✅ 完成 | 文档、架构、UI 方向 | 立论成立 |
 | Phase 1 | ✅ 完成 | M1/M2 + 前缀布局 + mask + cache 监控 + 价格层 + TUI 菜单 | 成本可观测, prefix layout subagent 省 37.8% |
 | Phase 2 | ✅ 完成 | M3 fork + RGAO 复杂度路由 + 模型能力 + 多 agent 基础 | 多模式路由 + team 管道 |
-| Phase 3 | 规划中 | M6 异构 + ILP/RL 路由 + Web control plane/Electron | 护城河 |
+| **Phase 2.5** | **进行中** | **M2-M5 执行能力补全** | **每种模式真正能发挥设计价值** |
+| Phase 3 | 规划中 | M6 异构 + 任务级路由 + 反馈闭环 + step-level routing | 护城河 |
+| Phase 4 | 规划中 | Web dashboard / Electron shell | 产品化 |
+
+> **战略调整 (2026-07)**: 先把 M2-M5 各种 agent 模式的执行能力做扎实, 再做智能路由。
+> 理由: 路由器选了模式但模式本身执行能力不够 = 选了也白选。详见 [docs/22](22-mode-capability-roadmap.md)。
 
 ## 用户端路线总览
 
@@ -22,7 +27,9 @@
 
 原则:先用 pi TUI 验证核心价值,但从 Phase 1 开始写统一 telemetry,为 Web/Electron 留接口。
 
-## 战略转向 (2026-06)
+## 战略转向历史
+
+### 2026-06: 从成本优化到多模式路由
 
 用户反馈: 当前方向过于聚焦省钱, 但单 agent 理论上最省 token。**多模式系统和智能路由才是核心价值**, 不是成本优化。
 
@@ -30,7 +37,16 @@
 - **核心护城河是路由决策**: 何时用哪种模式、如何分解任务、何时异构多 agent (M6) 有不可替代价值
 - 实证依据: OneFlow 论文 (arxiv 2601.12307) 证明同构多 agent 可被单 agent 模拟, 异构才是多 agent 的唯一不可替代价值
 
-> 详见 [docs/20 实证数据](20-empirical-findings.md) 和 [docs/15 进度](15-phase1-progress.md)。
+### 2026-07: 从路由优先到模式能力优先
+
+用户反馈: 应先把 subagent、会话树分叉、multi-agent 等功能做好, 再做分配/路由。
+
+- 当前路由器能选 M1-M6, 但 M4/M6 执行能力几乎为空, 选了和没选一样
+- **先有可用的工具, 再做选择工具的智能**
+- Phase 2.5 (新增): M2-M5 执行能力补全, 不动路由器, 专注执行层
+- Phase 3 (调整): 智能路由后置, 前置条件改为 Phase 2.5 完成
+
+> 详见 [docs/22 模式能力优先路线图](22-mode-capability-roadmap.md) 和 [docs/21 reasoning effort](21-reasoning-effort.md)。
 
 ---
 
@@ -133,43 +149,127 @@
 
 ---
 
-## Phase 3:异构 + 自适应路由(2 月+,TS + Python sidecar)
+## Phase 2.5: 模式执行能力补全 (进行中)
 
-**目标**:补上 multi-agent 的真价值(M6 异构),并启用层 2/3 自适应路由,形成护城河。
+**目标**: 让 M2-M5 每种模式真正能发挥其设计价值。M6 留到 Phase 3。不动路由器, 专注执行层。
 
-**技术栈**:TypeScript(pi extension)+ Python sidecar(ILP/RL)。
+**技术栈**: 纯 TypeScript。
+
+**详细设计**: 见 [docs/22](22-mode-capability-roadmap.md)。
+
+**交付物**:
+
+#### M2 增强: subagent 能力补全
+
+| 任务 | 内容 | 价值 |
+|---|---|---|
+| M2-1 并行 subagent | `Promise.all` 调用多个 subagent | 解锁 C2 stage 并行, wall-clock 减半 |
+| M2-2 subagent 持久化 | 可选保留 session 文件 (去掉 `--no-session`) | 为 M4 持久 agent 打基础 |
+| M2-3 工具白名单执行 | 验证 `--tools` 参数实际限制子进程工具 | 角色隔离落地 (planner 只读) |
+| M2-4 reasoning effort 传递 | subagent 按角色传 `--thinking` 参数 | planner high / tester low, 见 [21](21-reasoning-effort.md) |
+| M2-5 subagent 结果质量检查 | 轻量级 LLM 调用验证产出 | subagent 产出可靠性 |
+
+#### M3 增强: 对话树 fork 工作流
+
+| 任务 | 内容 | 价值 |
+|---|---|---|
+| M3-1 fork 工作流封装 | `/flux fork explore <task>` 一键 fork A/B | 用户不需要手动 fork + 输入两次任务 |
+| M3-2 fork 结果比较 | LLM 对比两分支输出, 推荐胜者 | 自动 A/B 决策 |
+| M3-3 fork merge 自动化 | 读取两分支 last assistant message, LLM 合并注入主分支 | 自动 merge 能力 |
+| M3-4 fork prune | 一键丢弃失败分支 + 记录原因 | 清理对话树, 保留决策审计 |
+
+#### M4 实现: 持久 multi-agent (从零搭建)
+
+| 任务 | 内容 | 价值 |
+|---|---|---|
+| M4-1 持久 session subagent | subagent 保留 session 文件, 可被再次调用续接 | L2 cache 跨调用复用, 持久记忆 |
+| M4-2 agent 间消息传递 | 共享黑板新增 `messages/` 目录, agent 可发消息给指定 peer | 突破 star 拓扑限制 |
+| M4-3 任务队列消费 | agent 主动从 `tasks/` 认领任务, 不只是被动接收 | leader-worker 模式落地 |
+| M4-4 agent 状态同步 | agent 完成任务后更新黑板 + 通知依赖者 | DAG 依赖推进 |
+| M4-5 持久 reviewer 甜区 | 同一 reviewer agent 跨多次调用保留 session | 验证 L2 长期收益 > compaction 代价 |
+
+#### M5 增强: 管道柔性化
+
+| 任务 | 内容 | 价值 |
+|---|---|---|
+| M5-1 动态任务分解 | planner 输出结构化任务 DAG (JSON), 不是纯文本 handoff | 从"三步固定"到"N 步动态" |
+| M5-2 DAG 执行器 | 按拓扑序执行, 独立节点并行 | 真正的管道编排 |
+| M5-3 条件分支 | review 失败 → 回 implementer 修复 → 重新 review | 闭环验证 |
+| M5-4 质量门 | acceptance criteria 检查, 不通过自动重试 (≤2 次) | 产出质量保障 |
+| M5-5 管道中断/恢复 | 保存执行状态到黑板, 中断后可从断点续跑 | 长任务健壮性 |
+
+**验证指标**:
+- M2 并行: 两个独立 subagent wall-clock ≤ 串行的 60%
+- M3 fork explore: A/B 比较自动推荐胜者, 用户确认率 > 70%
+- M4 持久 reviewer: 跨 3 次调用 L2 cache 命中率 > 50%, 成本低于 3 次 fresh subagent
+- M5 DAG: 4 节点 DAG (2 并行 + 2 串行) 正确执行, 并行节点 wall-clock < 串行节点之和
+- M5 质量门: acceptance criteria 不通过时自动重试, 重试后通过率 > 80%
+
+**风险与对冲**:
+- 持久 session 的 compaction 侵蚀 → 先验证短周期 (3-5 次调用) 甜区, 长期场景后置
+- DAG 执行器复杂度 → 先支持线性 + 单层并行, 复杂 DAG 后续迭代
+- agent 间消息传递的时序问题 → 文件锁 + 简单轮询, 不做复杂 IPC
+- 质量门 LLM 调用增加成本 → 用便宜模型 (flash/haiku) 做门检查
+
+**为什么先做这步**: 路由器选了模式但模式执行能力不够 = 选了也白选。先有可用的工具, 再做选择工具的智能。
+
+---
+
+## Phase 3: 异构 + 智能路由 (规划中, TS + Python sidecar)
+
+**前置条件**: Phase 2.5 的 M2-M5 能力补全完成。
+
+**目标**: 补上 multi-agent 的真价值 (M6 异构), 并启用任务级路由 + 反馈闭环 + step-level routing, 形成护城河。
+
+**技术栈**: TypeScript (pi extension) + Python sidecar (ILP/RL)。
 
 **交付物**:
 
 | 任务 | 实现 | 文档依据 |
 |---|---|---|
-| F3-1 M4 持久 multi-agent | 多 pi RPC 进程 + eventBus + 自建共享 task list(SQLite) | [10](10-pi-integration.md) §2 M4 |
-| F3-2 M6 异构团队 | subagent + per-agent model config(opus 决策 / sonnet 执行) | [03](03-modes.md) M6 |
-| F3-3 Python sidecar | stdio JSON 通信,ortools(ILP)/stable-baselines(RL) | [09](09-tech-stack.md) |
-| F3-4 层2 预算路由(ILP) | `get_session_stats` cost + Python ILP 选 model 组合 | [05](05-routing.md) §层2 |
-| F3-5 层3 经验路由(RL) | `pi.appendEntry` 记录反馈 → Python RL 更新策略 | [05](05-routing.md) §层3 |
-| F3-6 override_mode: auto | 路由器全自动,用户配置仅作约束 | [04](04-config-schema.md) |
-| F3-7 持久 reviewer 甜区 | subagent 复用同一 session 文件,跨 PR 记忆项目约定 | [10](10-pi-integration.md) §6 |
+| F3-1 M6 异构团队 | per-agent model config + reasoning effort (opus 决策 / flash 执行) | [03](03-modes.md) M6, [21](21-reasoning-effort.md) |
+| F3-2 任务级路由 | `input` 事件做任务分类, 基于 git diff 而非全仓库 | [05](05-routing.md) §层1 |
+| F3-3 反馈闭环 | ExperienceStore 消费 telemetry, 统计最优模式 | [05](05-routing.md) §层3 |
+| F3-4 step-level model routing | 每步按任务复杂度选 model + effort | [21](21-reasoning-effort.md) |
+| F3-5 Python sidecar | stdio JSON 通信, ortools (ILP) / stable-baselines (RL) | [09](09-tech-stack.md) |
+| F3-6 层2 预算路由 (ILP) | Python ILP 选 model 组合 + effort | [05](05-routing.md) §层2 |
+| F3-7 层3 经验路由 (RL) | Python RL 策略优化 | [05](05-routing.md) §层3 |
+| F3-8 override_mode: auto | 路由器全自动, 用户配置仅作约束 | [04](04-config-schema.md) |
 
 **验证指标**:
-- 异构团队成本 ≤ 同构 M4 的 70%,accuracy 不降(对照 BAMAS −86%)
-- 经验路由迭代 N 轮后,cost 比 Phase 2 再降 ≥ 20%(对照 EvoRoute −80%)
-- 持久 reviewer 跨 PR 场景 L2 收益超 compaction 代价
+- 异构团队成本 ≤ 同构 M4 的 70%, accuracy 不降 (对照 BAMAS −86%)
+- 任务级路由 misrouting ≤ 10% (对照 RGAO 8.2%)
+- 经验路由迭代 N 轮后, cost 比 Phase 2.5 再降 ≥ 20% (对照 EvoRoute −80%)
+- step-level routing: 72% 成本降幅, 质量降幅 < 3% (对照 AgentRouter)
 
 **风险与对冲**:
-- M4 共享状态自建工作量大 → 先做"持久 reviewer subagent"覆盖 80% 甜区
-- ILP/RL 实现复杂 → 先用启发式 model 分配替代 ILP
-- RL 冷启动可能劣于静态路由 → 冷启动期 `override_mode: suggest`,数据足够再切 auto
+- ILP/RL 实现复杂 → 先用启发式 model 分配替代 ILP, 反馈闭环用统计替代 RL
+- RL 冷启动可能劣于静态路由 → 冷启动期 `override_mode: suggest`, 数据足够再切 auto
+- M6 异构 cache 跨 model 失效 → 用 model 差价补偿, 异构摊薄成本
+
+---
+
+## Phase 4: 产品化 (规划中)
+
+**目标**: 从 pi TUI 扩展到 Web/Electron, 支撑多项目管理和长期趋势分析。
+
+**交付物**:
+
+| 任务 | 实现 | 文档依据 |
+|---|---|---|
+| F4-1 Web read-only dashboard | 路由历史 / cache 趋势 / 成本分析, 消费 events.jsonl | [12](12-ui-direction.md) UI-B |
+| F4-2 Web control plane | 偏好调整 / 模式覆盖 / agent pause/resume | [12](12-ui-direction.md) UI-C |
+| F4-3 Electron/Tauri shell | 托盘 / 通知 / 后台 daemon / 多项目管理 | [12](12-ui-direction.md) UI-D |
 
 ---
 
 ## 跨阶段原则
 
-1. **每阶段可独立交付价值**:Phase 1 不依赖 Phase 2,用户随时可用
-2. **数据驱动升级**:Phase 3 的 RL 依赖 Phase 1/2 积累的执行数据
-3. **不提前优化**:异构和 RL 放最后,先把单 session 内闭环做扎实
-4. **可回退**:每个执行器都是可选的,路由失败回退到 M1
-5. **纯 TS 先行,Python 后置**:Phase 1/2 纯 TS 快速验证,Phase 3 才引入 sidecar
+1. **每阶段可独立交付价值**: Phase 1 不依赖 Phase 2, 用户随时可用
+2. **模式能力先于路由智能**: Phase 2.5 补全执行能力, Phase 3 才做智能路由
+3. **数据驱动升级**: Phase 3 的 RL 依赖 Phase 1/2/2.5 积累的执行数据
+4. **可回退**: 每个执行器都是可选的, 路由失败回退到 M1
+5. **纯 TS 先行, Python 后置**: Phase 1/2/2.5 纯 TS 快速验证, Phase 3 才引入 sidecar
 
 ## 下一步(离开 Phase 0 前)
 

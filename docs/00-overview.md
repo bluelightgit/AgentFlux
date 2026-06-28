@@ -40,6 +40,8 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 | **角色设计** | 模板定义 + 实例化 + 自定义 | [18](18-agent-roles.md) |
 | **多 agent 架构** | 共享黑板 + 角色信箱 + 文件沟通 | [19](19-multi-agent-architecture.md) |
 | **实证数据** | 缓存实验 + 成本实验 + 工程发现 | [20](20-empirical-findings.md) |
+| **Reasoning effort** | 模型路由新维度: 思考深度 × 角色需求 | [21](21-reasoning-effort.md) |
+| **模式能力路线图** | 先做模式执行能力, 再做智能路由 | [22](22-mode-capability-roadmap.md) |
 
 ## 命名说明
 
@@ -59,11 +61,12 @@ AgentFlux 不发明新的 agent,而是做一层 **工作模式的路由与编排
 4. **有据可依**:每个决策点引用学术/工业证据,不拍脑袋
 5. **先验证后扩展**:Phase 1 只做能立刻让成本可观测并优化的部分 (价格层 docs/16, 不套用第三方 60% 锚点)。实测数据见 [docs/20](20-empirical-findings.md)
 6. **多模式路由是核心**: 成本优化是次要, 智能路由决策 (何时用哪种模式) 才是护城河
+7. **模式能力优先于路由智能**: 先把 M2-M5 执行能力做扎实, 再做任务级路由/反馈闭环 (见 [docs/22](22-mode-capability-roadmap.md))
 
 ## 项目状态
 
 ✅ Phase 1+2 完成。Phase 1 (14/14): 缓存/路由/telemetry/价格层/TUI 菜单。Phase 2 (12/12): M3 fork/RGAO 复杂度路由/模型能力/多 agent 架构/team 管道。
 
-**战略转向**: 核心价值是多模式智能路由, 不是成本优化。成本优化是次要 (compaction 避免 15%, prefix layout subagent 37.8%)。护城河在路由决策: 何时用哪种模式, 何时异构多 agent (M6) 有不可替代价值。见 [roadmap](07-roadmap.md)、[进度](15-phase1-progress.md)、[实证数据](20-empirical-findings.md)。
+**战略调整 (2026-07)**: 先做模式执行能力 (Phase 2.5), 再做智能路由 (Phase 3)。理由: 路由器选了模式但模式执行能力不够 = 选了也白选。详见 [模式能力路线图](22-mode-capability-roadmap.md)。
 
-下一步: Phase 3 (ILP/RL 路由、M6 异构团队、Python sidecar) 或用 AgentFlux 自迭代。
+下一步: Phase 2.5 (M2-M5 执行能力补全) → Phase 3 (M6 异构 + 任务级路由 + 反馈闭环)。
