@@ -389,3 +389,4 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | F3-2 任务级路由 | ✅ | `classifyTask()` + `analyzeTaskScope()` (git diff) + `computeTaskComplexity()` + `route()` 集成 |
 | F3-3 反馈闭环 | ✅ | `ExperienceStore`: record/querySimilar/suggest/importFromTelemetry, 统计版 "穷人 RL" |
 | F3-4 step-level model routing | ✅ | `selectModelForStep()`: 按步骤复杂度选 model + thinking, 预算约束降级 |
+| F3-8 override_mode: auto | ✅ | `route()` 集成 overrideMode + experienceRecommendation, auto 模式高置信度经验直接覆盖 |

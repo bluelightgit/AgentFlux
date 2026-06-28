@@ -17,6 +17,7 @@ import {
 import { presetToExpectedMode } from "./config";
 import type { TaskComplexitySignal } from "./complexity";
 import type { TaskRoutingSignal } from "./task-router";
+import type { ModeRecommendation } from "./experience-store";
 
 /** 项目成熟度 → baseline mode (docs/14) */
 export function maturityBaselineMode(stage: ProjectStage): Mode {
@@ -61,6 +62,10 @@ export interface RouteInput {
 	taskRoutingSignal?: TaskRoutingSignal;
 	/** 显式指定的模式信号 (兼容旧接口, taskSignal 优先) */
 	taskSignalMode?: Mode;
+	/** Phase 3 F3-8: override mode. 默认 suggest */
+	overrideMode?: "auto" | "manual" | "suggest";
+	/** Phase 3 F3-3: 经验库推荐 (如果可用) */
+	experienceRecommendation?: ModeRecommendation | null;
 }
 
 /** Phase 1+2 路由主入口 */
@@ -99,6 +104,37 @@ export function route(input: RouteInput): RoutingDecision {
 		if (s > bestScore) { bestScore = s; best = m; }
 	}
 
+	// Phase 3 F3-8: override_mode=auto 时的处理
+	const overrideMode = input.overrideMode ?? "suggest";
+
+	// Phase 3 F3-3: 如果有经验库推荐且置信度高, 在 auto 模式下直接采用
+	let experienceApplied = false;
+	if (input.experienceRecommendation && input.experienceRecommendation.confidence >= 0.7) {
+		if (overrideMode === "auto") {
+			// auto 模式: 经验推荐直接覆盖
+			best = input.experienceRecommendation.mode;
+			bestScore = -1; // 标记为经验覆盖
+			experienceApplied = true;
+		} else {
+			// suggest 模式: 经验推荐作为候选加权
+			candidates.add(input.experienceRecommendation.mode);
+			// 重新打分
+			for (const m of candidates) {
+				let s = scoreMode(m, input.pref);
+				if (phase3Signal && m === phase3Signal.recommendedMode) {
+					s += 0.4 + phase3Signal.complexity.tier * 0.12;
+				}
+				if (input.taskSignal && m === input.taskSignal.recommendedMode) {
+					s += 0.3 + input.taskSignal.complexityTier * 0.1;
+				}
+				if (m === input.experienceRecommendation.mode) {
+					s += input.experienceRecommendation.confidence * 0.3;
+				}
+				if (s > bestScore) { bestScore = s; best = m; }
+			}
+		}
+	}
+
 	const reason: string[] = [];
 	reason.push(`stage:${input.stage}→baseline:${baseline}`);
 	reason.push(`pref:${input.preset}→expected:${prefExpected}`);
@@ -110,6 +146,10 @@ export function route(input: RouteInput): RoutingDecision {
 		reason.push(`taskSignal:${input.taskSignalMode}`);
 	}
 	reason.push(`score:best=${best}(${bestScore.toFixed(2)})`);
+	if (input.experienceRecommendation) {
+		reason.push(`experience:${input.experienceRecommendation.mode}(conf=${input.experienceRecommendation.confidence.toFixed(2)},samples=${input.experienceRecommendation.sampleCount})${experienceApplied ? " [AUTO-APPLIED]" : ""}`);
+	}
+	reason.push(`override:${overrideMode}${overrideMode === "auto" ? " [auto]" : ""}`);
 
 	const expected = modeExpectedTiers(best);
 
@@ -127,6 +167,7 @@ export function route(input: RouteInput): RoutingDecision {
 		confidence,
 		expected,
 		biasSources: { maturity: baseline, preference: prefExpected, taskSignal: phase3Signal?.recommendedMode ?? input.taskSignal?.recommendedMode ?? input.taskSignalMode },
+		applied: overrideMode === "auto",
 	};
 }
 

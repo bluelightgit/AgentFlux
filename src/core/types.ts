@@ -169,6 +169,7 @@ export interface RoutingDecision {
 	confidence: number;      // 0-1
 	expected: { cost: "low" | "med" | "high"; latency: "low" | "med" | "high"; accuracy: "low" | "med" | "high" };
 	biasSources: { maturity?: Mode; preference?: Mode; taskSignal?: Mode };
+	applied?: boolean;       // F3-8: 是否自动应用 (override_mode=auto)
 }
 
 // ---------- 运行时状态 ----------
