@@ -387,3 +387,5 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 |---|---|---|
 | F3-1 M6 异构团队 | ✅ | per-agent model config + thinking, `executeHeterogeneousTeam()` 拓扑序异构执行 + 成本对比 |
 | F3-2 任务级路由 | ✅ | `classifyTask()` + `analyzeTaskScope()` (git diff) + `computeTaskComplexity()` + `route()` 集成 |
+| F3-3 反馈闭环 | ✅ | `ExperienceStore`: record/querySimilar/suggest/importFromTelemetry, 统计版 "穷人 RL" |
+| F3-4 step-level model routing | ✅ | `selectModelForStep()`: 按步骤复杂度选 model + thinking, 预算约束降级 |
