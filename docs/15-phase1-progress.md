@@ -378,3 +378,12 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | M5-3 条件分支 | ✅ | reviewer 失败 → 重跑 implementer, 实测验证 |
 | M5-4 质量门 | ✅ | acceptance criteria 检查 + 自动重试, t2 首次失败重试后通过 |
 | M5-5 管道中断/恢复 | ✅ | `dag-state.json` 保存执行状态到黑板 |
+
+### Phase 3: 异构 + 智能路由
+
+#### F3-1/F3-2: M6 异构团队 + 任务级路由
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| F3-1 M6 异构团队 | ✅ | per-agent model config + thinking, `executeHeterogeneousTeam()` 拓扑序异构执行 + 成本对比 |
+| F3-2 任务级路由 | ✅ | `classifyTask()` + `analyzeTaskScope()` (git diff) + `computeTaskComplexity()` + `route()` 集成 |

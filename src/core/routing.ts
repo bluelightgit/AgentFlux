@@ -16,6 +16,7 @@ import {
 } from "./types";
 import { presetToExpectedMode } from "./config";
 import type { TaskComplexitySignal } from "./complexity";
+import type { TaskRoutingSignal } from "./task-router";
 
 /** 项目成熟度 → baseline mode (docs/14) */
 export function maturityBaselineMode(stage: ProjectStage): Mode {
@@ -56,6 +57,8 @@ export interface RouteInput {
 	preset: Preset;
 	/** Phase 2: 任务复杂度信号 (RGAO 静态分析). undefined 时只用偏好+成熟度 */
 	taskSignal?: TaskComplexitySignal;
+	/** Phase 3 F3-2: 任务级路由信号 (classifyTask + git diff scope). 优先于 taskSignal */
+	taskRoutingSignal?: TaskRoutingSignal;
 	/** 显式指定的模式信号 (兼容旧接口, taskSignal 优先) */
 	taskSignalMode?: Mode;
 }
@@ -65,10 +68,16 @@ export function route(input: RouteInput): RoutingDecision {
 	const baseline = maturityBaselineMode(input.stage);
 	const prefExpected = presetToExpectedMode(input.preset);
 
+	// Phase 3 F3-2: 如果有 taskRoutingSignal, 它优先于 taskSignal
+	const phase3Signal = input.taskRoutingSignal;
+	const phase2Signal = phase3Signal ?? undefined;
+
 	// 候选集: baseline + prefExpected + 邻近 mode
 	const candidates = new Set<Mode>([baseline, prefExpected, "M1", "M2"]);
 	if (input.stage !== "Seed") candidates.add("M3");
 	if (input.pref.vector.multi_agent_willingness > 0.6) { candidates.add("M4"); candidates.add("M6"); }
+	// Phase 3: 如果有 taskRoutingSignal, 把它的推荐 mode 也加入候选
+	if (phase3Signal) candidates.add(phase3Signal.recommendedMode);
 	// Phase 2: 如果有 taskSignal, 把它的推荐 mode 也加入候选
 	if (input.taskSignal) candidates.add(input.taskSignal.recommendedMode);
 
@@ -77,6 +86,11 @@ export function route(input: RouteInput): RoutingDecision {
 	let bestScore = -Infinity;
 	for (const m of candidates) {
 		let s = scoreMode(m, input.pref);
+		// Phase 3 F3-2: taskRoutingSignal 推荐的模式额外加权 (置信度越高加权越大)
+		if (phase3Signal && m === phase3Signal.recommendedMode) {
+			const signalBoost = 0.4 + phase3Signal.complexity.tier * 0.12;
+			s += signalBoost;
+		}
 		// Phase 2: taskSignal 推荐的模式额外加权 (置信度越高加权越大)
 		if (input.taskSignal && m === input.taskSignal.recommendedMode) {
 			const signalBoost = 0.3 + input.taskSignal.complexityTier * 0.1; // tier 越高, 信号越强
@@ -88,7 +102,9 @@ export function route(input: RouteInput): RoutingDecision {
 	const reason: string[] = [];
 	reason.push(`stage:${input.stage}→baseline:${baseline}`);
 	reason.push(`pref:${input.preset}→expected:${prefExpected}`);
-	if (input.taskSignal) {
+	if (phase3Signal) {
+		reason.push(`taskRoutingSignal:${phase3Signal.classification.type}→tier${phase3Signal.complexity.tier}→${phase3Signal.recommendedMode} (${phase3Signal.reason.join("; ")})`);
+	} else if (input.taskSignal) {
 		reason.push(`taskSignal:tier${input.taskSignal.complexityTier}→${input.taskSignal.recommendedMode} (${input.taskSignal.reason.join("; ")})`);
 	} else if (input.taskSignalMode) {
 		reason.push(`taskSignal:${input.taskSignalMode}`);
@@ -97,8 +113,10 @@ export function route(input: RouteInput): RoutingDecision {
 
 	const expected = modeExpectedTiers(best);
 
-	// 置信度: 有 taskSignal 时提升
-	const confidence = input.taskSignal
+	// 置信度: 有 phase3Signal 时提升, 其次 taskSignal
+	const confidence = phase3Signal
+		? Math.min(0.9, phase3Signal.confidence + 0.05)
+		: input.taskSignal
 		? Math.min(0.85, 0.6 + input.taskSignal.complexityTier * 0.08)
 		: 0.6;
 
@@ -108,7 +126,7 @@ export function route(input: RouteInput): RoutingDecision {
 		reason,
 		confidence,
 		expected,
-		biasSources: { maturity: baseline, preference: prefExpected, taskSignal: input.taskSignal?.recommendedMode ?? input.taskSignalMode },
+		biasSources: { maturity: baseline, preference: prefExpected, taskSignal: phase3Signal?.recommendedMode ?? input.taskSignal?.recommendedMode ?? input.taskSignalMode },
 	};
 }
 
