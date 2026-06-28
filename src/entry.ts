@@ -14,6 +14,10 @@
  *   /flux complexity                        # show RGAO complexity signal
  *   /flux team status|plan|build|review|abort|roles|models|affinity|pipeline
  *   /flux compact                           # compaction advice (B-dimension adaptive)
+ *   /flux status                            # full status report (version, mode, subsystems, issues)
+ *   /flux health                            # health check (8 subsystem diagnostics)
+ *   /flux restart                           # re-initialize (reload config/pricing/models, re-run router)
+ *   /flux upgrade                           # check git remote for updates
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -40,6 +44,8 @@ import { loadPricing, type PricingTable } from "./core/pricing";
 import { showFluxMenu, type FluxMenuState, type FluxMenuCallbacks } from "./extension/flux-menu";
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
+import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
+import { loadAllRoles } from "./core/role-manager";
 
 export default function (pi: ExtensionAPI) {
 	// ---------- 可变运行时状态 ----------
@@ -114,6 +120,71 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
+	// ---------- 自重启: 重新执行初始化序列 ----------
+
+	async function performRestart(ctx: any): Promise<string> {
+		const lines: string[] = [];
+		const step = (n: number, name: string, detail: string) => {
+			lines.push(`[${n}] ${name}... ${detail}`);
+		};
+
+		step(1, "Clearing in-memory state", "done");
+		state.mode = "M2"; state.preset = "balanced"; state.expectedMode = "M2";
+		state.turnIndex = 0;
+		state.cache = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, contextTokens: 0, contextWindow: 0, contextPercent: null, cacheHitRate: 0 };
+		decision = null; routeHint = null; pricingTable = null; complexitySignal = null;
+
+		step(2, "Reloading config", "done");
+		const config = loadConfig(ctx.cwd);
+
+		step(3, "Reloading pricing table", "...");
+		try {
+			const currentModel = ctx.model?.id ?? "deepseek-v4-flash";
+			pricingTable = await loadPricing(fluxDir, config.pricing, currentModel);
+			step(3, "Reloading pricing table", pricingTable ? "OK" : "fallback");
+		} catch (e: any) {
+			step(3, "Reloading pricing table", `failed: ${e?.message}`);
+		}
+
+		step(4, "Reloading models.json", "...");
+		let modelsConfig: any = null;
+		try {
+			const modelsPath = join(fluxDir, "models.json");
+			if (existsSync(modelsPath)) {
+				modelsConfig = JSON.parse(readFileSync(modelsPath, "utf-8"));
+				step(4, "Reloading models.json", `${Object.keys(modelsConfig.models ?? {}).length} models`);
+			} else {
+				step(4, "Reloading models.json", "not found, builtins only");
+			}
+		} catch (e: any) {
+			step(4, "Reloading models.json", `failed: ${e?.message}`);
+		}
+		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
+
+		step(5, "Recollecting complexity signal", "...");
+		try {
+			complexitySignal = collectComplexitySignal(ctx.cwd);
+			step(5, "Recollecting complexity signal", `tier${complexitySignal.complexityTier} → ${complexitySignal.recommendedMode}`);
+		} catch (e: any) {
+			step(5, "Recollecting complexity signal", `failed: ${e?.message}`);
+		}
+
+		step(6, "Rebuilding team context", "done");
+
+		step(7, "Re-running router", "...");
+		runRouter(ctx);
+		step(7, "Re-running router", `${state.mode} (conf ${decision?.confidence.toFixed(2)})`);
+
+		step(8, "Updating footer", "done");
+		setFluxStatus(ctx, getState);
+
+		lines.push("");
+		lines.push(`Restart complete: mode ${state.mode} · preset ${state.preset} · stage ${state.stage}/${state.role}`);
+		lines.push(`Telemetry continuity preserved (${telemetry.path})`);
+
+		return lines.join("\n");
+	}
+
 	// ---------- 事件 ----------
 
 	pi.on("session_start", async (_event, ctx: any) => {
@@ -167,6 +238,21 @@ export default function (pi: ExtensionAPI) {
 		state.turnIndex = event.turnIndex ?? state.turnIndex + 1;
 		refreshCache(ctx);
 		emitSample(ctx);
+
+		// 自维护: 每 5 轮扫描一次错误模式
+		if (state.turnIndex > 0 && state.turnIndex % 5 === 0 && telemetry) {
+			try {
+				const issues = scanRecentIssues(telemetry.path, 20);
+				if (issues.length > 0) {
+					const issueText = formatIssues(issues);
+					// 非侵入式 footer hint (仅当没有 routeHint 时)
+					if (!routeHint) {
+						routeHint = `⚠ ${issueText}`;
+					}
+					console.error(`[flux] health: ${issueText}`);
+				}
+			} catch {}
+		}
 	});
 
 	pi.on("agent_end", async (_event, ctx: any) => {
@@ -295,7 +381,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache/mode/fork. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact",
+		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | status | health | restart | upgrade",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -350,6 +436,64 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "compact") {
 				const advice = analyzeCompaction(ctx);
 				const text = formatCompactionAdvice(advice);
+				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			// ─── 自维护子命令 ───
+
+			if (sub === "status") {
+				const vInfo = getVersionInfo(ctx.cwd);
+				const healthReport = checkHealth(ctx.cwd, fluxDir);
+				const subsystems: SubsystemStatus[] = healthReport.checks.map(c => ({
+					name: c.name, healthy: c.status === "ok",
+					detail: c.detail,
+					path: c.name === "Config" ? join(fluxDir, "agentflux.json")
+						: c.name === "Telemetry" ? telemetry?.path
+						: undefined,
+				}));
+
+				// Read persistent agents
+				const activeAgents: AgentInfo[] = [];
+				try {
+					const regPath = join(fluxDir, "runtime", "persistent-agents.json");
+					if (existsSync(regPath)) {
+						const reg = JSON.parse(readFileSync(regPath, "utf-8"));
+						for (const [name, info] of Object.entries(reg)) {
+							const a = info as any;
+							activeAgents.push({ name, role: a.role ?? "?", status: a.status ?? "?", model: a.model, callCount: a.callCount, totalCost: a.totalCost });
+						}
+					}
+				} catch {}
+
+				const issues = telemetry ? scanRecentIssues(telemetry.path, 20) : [];
+				const text = formatStatusReport(vInfo, {
+					mode: state.mode, preset: state.preset, stage: state.stage, role: state.role,
+					turnIndex: state.turnIndex, cacheHitRate: state.cache.cacheHitRate,
+					costUsd: state.cache.costUsd, branch: state.branch,
+				}, subsystems, activeAgents, issues, {
+					fluxDir, eventsPath: telemetry?.path ?? "", configPath: join(fluxDir, "agentflux.json"),
+				});
+				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			if (sub === "health") {
+				const report = checkHealth(ctx.cwd, fluxDir);
+				const text = formatHealthReport(report);
+				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			if (sub === "restart") {
+				const text = await performRestart(ctx);
+				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			if (sub === "upgrade") {
+				const info = checkUpgrade(ctx.cwd);
+				const text = formatUpgradeInfo(info);
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 				return;
 			}
