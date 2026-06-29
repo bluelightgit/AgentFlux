@@ -9,10 +9,15 @@ import { parseEventsFileAsync, type AnyEvent } from "../lib/events-parser";
 import { aggregateSummary, aggregateRouteHistory, aggregateCacheTrend, aggregateTokenBreakdown, aggregateCostAnalysis, aggregateAgentTimeline } from "../lib/data-aggregator";
 import { EventWatcher } from "../lib/event-watcher";
 import { discoverProject, type ProjectConfig } from "../lib/project-discovery";
-import { readAgentStatus, type AgentStatusData } from "../lib/agent-status";
+import { readAgentStatus as readAgentStatusOrig, type AgentStatusData as AgentStatusDataOrig } from "../lib/agent-status";
+import { readAgentStatus as readAgentStatusEnhanced, type AgentStatusData as AgentStatusDataEnhanced } from "../lib/agent-status-enhanced";
+
+// Use enhanced version that includes agentTelemetry
+type AgentStatusData = AgentStatusDataEnhanced;
+const readAgentStatus = readAgentStatusEnhanced;
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
-export type PageName = "dashboard" | "agents" | "control" | "settings";
+export type PageName = "dashboard" | "agents" | "control" | "preference" | "settings";
 
 interface DashboardState {
   // 导航

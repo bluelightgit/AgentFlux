@@ -4,11 +4,16 @@ import Dashboard from "./Dashboard";
 import { AgentStatusPanel } from "./components/AgentStatusPanel";
 import { ControlPanel } from "./components/ControlPanel";
 import { Settings } from "./components/Settings";
+import { PreferenceRadar } from "./components/PreferenceRadar";
+import { EventStream } from "./components/EventStream";
+import { DAGWorkflow } from "./components/DAGWorkflow";
+import { CacheEfficiency } from "./components/CacheEfficiency";
 
 const NAV_ITEMS: { id: PageName; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "📊" },
   { id: "agents", label: "Agents", icon: "🤖" },
   { id: "control", label: "Control", icon: "⚙️" },
+  { id: "preference", label: "Preference", icon: "📐" },
   { id: "settings", label: "Settings", icon: "🔧" },
 ];
 
@@ -52,7 +57,6 @@ const Sidebar: React.FC = () => {
         ))}
       </nav>
 
-      {/* Project info */}
       {project && (
         <div className="px-4 py-4 border-t border-slate-700 text-xs">
           <div className="text-slate-500 mb-1">Project</div>
@@ -60,6 +64,17 @@ const Sidebar: React.FC = () => {
         </div>
       )}
     </aside>
+  );
+};
+
+const AgentsPage: React.FC = () => {
+  return (
+    <div className="space-y-6">
+      <AgentStatusPanel />
+      <DAGWorkflow />
+      <EventStream />
+      <CacheEfficiency />
+    </div>
   );
 };
 
@@ -71,8 +86,9 @@ const App: React.FC = () => {
       <Sidebar />
       <main className="flex-1 p-8 overflow-auto">
         {currentPage === "dashboard" && <Dashboard />}
-        {currentPage === "agents" && <AgentStatusPanel />}
+        {currentPage === "agents" && <AgentsPage />}
         {currentPage === "control" && <ControlPanel />}
+        {currentPage === "preference" && <PreferenceRadar />}
         {currentPage === "settings" && <Settings />}
       </main>
     </div>
