@@ -40,3 +40,5 @@ data/local/
 .pi/npm/
 .pi/git/
 or-models.json
+desktop/dist-electron/
+desktop/dist/

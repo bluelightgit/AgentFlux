@@ -13,4 +13,11 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  // node:fs 和 node:path 在 Electron 渲染进程中通过 preload 提供
+  // Vite 需要将其标记为 external，不要打包
+  build: {
+    rollupOptions: {
+      external: ['node:fs', 'node:path', 'fs', 'path'],
+    },
+  },
 })

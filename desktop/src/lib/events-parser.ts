@@ -1,7 +1,11 @@
 /**
  * D1-2: Events.jsonl 解析器
  * 读取 AgentFlux 遥测数据并转为结构化类型
+ * 支持同步 (Node) 和异步 (Electron 渲染进程) 两种模式
  */
+
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { readFileContent, readFileIncremental, getFileSize, pathExists } from "./file-access";
 
 export interface RoutingDecisionEvent {
   ts: number;
@@ -80,48 +84,54 @@ export interface ContextEvent {
 
 export type AnyEvent = RoutingDecisionEvent | CacheSampleEvent | SubagentRunEvent | ContextEvent;
 
-/** 解析 events.jsonl 文件，返回结构化事件数组 */
-export function parseEventsFile(filePath: string): AnyEvent[] {
-  const fs = require("fs");
-  if (!fs.existsSync(filePath)) return [];
-  const content = fs.readFileSync(filePath, "utf-8");
+function parseJsonl(content: string): AnyEvent[] {
   const events: AnyEvent[] = [];
   for (const line of content.trim().split("\n")) {
     if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      // skip malformed lines
-    }
+    try { events.push(JSON.parse(line)); } catch {}
   }
   return events;
 }
 
-/** 增量读取: 只获取 offset 之后的新行 */
+/** 同步解析 (Node 环境) */
+export function parseEventsFile(filePath: string): AnyEvent[] {
+  if (!existsSync(filePath)) return [];
+  const content = readFileSync(filePath, "utf-8");
+  return parseJsonl(content);
+}
+
+/** 异步解析 (Electron 渲染进程) */
+export async function parseEventsFileAsync(filePath: string): Promise<AnyEvent[]> {
+  const content = await readFileContent(filePath);
+  return parseJsonl(content);
+}
+
+/** 同步增量读取 (Node 环境) */
 export function parseEventsIncremental(
   filePath: string,
   lastOffset: number,
 ): { events: AnyEvent[]; newOffset: number } {
-  const fs = require("fs");
-  if (!fs.existsSync(filePath)) return { events: [], newOffset: 0 };
-  const stat = fs.statSync(filePath);
+  if (!existsSync(filePath)) return { events: [], newOffset: 0 };
+  const stat = statSync(filePath);
   if (stat.size <= lastOffset) return { events: [], newOffset: lastOffset };
 
-  const fd = fs.openSync(filePath, "r");
+  const fd = openSync(filePath, "r");
   const length = stat.size - lastOffset;
   const buffer = Buffer.alloc(length);
-  fs.readSync(fd, buffer, 0, length, lastOffset);
-  fs.closeSync(fd);
+  readSync(fd, buffer, 0, length, lastOffset);
+  closeSync(fd);
 
-  const content = buffer.toString("utf-8");
-  const events: AnyEvent[] = [];
-  for (const line of content.trim().split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {}
-  }
-  return { events, newOffset: stat.size };
+  return { events: parseJsonl(buffer.toString("utf-8")), newOffset: stat.size };
+}
+
+/** 异步增量读取 (Electron 渲染进程) */
+export async function parseEventsIncrementalAsync(
+  filePath: string,
+  lastOffset: number,
+): Promise<{ events: AnyEvent[]; newOffset: number }> {
+  const { content, newSize } = await readFileIncremental(filePath, lastOffset);
+  if (newSize <= lastOffset) return { events: [], newOffset: lastOffset };
+  return { events: parseJsonl(content), newOffset: newSize };
 }
 
 /** 按类型过滤事件 */
@@ -140,10 +150,7 @@ export function filterByTimeRange(
   if (range === "all") return events;
   const now = Date.now();
   const ms: Record<string, number> = {
-    "1h": 3600_000,
-    "24h": 86400_000,
-    "7d": 604800_000,
-    "30d": 2592000_000,
+    "1h": 3600_000, "24h": 86400_000, "7d": 604800_000, "30d": 2592000_000,
   };
   const cutoff = now - ms[range];
   return events.filter((e) => e.ts >= cutoff);

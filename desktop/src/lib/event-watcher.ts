@@ -1,9 +1,11 @@
 /**
  * D1-6: 实时文件监听 + 增量推送
  * 监听 events.jsonl 变化, 增量解析并通知订阅者
+ * 同时支持 Node (同步) 和 Electron 渲染进程 (异步) 模式
  */
 
-import { parseEventsIncremental, type AnyEvent } from "./events-parser";
+import { existsSync, statSync } from "node:fs";
+import { parseEventsIncremental, parseEventsIncrementalAsync, type AnyEvent } from "./events-parser";
 
 type EventHandler = (events: AnyEvent[]) => void;
 
@@ -13,58 +15,49 @@ export class EventWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private handlers: EventHandler[] = [];
   private intervalMs: number;
+  private useAsync: boolean;
 
   constructor(filePath: string, intervalMs = 500) {
     this.filePath = filePath;
     this.intervalMs = intervalMs;
-    // Initialize offset to file size (only watch new events)
+    this.useAsync = typeof window !== "undefined"; // 浏览器/Electron 渲染进程用异步
+
     try {
-      const fs = require("fs");
-      if (fs.existsSync(filePath)) {
-        this.lastOffset = fs.statSync(filePath).size;
+      if (existsSync(filePath)) {
+        this.lastOffset = statSync(filePath).size;
       }
-    } catch {}
+    } catch {
+      // 渲染进程中 existsSync 不可用, 偏移从 0 开始
+    }
   }
 
-  /** 开始监听 */
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => this.poll(), this.intervalMs);
   }
 
-  /** 停止监听 */
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 
-  /** 订阅新事件 */
   onEvent(handler: EventHandler): () => void {
     this.handlers.push(handler);
-    return () => {
-      this.handlers = this.handlers.filter((h) => h !== handler);
-    };
+    return () => { this.handlers = this.handlers.filter((h) => h !== h); };
   }
 
-  /** 手动触发一次轮询 */
-  poll(): void {
+  async poll(): Promise<void> {
     try {
-      const { events, newOffset } = parseEventsIncremental(this.filePath, this.lastOffset);
-      if (events.length > 0) {
+      if (this.useAsync) {
+        const { events, newOffset } = await parseEventsIncrementalAsync(this.filePath, this.lastOffset);
         this.lastOffset = newOffset;
-        for (const handler of this.handlers) {
-          handler(events);
-        }
+        if (events.length > 0) for (const h of this.handlers) h(events);
       } else {
+        const { events, newOffset } = parseEventsIncremental(this.filePath, this.lastOffset);
         this.lastOffset = newOffset;
+        if (events.length > 0) for (const h of this.handlers) h(events);
       }
     } catch {}
   }
 
-  /** 获取当前 offset (用于调试) */
-  getOffset(): number {
-    return this.lastOffset;
-  }
+  getOffset(): number { return this.lastOffset; }
 }

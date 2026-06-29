@@ -129,6 +129,7 @@ export async function executeHeterogeneousTeam(
 
 	// M6-shared: SharedBoard 状态更新供 /flux status 查看
 	const board = new SharedBoard(opts.fluxDir);
+	const rerunCount = new Map<string, number>(); // 防无限循环: 每个 implementer 最多被重跑 1 次
 
 	// 主循环: 拓扑序执行
 	while (completed.size + failed.size < teamConfig.agents.length) {
@@ -152,9 +153,25 @@ export async function executeHeterogeneousTeam(
 		for (const agentConfig of ready) {
 			try { board.updateAgentStatus(`m6-${agentConfig.name}`, { status: "running", role: agentConfig.role, workingOn: agentConfig.task.slice(0, 100) }); } catch {}
 		}
-		const batchResults = await Promise.all(
+		// 并行执行就绪 agent (用 allSettled 防止单个 throw 导致整批丢失)
+		const batchSettled = await Promise.allSettled(
 			ready.map(agentConfig => executeHeterogeneousAgent(agentConfig, roles, models, opts, maxRetries, enableGate))
 		);
+
+		const batchResults: HeterogeneousAgentResult[] = [];
+		for (let i = 0; i < batchSettled.length; i++) {
+			const s = batchSettled[i];
+			if (s.status === "fulfilled") {
+				batchResults.push(s.value);
+			} else {
+				const agentConfig = ready[i];
+				console.error(`[flux m6] ${agentConfig.name} threw exception: ${s.reason?.message ?? s.reason}`);
+				batchResults.push({
+					config: agentConfig, result: { agent: agentConfig.name, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${s.reason?.message ?? s.reason}` } as any,
+					gateResult: null, retryCount: 0, passed: false, modelUsed: "unknown", thinkingUsed: "off",
+				});
+			}
+		}
 
 		for (const agentResult of batchResults) {
 			totalCost += agentResult.result.usage.cost + (agentResult.gateResult?.gateCost ?? 0);
@@ -170,12 +187,15 @@ export async function executeHeterogeneousTeam(
 				console.error(`[flux m6] ${agentResult.config.name} ❌ failed after ${agentResult.retryCount} retries`);
 				try { board.updateAgentStatus(`m6-${agentResult.config.name}`, { status: "failed", workingOn: agentResult.config.task.slice(0, 100) }); } catch {}
 
-				// 条件分支: reviewer 失败 → 重跑依赖的 implementer
+				// 条件分支: reviewer 失败 → 重跑依赖的 implementer (限 1 次防无限循环)
 				if (agentResult.config.role === "reviewer" && (agentResult.config.dependsOn ?? []).length > 0) {
 					const implName = agentResult.config.dependsOn![0];
-					if (completed.has(implName)) {
-						console.error(`[flux m6] reviewer failed, re-running ${implName}`);
+					if (completed.has(implName) && (rerunCount.get(implName) ?? 0) < 1) {
+						rerunCount.set(implName, (rerunCount.get(implName) ?? 0) + 1);
+						console.error(`[flux m6] reviewer failed, re-running ${implName} (attempt ${rerunCount.get(implName)})`);
 						completed.delete(implName);
+					} else if (completed.has(implName)) {
+						console.error(`[flux m6] ${implName} already re-run once, not retrying again`);
 					}
 				}
 			}

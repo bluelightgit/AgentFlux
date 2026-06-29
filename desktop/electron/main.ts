@@ -1,5 +1,41 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, ipcMain } from 'electron';
 import * as path from 'path';
+import * as fs from 'fs';
+
+const isDev = process.env.NODE_ENV === 'development';
+
+// ─── IPC 文件读取处理器 (供渲染进程调用) ───
+ipcMain.handle('read-file', (_event, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) return '';
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch { return ''; }
+});
+
+ipcMain.handle('file-size', (_event, filePath: string) => {
+  try {
+    if (!fs.existsSync(filePath)) return 0;
+    return fs.statSync(filePath).size;
+  } catch { return 0; }
+});
+
+ipcMain.handle('read-file-incremental', (_event, filePath: string, offset: number) => {
+  try {
+    if (!fs.existsSync(filePath)) return { content: '', newSize: 0 };
+    const stat = fs.statSync(filePath);
+    if (stat.size <= offset) return { content: '', newSize: stat.size };
+    const fd = fs.openSync(filePath, 'r');
+    const length = stat.size - offset;
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, offset);
+    fs.closeSync(fd);
+    return { content: buffer.toString('utf-8'), newSize: stat.size };
+  } catch { return { content: '', newSize: 0 }; }
+});
+
+ipcMain.handle('path-exists', (_event, filePath: string) => {
+  try { return fs.existsSync(filePath); } catch { return false; }
+});
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -12,8 +48,9 @@ function createWindow(): BrowserWindow {
     },
   });
 
-  if (process.env.NODE_ENV === 'development') {
+  if (isDev) {
     win.loadURL('http://localhost:5173');
+    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
@@ -23,16 +60,11 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
   createWindow();
-
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });

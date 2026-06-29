@@ -2,13 +2,15 @@
   "name": "agentflux-desktop",
   "version": "1.0.0",
   "description": "AgentFlux Desktop Application",
-  "main": "electron/main.js",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "electron:compile": "tsc -p tsconfig.electron.json",
-    "electron:dev": "npm run electron:compile && concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "npm run build && npm run electron:compile && electron-builder"
+    "electron:dev": "npm run electron:compile && concurrently -k -n vite,electron -c yellow,cyan \"vite --host\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "electron:debug": "npm run electron:compile && concurrently -k -n vite,electron -c yellow,cyan \"vite --host\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron --inspect=9229 .\"",
+    "electron:build": "npm run build && npm run electron:compile && electron-builder",
+    "test:data": "node -e \"const{parseEventsFile}=require('./src/lib/events-parser.ts');console.log('Events:',parseEventsFile(process.env.AGENTFLUX_PROJECT_ROOT+'/.agentflux/events.jsonl').length)\""
   },
   "dependencies": {
     "react": "^18.3.1",

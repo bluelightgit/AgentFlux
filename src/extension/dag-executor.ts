@@ -202,7 +202,7 @@ export async function executeDAG(
 	const models = opts.modelsConfig?.models ?? {};
 	const board = new SharedBoard(opts.fluxDir);
 
-	// M5-5: 保存执行状态到黑板
+	const rerunCount = new Map<string, number>(); // M5-3 防无限循环: 每个 implementer 最多被重跑 1 次
 	const dagStateFile = join(opts.fluxDir, "runtime", "dag-state.json");
 	try { mkdirSync(join(opts.fluxDir, "runtime"), { recursive: true }); } catch {}
 
@@ -247,9 +247,26 @@ export async function executeDAG(
 			} catch {}
 		}
 
-		const batchResults = await Promise.all(
+		// 并行执行就绪任务 (用 allSettled 防止单个节点 throw 导致整批丢失)
+		const batchSettled = await Promise.allSettled(
 			ready.map(node => executeNodeWithGate(node, roles, models, opts, maxRetries, enableGate))
 		);
+
+		const batchResults: Array<{ node: TaskNode; result: SubagentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> = [];
+		for (let i = 0; i < batchSettled.length; i++) {
+			const s = batchSettled[i];
+			if (s.status === "fulfilled") {
+				batchResults.push(s.value);
+			} else {
+				// executeNodeWithGate threw (spawn error, unexpected exception)
+				const node = ready[i];
+				console.error(`[flux dag] ${node.id} threw exception: ${s.reason?.message ?? s.reason}`);
+				batchResults.push({
+					node, result: { agent: `dag-${node.id}`, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${s.reason?.message ?? s.reason}` },
+					gateResult: null, retryCount: 0, passed: false, cost: 0,
+				});
+			}
+		}
 
 		for (const { node, result, gateResult, retryCount, passed, cost } of batchResults) {
 			totalCost += cost;
@@ -264,13 +281,16 @@ export async function executeDAG(
 				console.error(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "failed", workingOn: node.title.slice(0, 100) }); } catch {}
 
-				// M5-3: 如果 reviewer 失败, 检查是否有对应 implementer 可以重试
+				// M5-3: 如果 reviewer 失败, 检查是否有对应 implementer 可以重试 (限 1 次防无限循环)
 				if (node.role === "reviewer" && node.dependsOn.length > 0) {
 					const implId = node.dependsOn[0];
-					if (completed.has(implId)) {
-						console.error(`[flux dag] M5-3: reviewer failed, re-running implementer ${implId}`);
+					if (completed.has(implId) && (rerunCount.get(implId) ?? 0) < 1) {
+						rerunCount.set(implId, (rerunCount.get(implId) ?? 0) + 1);
+						console.error(`[flux dag] M5-3: reviewer failed, re-running implementer ${implId} (attempt ${rerunCount.get(implId)})`);
 						completed.delete(implId); // 重新执行 implementer
 						try { board.updateAgentStatus(`dag-${implId}`, { status: "running", workingOn: "re-run (reviewer failed)" }); } catch {}
+					} else if (completed.has(implId)) {
+						console.error(`[flux dag] M5-3: ${implId} already re-run once, not retrying again`);
 					}
 				}
 			}
