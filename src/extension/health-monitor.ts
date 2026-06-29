@@ -470,6 +470,8 @@ export function formatUpgradeInfo(info: UpgradeInfo): string {
 		lines.push("");
 		lines.push("Recommendation:");
 		lines.push(`  ${info.recommendation}`);
+		lines.push("");
+		lines.push("To apply: /flux upgrade pull");
 	}
 
 	return lines.join("\n");

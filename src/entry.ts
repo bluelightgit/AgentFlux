@@ -23,7 +23,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
 import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "./core/types";
 import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig, presetToExpectedMode } from "./core/config";
@@ -246,6 +246,30 @@ export default function (pi: ExtensionAPI) {
 		refreshCache(ctx);
 		emitSample(ctx);
 
+		// override.json: 外部控制面 (如 Desktop) 可写入运行时覆盖
+		try {
+			const overridePath = join(fluxDir, "runtime", "override.json");
+			if (existsSync(overridePath)) {
+				const ov = JSON.parse(readFileSync(overridePath, "utf-8"));
+				if (ov.preset && ov.preset !== state.preset) {
+					runtimePreset = ov.preset;
+					runRouter(ctx);
+					refreshCache(ctx);
+					if (ctx.hasUI) ctx.ui.notify(`AgentFlux: override applied → preset ${ov.preset} → mode ${state.mode}`, "info");
+					else console.error(`[flux] override: preset ${ov.preset} → mode ${state.mode}`);
+				}
+				// override 可以指定强制模式
+				if (ov.forceMode && ov.forceMode !== state.mode) {
+					state.mode = ov.forceMode;
+					if (ctx.hasUI) ctx.ui.notify(`AgentFlux: override forced mode ${ov.forceMode}`, "info");
+				}
+				// 一次性覆盖: 读后删除
+				if (ov.ephemeral !== false) {
+					try { unlinkSync(overridePath); } catch {}
+				}
+			}
+		} catch {}
+
 		// 自维护: 每 5 轮扫描一次错误模式
 		if (state.turnIndex > 0 && state.turnIndex % 5 === 0 && telemetry) {
 			try {
@@ -415,7 +439,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | status | health | restart | upgrade",
+		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | agents | status | health | restart | upgrade [pull]",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -471,6 +495,57 @@ export default function (pi: ExtensionAPI) {
 				const advice = analyzeCompaction(ctx);
 				const text = formatCompactionAdvice(advice);
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			if (sub === "agents") {
+				const lines: string[] = ["AgentFlux Active Agents", "═".repeat(60)];
+				// Persistent agents
+				let count = 0;
+				try {
+					const regPath = join(fluxDir, "runtime", "persistent-agents.json");
+					if (existsSync(regPath)) {
+						const reg = JSON.parse(readFileSync(regPath, "utf-8"));
+						lines.push("Persistent Agents:");
+						for (const [name, info] of Object.entries(reg)) {
+							const a = info as any;
+							const statusIcon = a.status === "running" ? "●" : a.status === "done" ? "✓" : a.status === "failed" ? "✗" : "○";
+							lines.push(`  ${statusIcon} ${name.padEnd(20)} ${a.role ?? "?"} | ${a.status ?? "?"} | calls=${a.callCount ?? 0} | $${(a.totalCost ?? 0).toFixed(4)}`);
+							count++;
+						}
+					}
+				} catch {}
+				// SharedBoard agents (DAG/M6)
+				try {
+					const bbPath = join(fluxDir, "blackboard.json");
+					if (existsSync(bbPath)) {
+						const bb = JSON.parse(readFileSync(bbPath, "utf-8"));
+						const agents = bb.agents ?? {};
+						const entries = Object.entries(agents);
+						if (entries.length > 0) {
+							if (count > 0) lines.push("");
+							lines.push("DAG/M6 Agents:");
+							for (const [name, info] of entries) {
+								const a = info as any;
+								const statusIcon = a.status === "running" ? "●" : a.status === "done" ? "✓" : a.status === "failed" ? "✗" : "○";
+								lines.push(`  ${statusIcon} ${name.padEnd(20)} ${a.role ?? "?"} | ${a.status ?? "?"} | ${a.workingOn ?? ""}`);
+								count++;
+							}
+						}
+					}
+				} catch {}
+				if (count === 0) lines.push("(no active agents)");
+				// DAG state
+				try {
+					const dagPath = join(fluxDir, "runtime", "dag-state.json");
+					if (existsSync(dagPath)) {
+						const ds = JSON.parse(readFileSync(dagPath, "utf-8"));
+						const age = Math.round((Date.now() - ds.timestamp) / 1000);
+						lines.push("");
+						lines.push(`DAG: ${ds.description?.slice(0, 50) ?? "?"} | ✅${ds.completed?.length ?? 0} ❌${ds.failed?.length ?? 0} | ${age}s ago`);
+					}
+				} catch {}
+				if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info"); else console.log(lines.join("\n"));
 				return;
 			}
 
@@ -553,6 +628,21 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "upgrade") {
 				const info = checkUpgrade(ctx.cwd);
+				if (args[1] === "pull" && info.hasRemote && !info.upToDate) {
+					// 执行 git pull
+					try {
+						const { execSync } = await import("node:child_process");
+						const pullResult = execSync(`git pull origin ${info.currentBranch}`, { cwd: ctx.cwd, encoding: "utf-8", timeout: 30000 });
+						// 自动重启初始化序列
+						const restartText = await performRestart(ctx);
+						const text = `Pulled ${info.remoteCommits.length} commit(s) from origin/${info.currentBranch}\n${pullResult.trim()}\n\n${restartText}`;
+						if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+					} catch (e: any) {
+						const text = `git pull failed: ${e?.message}`;
+						if (ctx.hasUI) ctx.ui.notify(text, "error"); else console.error(text);
+					}
+					return;
+				}
 				const text = formatUpgradeInfo(info);
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 				return;
