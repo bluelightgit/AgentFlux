@@ -2,10 +2,13 @@
  * D1-2: Events.jsonl 解析器
  * 读取 AgentFlux 遥测数据并转为结构化类型
  * 支持同步 (Node) 和异步 (Electron 渲染进程) 两种模式
+ *
+ * IMPORTANT: node:fs is imported DYNAMICALLY (lazy) so that this module
+ * can be loaded in the Electron renderer process (browser context) without
+ * crashing. Sync functions are Node-only; async functions go through IPC.
  */
 
-import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
-import { readFileContent, readFileIncremental, getFileSize, pathExists } from "./file-access";
+import { readFileContent, readFileIncremental } from "./file-access";
 
 export interface RoutingDecisionEvent {
   ts: number;
@@ -47,6 +50,7 @@ export interface CacheSampleEvent {
   contextWindow: number;
   contextPercent: number;
   cacheHitRate: number;
+  v?: number;
 }
 
 export interface SubagentRunEvent {
@@ -93,38 +97,45 @@ function parseJsonl(content: string): AnyEvent[] {
   return events;
 }
 
-/** 同步解析 (Node 环境) */
-export function parseEventsFile(filePath: string): AnyEvent[] {
-  if (!existsSync(filePath)) return [];
-  const content = readFileSync(filePath, "utf-8");
+/**
+ * 同步解析 (Node 环境专用 — 通过 dynamic import 延迟加载 node:fs)
+ * 在 Electron 渲染进程中不要调用此函数, 使用 parseEventsFileAsync
+ */
+export async function parseEventsFile(filePath: string): Promise<AnyEvent[]> {
+  const fs = await import("node:fs");
+  if (!fs.existsSync(filePath)) return [];
+  const content = fs.readFileSync(filePath, "utf-8");
   return parseJsonl(content);
 }
 
-/** 异步解析 (Electron 渲染进程) */
+/** 异步解析 (Electron 渲染进程 — 通过 IPC) */
 export async function parseEventsFileAsync(filePath: string): Promise<AnyEvent[]> {
   const content = await readFileContent(filePath);
   return parseJsonl(content);
 }
 
-/** 同步增量读取 (Node 环境) */
-export function parseEventsIncremental(
+/**
+ * 同步增量读取 (Node 环境专用 — 通过 dynamic import)
+ */
+export async function parseEventsIncremental(
   filePath: string,
   lastOffset: number,
-): { events: AnyEvent[]; newOffset: number } {
-  if (!existsSync(filePath)) return { events: [], newOffset: 0 };
-  const stat = statSync(filePath);
+): Promise<{ events: AnyEvent[]; newOffset: number }> {
+  const fs = await import("node:fs");
+  if (!fs.existsSync(filePath)) return { events: [], newOffset: 0 };
+  const stat = fs.statSync(filePath);
   if (stat.size <= lastOffset) return { events: [], newOffset: lastOffset };
 
-  const fd = openSync(filePath, "r");
+  const fd = fs.openSync(filePath, "r");
   const length = stat.size - lastOffset;
   const buffer = Buffer.alloc(length);
-  readSync(fd, buffer, 0, length, lastOffset);
-  closeSync(fd);
+  fs.readSync(fd, buffer, 0, length, lastOffset);
+  fs.closeSync(fd);
 
   return { events: parseJsonl(buffer.toString("utf-8")), newOffset: stat.size };
 }
 
-/** 异步增量读取 (Electron 渲染进程) */
+/** 异步增量读取 (Electron 渲染进程 — 通过 IPC) */
 export async function parseEventsIncrementalAsync(
   filePath: string,
   lastOffset: number,

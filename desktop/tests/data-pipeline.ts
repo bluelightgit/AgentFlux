@@ -10,7 +10,7 @@ const eventsPath = "E:/agent-projects/AgentFlux/.agentflux/events.jsonl";
 console.log("=== Desktop Data Pipeline Test ===\n");
 console.log("Events file:", eventsPath);
 
-const events = parseEventsFile(eventsPath);
+const events = await parseEventsFile(eventsPath);
 console.log("Total events parsed:", events.length);
 
 const types = events.reduce((acc, e) => { acc[e.type] = (acc[e.type] ?? 0) + 1; return acc; }, {} as Record<string, number>);

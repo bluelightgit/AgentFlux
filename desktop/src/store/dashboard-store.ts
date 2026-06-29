@@ -8,13 +8,8 @@ import { create } from "zustand";
 import { parseEventsFileAsync, type AnyEvent } from "../lib/events-parser";
 import { aggregateSummary, aggregateRouteHistory, aggregateCacheTrend, aggregateTokenBreakdown, aggregateCostAnalysis, aggregateAgentTimeline } from "../lib/data-aggregator";
 import { EventWatcher } from "../lib/event-watcher";
-import { discoverProject, type ProjectConfig } from "../lib/project-discovery";
-import { readAgentStatus as readAgentStatusOrig, type AgentStatusData as AgentStatusDataOrig } from "../lib/agent-status";
-import { readAgentStatus as readAgentStatusEnhanced, type AgentStatusData as AgentStatusDataEnhanced } from "../lib/agent-status-enhanced";
-
-// Use enhanced version that includes agentTelemetry
-type AgentStatusData = AgentStatusDataEnhanced;
-const readAgentStatus = readAgentStatusEnhanced;
+import { discoverProject, validateProjectPath, type ProjectConfig } from "../lib/project-discovery";
+import { readAgentStatus, type AgentStatusData } from "../lib/agent-status-enhanced";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
 export type PageName = "dashboard" | "agents" | "control" | "preference" | "budget" | "settings";
@@ -83,9 +78,15 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   statusTimer: null,
 
   init: async (fallbackPath?: string) => {
-    const project = discoverProject(fallbackPath);
-    if (!project) {
+    const candidate = discoverProject(fallbackPath);
+    if (!candidate) {
       set({ error: "AgentFlux project not found. Set AGENTFLUX_PROJECT_ROOT env var or configure path in Settings." });
+      return;
+    }
+    // Async validate that .agentflux directory actually exists
+    const project = await validateProjectPath(candidate.projectRoot);
+    if (!project) {
+      set({ error: `AgentFlux directory not found at ${candidate.fluxDir}. Check path in Settings.` });
       return;
     }
     set({ project, loading: true });

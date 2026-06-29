@@ -5,7 +5,7 @@
  * Also aggregates subagent.run events from events.jsonl for per-agent stats.
  */
 
-import { readFileContent, pathExists, fileSize } from "./file-access";
+import { readFileContent, pathExists, getFileSize } from "./file-access";
 
 // ─── Types ───
 
