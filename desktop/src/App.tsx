@@ -5,6 +5,7 @@ import { AgentStatusPanel } from "./components/AgentStatusPanel";
 import { ControlPanel } from "./components/ControlPanel";
 import { Settings } from "./components/Settings";
 import { PreferenceRadar } from "./components/PreferenceRadar";
+import { BudgetSettings } from "./components/BudgetSettings";
 import { EventStream } from "./components/EventStream";
 import { DAGWorkflow } from "./components/DAGWorkflow";
 import { CacheEfficiency } from "./components/CacheEfficiency";
@@ -14,6 +15,7 @@ const NAV_ITEMS: { id: PageName; label: string; icon: string }[] = [
   { id: "agents", label: "Agents", icon: "🤖" },
   { id: "control", label: "Control", icon: "⚙️" },
   { id: "preference", label: "Preference", icon: "📐" },
+  { id: "budget", label: "Budget", icon: "💰" },
   { id: "settings", label: "Settings", icon: "🔧" },
 ];
 
@@ -89,6 +91,7 @@ const App: React.FC = () => {
         {currentPage === "agents" && <AgentsPage />}
         {currentPage === "control" && <ControlPanel />}
         {currentPage === "preference" && <PreferenceRadar />}
+        {currentPage === "budget" && <BudgetSettings />}
         {currentPage === "settings" && <Settings />}
       </main>
     </div>
