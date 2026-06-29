@@ -101,9 +101,73 @@ export function contextToScore(contextWindow: number): number {
 }
 
 /**
+ * 从 models.dev API 查询模型能力数据 (reasoning/tool_call/context)
+ * 返回部分 ModelCapability 字段, 用于补充/替代家族启发式
+ */
+export async function fetchCapabilityFromModelsDev(
+	modelName: string,
+	modelsDevUrl = "https://models.dev/api.json",
+	timeoutMs = 10000,
+): Promise<Partial<ModelCapability> & { contextWindow?: number }> {
+	try {
+		const ctrl = new AbortController();
+		const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+		const resp = await fetch(modelsDevUrl, { signal: ctrl.signal });
+		clearTimeout(timer);
+		if (!resp.ok) return {};
+		const data = await resp.json();
+
+		// 生成候选 (复用 pricing 的前缀剥离逻辑)
+		const candidates = [modelName];
+		if (modelName.includes("/")) {
+			candidates.push(modelName.split("/").pop()!);
+		}
+
+		// 遍历所有 provider 的 models 查找匹配
+		for (const [provId, prov] of Object.entries(data)) {
+			const p = prov as any;
+			if (!p?.models) continue;
+			for (const [modelId, m] of Object.entries(p.models)) {
+				const mm = m as any;
+				const idLower = modelId.toLowerCase();
+				const modelPart = modelId.split("/").pop()?.toLowerCase() ?? idLower;
+				// 精确匹配候选
+				const matched = candidates.some(c =>
+					c.toLowerCase() === idLower || c.toLowerCase() === modelPart
+				);
+				if (!matched) continue;
+
+				// 从 models.dev 字段映射到 AgentFlux 能力向量
+				const contextWindow = mm.limit?.context ?? 0;
+				const result: Partial<ModelCapability> & { contextWindow?: number } = {};
+
+				// reasoning: models.dev 有布尔值 → 映射为 0.5+0.3*has
+				if (mm.reasoning !== undefined) {
+					result.reasoning = mm.reasoning ? 0.85 : 0.50;
+				}
+				// tool_call → coding 的近似指标
+				if (mm.tool_call !== undefined) {
+					result.coding = mm.tool_call ? 0.78 : 0.55;
+				}
+				// context window
+				if (contextWindow > 0) {
+					result.contextWindow = contextWindow;
+					result.context = contextToScore(contextWindow);
+				}
+				// speed: 无直接字段, 用 family 启发式
+				return result;
+			}
+		}
+		return {};
+	} catch {
+		return {};
+	}
+}
+
+/**
  * 从 pricing 计算 cost_eff 维度分数
  * 越便宜越高分。用所有模型的均价做参考点。
- * 用 log scale 拉近平价与高价模型的差距, 避免极便宜模型在所有角色上都赢。
+ * 用 log scale 拉平平价与高价模型的差距, 避免极便宜模型在所有角色上都赢。
  */
 export function pricingToCostEff(
 	pricing: { input: number; output: number } | undefined,

@@ -25,8 +25,13 @@ export interface PriceEntry {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number; // 未知则 0
-	source: "user" | "remote" | "fallback";
+	source: "user" | "remote" | "fallback" | "unknown";
 }
+
+/** 未知模型的价格 (全 0, source=unknown, 用于显示 "?" 而非估算) */
+export const UNKNOWN_PRICE: PriceEntry = {
+	input: 0, output: 0, cacheRead: 0, cacheWrite: 0, source: "unknown",
+};
 
 /** 已加载的价格表 */
 export interface PricingTable {
@@ -41,8 +46,10 @@ export interface PricingTable {
 }
 
 export interface PricingConfig {
-	/** 价格源 URL, 默认 OpenRouter; 后续可指向 GitHub Action 产物 */
+	/** 主价格源 URL, 默认 OpenRouter; 后续可指向 GitHub Action 产物 */
 	source_url: string;
+	/** 第二价格源 URL (models.dev), 补充主源未覆盖的模型 */
+	models_dev_url?: string;
 	/** 本地缓存 TTL (小时) */
 	cache_ttl_hours: number;
 	/** 是否启用远程拉取 (false = 仅用本地 models.json + 兜底) */
@@ -51,6 +58,8 @@ export interface PricingConfig {
 
 export const DEFAULT_PRICING_CONFIG: PricingConfig = {
 	source_url: "https://openrouter.ai/api/v1/models",
+	// models.dev 作为第二数据源 (补充 OpenRouter 未覆盖的模型)
+	models_dev_url: "https://models.dev/api.json",
 	cache_ttl_hours: 24,
 	enable_remote_fetch: true,
 };
@@ -115,11 +124,37 @@ function normalizePriceFile(json: any): RawPriceRow[] {
 	return rows;
 }
 
-/** 自动识别格式并归一化 */
+/** 自动识别格式并归一化 (OpenRouter 格式: $/token) */
 function normalizeAny(json: any): RawPriceRow[] {
 	if (json?.data && Array.isArray(json.data)) return normalizeOpenRouter(json);
 	if (json?.models || (json && typeof json === "object" && !Array.isArray(json))) return normalizePriceFile(json);
 	return [];
+}
+
+/**
+ * models.dev API 格式归一化: {providerId: {models: {modelId: {cost: {input, output, cache_read, cache_write}}}}}
+ * models.dev 的 cost 单位是 $/M token, 需要转为 $/token (除以 1e6)
+ */
+function normalizeModelsDev(json: any): RawPriceRow[] {
+	const rows: RawPriceRow[] = [];
+	for (const [provId, prov] of Object.entries(json)) {
+		const p = prov as any;
+		if (!p?.models || typeof p.models !== "object") continue;
+		for (const [modelId, m] of Object.entries(p.models)) {
+			const mm = m as any;
+			if (!mm?.cost) continue;
+			const c = mm.cost;
+			// models.dev cost 单位是 $/M token → 转为 $/token
+			rows.push({
+				id: modelId,
+				input: num(c.input) / 1e6,
+				output: num(c.output) / 1e6,
+				cacheRead: num(c.cache_read) / 1e6,
+				cacheWrite: num(c.cache_write) / 1e6,
+			});
+		}
+	}
+	return rows;
 }
 
 function num(v: any): number {
@@ -129,40 +164,82 @@ function num(v: any): number {
 
 // ---------- 模型名映射 ----------
 
-/** relay 名 → 候选标准 id 列表 (精确匹配优先) */
+/**
+ * relay 名 → 候选标准 id 列表 (精确匹配优先)
+ * 策略: 去掉任意单段前缀 (网关前缀), 生成多级候选
+ * 例: oa/glm-5.2 → ["oa/glm-5.2", "glm-5.2"]
+ *      z-ai/glm-5.2 → ["z-ai/glm-5.2", "glm-5.2"]
+ *      deepseek/deepseek-v4-flash → ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"]
+ */
 export function generateCandidates(relayName: string): string[] {
 	if (!relayName) return [];
-	// 去常见二次分发前缀 (oa/, flux/, relay/ 等)
-	let name = relayName.replace(/^(oa|flux|relay|gateway|proxy)\//i, "");
-	const cands: string[] = [];
-	if (name.includes("/")) {
-		cands.push(name);                        // vendor/model 完整
-		cands.push(name.split("/").pop()!);      // model 部分
-	} else {
-		cands.push(name);                        // 仅 model 名
+	const cands: string[] = [relayName]; // 原始名优先
+
+	// 去掉第一段前缀 (任意 xxx/ 前缀, 不仅限于 oa/flux/relay 等)
+	if (relayName.includes("/")) {
+		const parts = relayName.split("/");
+		const lastPart = parts[parts.length - 1];
+		if (lastPart) cands.push(lastPart);
+		// 如果有两段以上, 也保留去掉第一段的版本
+		if (parts.length >= 3) {
+			cands.push(parts.slice(1).join("/"));
+		}
 	}
+
+	// 去掉常见二次分发前缀 (保留向后兼容)
+	const stripped = relayName.replace(/^(oa|flux|relay|gateway|proxy)\//i, "");
+	if (stripped !== relayName && !cands.includes(stripped)) {
+		cands.push(stripped);
+		if (stripped.includes("/")) {
+			cands.push(stripped.split("/").pop()!);
+		}
+	}
+
 	return cands;
 }
 
-/** 从价格表查找模型价格 (精确 → 模糊 → 兜底均值) */
+/**
+ * 从价格表查找模型价格
+ * 三层匹配: 精确 → model-part 精确 → model-part 前缀
+ * 不再使用 includes (避免 glm-5 匹配 glm-5.2)
+ * 未找到返回 UNKNOWN_PRICE (不估算)
+ */
 export function lookupPrice(table: PricingTable, relayName: string): PriceEntry {
 	const candidates = generateCandidates(relayName);
-	// 1. 精确匹配
+
+	// 1. 精确匹配 (原始名 + 去前缀名)
 	for (const c of candidates) {
 		if (table.entries[c]) return table.entries[c];
 	}
-	// 2. 模糊匹配 (key 的 model 部分匹配候选)
+
+	// 2. model-part 精确匹配 (只比较最后一段)
 	for (const c of candidates) {
 		const cl = c.toLowerCase();
 		for (const [key, entry] of Object.entries(table.entries)) {
 			const modelPart = (key.split("/").pop() || key).toLowerCase();
-			if (modelPart === cl || modelPart.includes(cl) || cl.includes(modelPart)) {
-				return entry;
-			}
+			if (modelPart === cl) return entry;
 		}
 	}
-	// 3. 兜底均值
-	return table.avg;
+
+	// 3. model-part 前缀匹配 (更严格: 只允许候选以 entry 开头, 不允许反过来)
+	// 例: glm-5.2-coding → 匹配 glm-5.2 (候选是 entry 的超集)
+	for (const c of candidates) {
+		const cl = c.toLowerCase();
+		let bestMatch: { key: string; entry: PriceEntry; len: number } | null = null;
+		for (const [key, entry] of Object.entries(table.entries)) {
+			const modelPart = (key.split("/").pop() || key).toLowerCase();
+			if (cl.startsWith(modelPart) && modelPart.length > 3) {
+				// 选最长匹配 (最精确)
+				if (!bestMatch || modelPart.length > bestMatch.len) {
+					bestMatch = { key, entry, len: modelPart.length };
+				}
+			}
+		}
+		if (bestMatch) return bestMatch.entry;
+	}
+
+	// 4. 未找到 → 返回 unknown (不估算)
+	return UNKNOWN_PRICE;
 }
 
 // ---------- 均值兜底 ----------
@@ -225,6 +302,21 @@ async function fetchRemote(sourceUrl: string, timeoutMs = 15000): Promise<RawPri
 	}
 }
 
+/** 拉取 models.dev API (带超时), 返回归一化后的 rows 或 null */
+async function fetchModelsDev(url: string, timeoutMs = 15000): Promise<RawPriceRow[] | null> {
+	try {
+		const ctrl = new AbortController();
+		const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+		const resp = await fetch(url, { signal: ctrl.signal });
+		clearTimeout(timer);
+		if (!resp.ok) return null;
+		const json = await resp.json();
+		return normalizeModelsDev(json);
+	} catch {
+		return null;
+	}
+}
+
 /**
  * 加载完整价格表.
  * @param dir  .agentflux 目录
@@ -235,7 +327,7 @@ export async function loadPricing(dir: string, cfg: PricingConfig, model?: strin
 	// 1. 用户手填 (最高优先级)
 	const userEntries = loadUserPrices(dir);
 
-	// 2. 远程缓存 / 拉取
+	// 2. 远程缓存 / 拉取 (OpenRouter + models.dev 双源)
 	const cachePath = join(dir, "pricing-cache.json");
 	let remoteRows: RawPriceRow[] | null = null;
 	let fetchedAt = 0;
@@ -251,16 +343,28 @@ export async function loadPricing(dir: string, cfg: PricingConfig, model?: strin
 		fetchedAt = cached.fetchedAt;
 		remoteOk = remoteRows != null && remoteRows.length > 0;
 	} else if (cfg.enable_remote_fetch) {
-		// 拉取远程
-		const rows = await fetchRemote(cfg.source_url);
-		if (rows && rows.length) {
-			remoteRows = rows;
+		// 拉取主源 (OpenRouter)
+		const primaryRows = await fetchRemote(cfg.source_url);
+		// 拉取第二源 (models.dev, 补充覆盖)
+		const modelsDevUrl = cfg.models_dev_url ?? DEFAULT_PRICING_CONFIG.models_dev_url!;
+		const devRows = await fetchModelsDev(modelsDevUrl);
+		if (primaryRows && primaryRows.length) {
+			// 合并: OpenRouter 为主, models.dev 补充不存在的 key
+			const seen = new Set(primaryRows.map(r => r.id));
+			const extra = (devRows ?? []).filter(r => !seen.has(r.id));
+			remoteRows = [...primaryRows, ...extra];
 			fetchedAt = now;
 			remoteOk = true;
-			// 写缓存
+		} else if (devRows && devRows.length) {
+			remoteRows = devRows;
+			fetchedAt = now;
+			remoteOk = true;
+		}
+		// 写缓存
+		if (remoteRows && remoteRows.length) {
 			try {
 				mkdirSync(dir, { recursive: true });
-				writeFileSync(cachePath, JSON.stringify({ fetchedAt, sourceUrl: cfg.source_url, payload: { data: rowsToOpenRouterShape(rows) } }, null, 2), "utf-8");
+				writeFileSync(cachePath, JSON.stringify({ fetchedAt, sourceUrl: cfg.source_url, payload: { data: rowsToOpenRouterShape(remoteRows) } }, null, 2), "utf-8");
 			} catch { /* */ }
 		} else if (cached) {
 			// 拉取失败, 降级用旧缓存
@@ -285,15 +389,16 @@ export async function loadPricing(dir: string, cfg: PricingConfig, model?: strin
 		entries[k] = v;
 	}
 
-	// 4. 兜底均值 (基于所有已知模型)
-	const allRows: RawPriceRow[] = Object.entries(entries).map(([id, e]) => ({
-		id, input: e.input, output: e.output, cacheRead: e.cacheRead, cacheWrite: e.cacheWrite,
-	}));
-	const avg = computeAvg(allRows.length ? allRows : (remoteRows ?? []));
+	// 4. 兜底: 不再估算未知模型价格, 用 UNKNOWN_PRICE
+	const avg = UNKNOWN_PRICE;
 
 	if (model) {
 		const found = lookupPrice({ entries, avg, fetchedAt, sourceUrl: cfg.source_url, remoteOk }, model);
-		console.error(`[flux pricing] model=${model} → source=${found.source} in=${found.input} out=${found.output} cacheRead=${found.cacheRead} | remote=${remoteOk} (${Object.keys(entries).length} entries)`);
+		if (found.source === "unknown") {
+			console.error(`[flux pricing] model=${model} → ⚠ UNKNOWN (no price data, cost will show $0/?). Add to models.json for accurate cost.`);
+		} else {
+			console.error(`[flux pricing] model=${model} → source=${found.source} in=${found.input} out=${found.output} cacheRead=${found.cacheRead} | remote=${remoteOk} (${Object.keys(entries).length} entries)`);
+		}
 	}
 
 	return { entries, avg, fetchedAt, sourceUrl: cfg.source_url, remoteOk };
@@ -323,6 +428,7 @@ export interface UsageLike {
 
 /** 单条 usage × 单价 → 美元成本 */
 export function calcCost(usage: UsageLike, price: PriceEntry): number {
+	if (price.source === "unknown") return 0; // 未知模型不估算
 	return (usage.input || 0) * price.input
 		+ (usage.output || 0) * price.output
 		+ (usage.cacheRead || 0) * price.cacheRead
