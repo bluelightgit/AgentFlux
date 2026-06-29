@@ -171,17 +171,18 @@ function computeAvg(rows: RawPriceRow[]): PriceEntry {
 	if (!rows.length) {
 		return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, source: "fallback" };
 	}
-	// 只对有非零值的字段取均值 (cacheRead/cacheWrite 可能很多模型为 0 或缺失)
+	// 保守策略: 用最便宜已知模型价格作为未知模型的估值
+	// (未知模型更可能是经济型而非高端型, 用均值会被高端模型拉高)
+	const min = (arr: number[]) => arr.length ? Math.min(...arr) : 0;
 	const inputs = rows.map(r => r.input).filter(v => v > 0);
 	const outputs = rows.map(r => r.output).filter(v => v > 0);
 	const reads = rows.map(r => r.cacheRead).filter(v => v > 0);
 	const writes = rows.map(r => r.cacheWrite).filter(v => v > 0);
-	const mean = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 	return {
-		input: mean(inputs),
-		output: mean(outputs),
-		cacheRead: mean(reads),
-		cacheWrite: mean(writes),
+		input: min(inputs),
+		output: min(outputs),
+		cacheRead: min(reads),
+		cacheWrite: min(writes),
 		source: "fallback",
 	};
 }

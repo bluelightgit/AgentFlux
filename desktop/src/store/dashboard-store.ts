@@ -1,17 +1,24 @@
 /**
  * D1-2/D1-6: Zustand 全局状态管理
- * 集成事件解析、数据聚合、实时更新
+ * 集成事件解析、数据聚合、实时更新、多 Agent 状态
+ * 使用异步文件访问 (通过 Electron preload bridge)
  */
 
 import { create } from "zustand";
-import { parseEventsFile, type AnyEvent } from "../lib/events-parser";
+import { parseEventsFileAsync, type AnyEvent } from "../lib/events-parser";
 import { aggregateSummary, aggregateRouteHistory, aggregateCacheTrend, aggregateTokenBreakdown, aggregateCostAnalysis, aggregateAgentTimeline } from "../lib/data-aggregator";
 import { EventWatcher } from "../lib/event-watcher";
 import { discoverProject, type ProjectConfig } from "../lib/project-discovery";
+import { readAgentStatus, type AgentStatusData } from "../lib/agent-status";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
+export type PageName = "dashboard" | "agents" | "control" | "settings";
 
 interface DashboardState {
+  // 导航
+  currentPage: PageName;
+  setPage: (page: PageName) => void;
+
   // 配置
   project: ProjectConfig | null;
 
@@ -26,6 +33,9 @@ interface DashboardState {
   costAnalysis: ReturnType<typeof aggregateCostAnalysis>;
   agentTimeline: ReturnType<typeof aggregateAgentTimeline>;
 
+  // 多 Agent 状态
+  agentStatus: AgentStatusData | null;
+
   // UI 状态
   timeRange: TimeRange;
   loading: boolean;
@@ -34,16 +44,22 @@ interface DashboardState {
 
   // 实时监听
   watcher: EventWatcher | null;
+  statusTimer: ReturnType<typeof setInterval> | null;
 
   // Actions
-  init: (fallbackPath?: string) => void;
-  reload: () => void;
+  init: (fallbackPath?: string) => Promise<void>;
+  reload: () => Promise<void>;
   setTimeRange: (range: TimeRange) => void;
   setAutoRefresh: (enabled: boolean) => void;
   recompute: () => void;
+  refreshAgentStatus: () => Promise<void>;
+  setProjectPath: (path: string) => Promise<void>;
 }
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
+  currentPage: "dashboard",
+  setPage: (page) => set({ currentPage: page }),
+
   project: null,
   events: [],
   summary: null,
@@ -52,68 +68,70 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   tokenBreakdown: [],
   costAnalysis: { byMode: [], byModel: [], byTaskType: [], total: 0, avgPerTurn: 0 },
   agentTimeline: [],
+  agentStatus: null,
+
   timeRange: "24h",
   loading: false,
   error: null,
   autoRefresh: true,
   watcher: null,
+  statusTimer: null,
 
-  init: (fallbackPath?: string) => {
+  init: async (fallbackPath?: string) => {
     const project = discoverProject(fallbackPath);
     if (!project) {
-      set({ error: "AgentFlux project not found. Set AGENTFLUX_PROJECT_ROOT env var." });
+      set({ error: "AgentFlux project not found. Set AGENTFLUX_PROJECT_ROOT env var or configure path in Settings." });
       return;
     }
     set({ project, loading: true });
 
-    // 加载全量事件
-    const events = parseEventsFile(project.eventsPath);
-    set({ events, loading: false });
+    try {
+      // 异步加载全量事件 (通过 Electron preload bridge)
+      const events = await parseEventsFileAsync(project.eventsPath);
+      set({ events, loading: false });
+      get().recompute();
 
-    // 计算聚合
-    get().recompute();
+      // 加载多 Agent 状态
+      await get().refreshAgentStatus();
 
-    // 启动实时监听
-    if (get().autoRefresh) {
-      const watcher = new EventWatcher(project.eventsPath, 500);
-      watcher.onEvent((newEvents) => {
-        const allEvents = [...get().events, ...newEvents];
-        set({ events: allEvents });
-        get().recompute();
-      });
-      watcher.start();
-      set({ watcher });
+      // 启动实时监听
+      if (get().autoRefresh) {
+        startWatcher(set, get, project.eventsPath);
+        startStatusPolling(set, get, project.fluxDir);
+      }
+    } catch (err: any) {
+      set({ loading: false, error: `Failed to load events: ${err.message}` });
     }
   },
 
-  reload: () => {
+  reload: async () => {
     const { project } = get();
     if (!project) return;
     set({ loading: true });
-    const events = parseEventsFile(project.eventsPath);
-    set({ events, loading: false });
-    get().recompute();
+    try {
+      const events = await parseEventsFileAsync(project.eventsPath);
+      set({ events, loading: false });
+      get().recompute();
+      await get().refreshAgentStatus();
+    } catch (err: any) {
+      set({ loading: false, error: err.message });
+    }
   },
 
-  setTimeRange: (range: TimeRange) => {
+  setTimeRange: (range) => {
     set({ timeRange: range });
     get().recompute();
   },
 
-  setAutoRefresh: (enabled: boolean) => {
+  setAutoRefresh: (enabled) => {
     const state = get();
     if (enabled && !state.watcher && state.project) {
-      const watcher = new EventWatcher(state.project.eventsPath, 500);
-      watcher.onEvent((newEvents) => {
-        const allEvents = [...get().events, ...newEvents];
-        set({ events: allEvents });
-        get().recompute();
-      });
-      watcher.start();
-      set({ watcher, autoRefresh: true });
-    } else if (!enabled && state.watcher) {
-      state.watcher.stop();
-      set({ watcher: null, autoRefresh: false });
+      startWatcher(set, get, state.project.eventsPath);
+      startStatusPolling(set, get, state.project.fluxDir);
+    } else if (!enabled) {
+      state.watcher?.stop();
+      if (state.statusTimer) clearInterval(state.statusTimer);
+      set({ watcher: null, statusTimer: null, autoRefresh: false });
     }
   },
 
@@ -128,4 +146,55 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       agentTimeline: aggregateAgentTimeline(events, timeRange),
     });
   },
+
+  refreshAgentStatus: async () => {
+    const { project } = get();
+    if (!project) return;
+    try {
+      const status = await readAgentStatus(project.fluxDir);
+      set({ agentStatus: status });
+    } catch {}
+  },
+
+  setProjectPath: async (path: string) => {
+    // 停止现有监听
+    const state = get();
+    state.watcher?.stop();
+    if (state.statusTimer) clearInterval(state.statusTimer);
+    set({ watcher: null, statusTimer: null, events: [], summary: null });
+
+    // 重新初始化
+    await get().init(path);
+  },
 }));
+
+// ─── 辅助函数 ───
+
+function startWatcher(
+  set: (partial: Partial<DashboardState>) => void,
+  get: () => DashboardState,
+  eventsPath: string,
+) {
+  const watcher = new EventWatcher(eventsPath, 500);
+  watcher.onEvent((newEvents) => {
+    const allEvents = [...get().events, ...newEvents];
+    set({ events: allEvents });
+    get().recompute();
+  });
+  watcher.start();
+  set({ watcher, autoRefresh: true });
+}
+
+function startStatusPolling(
+  set: (partial: Partial<DashboardState>) => void,
+  get: () => DashboardState,
+  fluxDir: string,
+) {
+  const timer = setInterval(async () => {
+    try {
+      const status = await readAgentStatus(fluxDir);
+      set({ agentStatus: status });
+    } catch {}
+  }, 2000); // 每 2 秒刷新 agent 状态
+  set({ statusTimer: timer });
+}

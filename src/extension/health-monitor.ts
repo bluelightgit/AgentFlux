@@ -225,6 +225,40 @@ export function checkHealth(cwd: string, fluxDir: string): HealthReport {
 		checks.push({ name: "Git", status: "warn", detail: "not a git repo or git not available" });
 	}
 
+	// 9. Unknown models in telemetry (pricing fallback detection)
+	try {
+		const eventsPath = join(fluxDir, "events.jsonl");
+		if (existsSync(eventsPath)) {
+			const knownModels = new Set<string>();
+			try {
+				const mc = JSON.parse(readFileSync(join(fluxDir, "models.json"), "utf-8"));
+				for (const k of Object.keys(mc.models ?? {})) knownModels.add(k.toLowerCase());
+			} catch {}
+			// Scan last 200 events for model names
+			const content = readFileSync(eventsPath, "utf-8");
+			const lines = content.trim().split("\n").slice(-200);
+			const telemetryModels = new Set<string>();
+			for (const line of lines) {
+				try { const e = JSON.parse(line); if (e.model) telemetryModels.add(e.model); } catch {}
+			}
+			// Check which telemetry models are not known (after relay prefix stripping)
+			const unknown: string[] = [];
+			for (const m of telemetryModels) {
+				const stripped = m.replace(/^(oa|flux|relay|gateway|proxy)\//i, "");
+				const modelPart = stripped.split("/").pop() ?? stripped;
+				const isKnown = [...knownModels].some(k => k.includes(modelPart.toLowerCase()) || modelPart.toLowerCase().includes(k));
+				if (!isKnown && m !== "null") unknown.push(m);
+			}
+			if (unknown.length === 0) {
+				checks.push({ name: "Models", status: "ok", detail: `all ${telemetryModels.size} telemetry models known` });
+			} else {
+				checks.push({ name: "Models", status: "warn", detail: `unknown models using pricing fallback: ${unknown.join(", ")} — add to models.json for accurate cost` });
+			}
+		}
+	} catch (e: any) {
+		checks.push({ name: "Models", status: "warn", detail: `model check failed: ${e?.message}` });
+	}
+
 	const okCount = checks.filter(c => c.status === "ok").length;
 	const warnCount = checks.filter(c => c.status === "warn").length;
 	const errorCount = checks.filter(c => c.status === "error").length;

@@ -37,6 +37,22 @@ ipcMain.handle('path-exists', (_event, filePath: string) => {
   try { return fs.existsSync(filePath); } catch { return false; }
 });
 
+ipcMain.handle('write-file', (_event, filePath: string, content: string) => {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return true;
+  } catch (err: any) { throw new Error(`write-file failed: ${err.message}`); }
+});
+
+ipcMain.handle('delete-file', (_event, filePath: string) => {
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    return true;
+  } catch (err: any) { throw new Error(`delete-file failed: ${err.message}`); }
+});
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1200,

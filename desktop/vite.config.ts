@@ -18,6 +18,14 @@ export default defineConfig({
   build: {
     rollupOptions: {
       external: ['node:fs', 'node:path', 'fs', 'path'],
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'recharts-vendor': ['recharts'],
+          'zustand-vendor': ['zustand'],
+        },
+      },
     },
+    chunkSizeWarningLimit: 800,
   },
 })

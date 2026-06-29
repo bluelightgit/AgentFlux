@@ -59,8 +59,8 @@ async function main() {
 	const health = checkHealth(CWD, FLUX_DIR);
 	console.log(`  ${formatHealthReport(health)}`.split("\n").join("\n  "));
 
-	record("checkHealth: returns 8 checks",
-		health.checks.length === 8,
+	record("checkHealth: returns 9 checks",
+		health.checks.length === 9,
 		`checks=${health.checks.length}`);
 	record("checkHealth: Config check passes",
 		health.checks[0].status === "ok",
@@ -74,8 +74,11 @@ async function main() {
 	record("checkHealth: Git check returns status (may warn during test)",
 		health.checks[7].status === "ok" || health.checks[7].status === "warn",
 		`status=${health.checks[7].status}`);
+	record("checkHealth: Models check returns status",
+		health.checks[8].status === "ok" || health.checks[8].status === "warn",
+		`status=${health.checks[8].status}, detail=${health.checks[8].detail}`);
 	record("checkHealth: okCount + warnCount + errorCount = total",
-		health.okCount + health.warnCount + health.errorCount === 8,
+		health.okCount + health.warnCount + health.errorCount === 9,
 		`ok=${health.okCount}, warn=${health.warnCount}, error=${health.errorCount}`);
 
 	// Test with bad config
