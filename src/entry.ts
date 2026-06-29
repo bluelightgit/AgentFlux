@@ -42,6 +42,7 @@ import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } 
 import { handleTeamCommand, type TeamContext } from "./extension/team";
 import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySignal } from "./core/complexity";
 import { loadPricing, type PricingTable } from "./core/pricing";
+import { discoverPiModels, mergeModels } from "./core/model-capability";
 import { showFluxMenu, type FluxMenuState, type FluxMenuCallbacks } from "./extension/flux-menu";
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
@@ -185,6 +186,12 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				step(4, "Reloading models.json", "not found, builtins only");
 			}
+			// pi 模型自动发现
+			const piModels = discoverPiModels();
+			if (Object.keys(piModels).length > 0) {
+				modelsConfig = modelsConfig ?? { models: {}, roles: {} };
+				modelsConfig.models = mergeModels(modelsConfig.models ?? {}, piModels);
+			}
 		} catch (e: any) {
 			step(4, "Reloading models.json", `failed: ${e?.message}`);
 		}
@@ -247,13 +254,21 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.hasUI) console.error(`[flux] complexity analysis failed: ${e?.message}`);
 		}
 
-		// Phase 2: 加载 models.json (模型 + 角色定义)
+		// Phase 2: 加载 models.json (模型 + 角色定义) + pi 模型自动发现
 		let modelsConfig: any = null;
 		try {
 			const modelsPath = join(fluxDir, "models.json");
 			if (existsSync(modelsPath)) {
 				modelsConfig = JSON.parse(readFileSync(modelsPath, "utf-8"));
 				if (!ctx.hasUI) console.error(`[flux] models.json loaded: ${Object.keys(modelsConfig.models ?? {}).length} models, ${Object.keys(modelsConfig.roles ?? {}).length} roles`);
+			}
+			// pi 模型自动发现: 合并 pi 的可用模型到 AgentFlux 模型表
+			const piModels = discoverPiModels();
+			if (Object.keys(piModels).length > 0) {
+				const agentFluxModels = modelsConfig?.models ?? {};
+				modelsConfig = modelsConfig ?? { models: {}, roles: {} };
+				modelsConfig.models = mergeModels(agentFluxModels, piModels);
+				if (!ctx.hasUI) console.error(`[flux] pi models discovered: ${Object.keys(piModels).length} total, merged → ${Object.keys(modelsConfig.models).length} models`);
 			}
 		} catch (e: any) {
 			if (!ctx.hasUI) console.error(`[flux] models.json load failed: ${e?.message}`);

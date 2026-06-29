@@ -13,6 +13,7 @@ import { runSubagent, type SubagentDef, type SubagentRunResult } from "./subagen
 import { checkQualityGate, type QualityGateResult } from "./quality-gate";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
+import { assignModel, type ModelEntry, type RoleRequirement } from "../core/model-capability";
 import { loadAllRoles, type RoleDefinition } from "../core/role-manager";
 import { SharedBoard } from "../core/shared-board";
 import { join } from "node:path";
@@ -323,13 +324,27 @@ async function executeNodeWithGate(
 		console.error(`[flux dag] role ${node.role} not found, using implementer`);
 	}
 
+	// 用 assignModel 选模型 (优先 role.model 指定, 否则亲和度匹配)
+	let assignedModel: string | undefined;
+	let assignedProvider: string | undefined;
+	try {
+		const assign = assignModel(node.role, { model: role?.model, requirement: role?.requirement }, models);
+		assignedModel = assign.model;
+		assignedProvider = models[assign.model]?.provider;
+		console.error(`[flux dag] ${node.id} model: ${assign.model} (${assign.source})`);
+	} catch (e: any) {
+		console.error(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using role.model`);
+		assignedModel = role?.model;
+		assignedProvider = role?.model ? models[role.model]?.provider : undefined;
+	}
+
 	// 构建 agent 定义
 	const agentDef: SubagentDef = {
 		name: `dag-${node.id}`,
 		description: role?.description ?? node.title,
 		tools: role?.tools,
-		model: role?.model,
-		provider: role?.model ? models[role.model]?.provider : undefined,
+		model: assignedModel,
+		provider: assignedProvider,
 		systemPrompt: role?.systemPrompt ?? `You are a ${node.role}.`,
 		thinking: role?.thinking,
 		skills: [...(opts.sharedSkills ?? []), ...(role?.skills ?? [])].length > 0

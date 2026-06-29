@@ -20,6 +20,7 @@ import { runSubagentsParallel, type ParallelSubagentTask, type ParallelRunResult
 import { checkQualityGate, type QualityGateResult } from "./quality-gate";
 import { loadAllRoles, type RoleDefinition } from "../core/role-manager";
 import { SharedBoard } from "../core/shared-board";
+import { assignModel, type ModelEntry } from "../core/model-capability";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
 import type { Mode } from "../core/types";
@@ -227,9 +228,21 @@ async function executeHeterogeneousAgent(
 ): Promise<HeterogeneousAgentResult> {
 	const role = roles.get(config.role);
 
-	// 解析模型: config.model > role.model > undefined (继承默认)
-	const modelUsed = config.model ?? role?.model ?? "default";
-	const providerUsed = config.provider ?? (config.model ? models[config.model]?.provider : undefined);
+	// 用 assignModel 选模型 (优先 config.model > role.model > 亲和度匹配)
+	let modelUsed: string;
+	let providerUsed: string | undefined;
+	try {
+		const assign = assignModel(config.role, { model: config.model ?? role?.model, requirement: role?.requirement }, models);
+		modelUsed = assign.model;
+		providerUsed = config.provider ?? models[assign.model]?.provider;
+		if (assign.source === "affinity" && !config.model && !role?.model) {
+			console.error(`[flux m6] ${config.name} model auto-assigned: ${assign.model} (${assign.reason})`);
+		}
+	} catch (e: any) {
+		console.error(`[flux m6] ${config.name} assignModel failed: ${e?.message}, falling back`);
+		modelUsed = config.model ?? role?.model ?? "default";
+		providerUsed = config.provider ?? (config.model ? models[config.model]?.provider : undefined);
+	}
 	const thinkingUsed = config.thinking ?? role?.thinking ?? "off";
 
 	// 构建 agent 定义
@@ -237,7 +250,7 @@ async function executeHeterogeneousAgent(
 		name: config.name,
 		description: role?.description ?? config.role,
 		tools: role?.tools,
-		model: config.model ?? role?.model,
+		model: modelUsed,
 		provider: providerUsed,
 		systemPrompt: role?.systemPrompt ?? `You are a ${config.role}.`,
 		thinking: thinkingUsed,
@@ -262,7 +275,7 @@ async function executeHeterogeneousAgent(
 			sessionId: opts.sessionId,
 			telemetry: opts.telemetry,
 			prefixLayout: opts.prefixLayout,
-			model: config.model ?? role?.model,
+			model: modelUsed,
 			provider: providerUsed,
 			pricing: opts.pricing,
 			thinking: thinkingUsed,

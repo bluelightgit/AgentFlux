@@ -23,6 +23,8 @@ import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { TelemetryWriter } from "../telemetry/events";
+import type { ModelEntry, RoleRequirement } from "../core/model-capability";
+import { findFallbackModel } from "../core/model-capability";
 
 // ──────────────────────────────── M2-1: 并行 subagent ────────────────────────────────
 
@@ -178,6 +180,8 @@ export interface SubagentRunResult {
 	model: string | null;
 	errorMessage?: string;
 	retryCount?: number;  // 自动重试次数 (0=首次成功)
+	fallbackModel?: string;  // 降级后的实际使用模型 (如果有)
+	fallbackFrom?: string;   // 原始模型名 (如果发生了降级)
 }
 
 /** 从 .agentflux/agents/*.md 加载 agent 定义 (frontmatter + body), 回落到内建 reviewer */
@@ -279,6 +283,11 @@ export async function runSubagent(opts: {
 	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
 	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
 	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
+	// 模型降级 (opt-in, 默认关): 模型不可用时自动切换低一档模型重试
+	enableModelFallback?: boolean;
+	modelsForFallback?: Record<string, ModelEntry>;  // 降级可选模型表
+	roleRequirementForFallback?: RoleRequirement;     // 降级排序用的角色需求
+	fallbackHistory?: string[];                        // 已尝试过的模型 (避免循环)
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
 	const timeoutMs = opts.timeoutMs ?? 120000;  // 默认 2min (之前 60s 太短)
@@ -335,6 +344,8 @@ export async function runSubagent(opts: {
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
 			retryCount,
+			fallbackModel: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? (opts.model ?? agent.model ?? null) : undefined,
+			fallbackFrom: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? opts.fallbackHistory[0] : undefined,
 		};
 
 		try {
@@ -406,6 +417,31 @@ export async function runSubagent(opts: {
 		const isTimeout = result.exitCode === 124;
 		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
 		const isModelError = result.errorMessage && /model not found|404|not found/i.test(result.errorMessage);
+
+		// 模型降级: 模型不可用时, 尝试切换到低一档模型 (opt-in)
+		if (isModelError && opts.enableModelFallback && opts.modelsForFallback && opts.roleRequirementForFallback) {
+			const currentModel = opts.model ?? agent.model ?? "";
+			const tried = opts.fallbackHistory ?? [currentModel];
+			// 过滤已尝试的模型
+			const availableModels: Record<string, ModelEntry> = {};
+			for (const [id, entry] of Object.entries(opts.modelsForFallback)) {
+				if (!tried.includes(id)) availableModels[id] = entry;
+			}
+			if (Object.keys(availableModels).length > 0) {
+				const fallback = findFallbackModel(currentModel, opts.roleRequirementForFallback, availableModels);
+				if (fallback) {
+					console.error(`[flux subagent] ${agent.name} model "${currentModel}" unavailable, degrading to "${fallback}"...`);
+					// 用降级模型重试 (不算在 maxRetries 内)
+					opts.model = fallback;
+					opts.fallbackHistory = [...tried, fallback];
+					// 更新 provider 以匹配降级模型
+					if (opts.modelsForFallback[fallback]?.provider) {
+						opts.provider = opts.modelsForFallback[fallback].provider;
+					}
+					continue;  // 重试, 不增加 retryCount
+				}
+			}
+		}
 
 		if (retryCount < maxRetries && (isTimeout || isProcessError || isModelError)) {
 			const delay = retryDelayMs * Math.pow(2, retryCount);  // 指数退避

@@ -15,6 +15,10 @@
  *   4. 均值兜底
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
 // ──────────────────────────────── 类型 ────────────────────────────────
 
 export interface ModelCapability {
@@ -47,6 +51,112 @@ export interface ModelEntry {
 
 export interface ModelsConfig {
 	models: Record<string, ModelEntry>;
+}
+
+// ──────────────────────────────── pi 模型自动发现 ────────────────────────────────
+
+/**
+ * pi 的 models.json 中单个模型的接口 (部分字段)
+ */
+interface PiModelEntry {
+	id: string;
+	name: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxInputTokens?: number;
+	maxOutputTokens?: number;
+}
+
+interface PiProviderConfig {
+	baseUrl?: string;
+	api?: string;
+	models: PiModelEntry[];
+}
+
+interface PiModelsFile {
+	providers: Record<string, PiProviderConfig>;
+}
+
+/**
+ * 从 pi 的 ~/.pi/agent/models.json 自动发现所有可用模型.
+ * 将 pi provider+model 展开为 AgentFlux ModelEntry 格式.
+ * capability 和 pricing 留空 (由 resolveCapability 的家族启发式填充).
+ *
+ * @param piModelsPath pi models.json 路径, 默认 ~/.pi/agent/models.json
+ * @returns Record<modelId, ModelEntry> — key 是模型 id (如 "gpt-5.5", "oa/glm-5.2")
+ */
+export function discoverPiModels(piModelsPath?: string): Record<string, ModelEntry> {
+	try {
+		const path = piModelsPath ?? join(homedir(), ".pi", "agent", "models.json");
+		if (!existsSync(path)) return {};
+		const raw = readFileSync(path, "utf-8");
+		const data = JSON.parse(raw) as PiModelsFile;
+		if (!data.providers) return {};
+
+		const result: Record<string, ModelEntry> = {};
+		for (const [provName, provCfg] of Object.entries(data.providers)) {
+			if (!provCfg?.models) continue;
+			for (const m of provCfg.models) {
+				// 跳过重复 (同一模型可能出现在多个 provider 下, 第一个出现为准)
+				if (result[m.id]) continue;
+				result[m.id] = {
+					provider: provName,
+					contextWindow: m.contextWindow ?? 200000,
+					// capability 不填, 由 resolveCapability 家族启发式推导
+					// pricing 不填, 由 loadPricing 的 OpenRouter/models.dev 填充
+				};
+			}
+		}
+		return result;
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * 合并模型表: AgentFlux models.json 优先, pi 发现的模型补充.
+ * AgentFlux models.json 中已有的模型保留其 capability/pricing,
+ * pi 发现的新模型用空 capability/pricing (家族启发式 + 远程 pricing 填充).
+ */
+export function mergeModels(
+	agentFluxModels: Record<string, ModelEntry>,
+	piModels: Record<string, ModelEntry>,
+): Record<string, ModelEntry> {
+	const merged: Record<string, ModelEntry> = { ...piModels };
+	for (const [id, entry] of Object.entries(agentFluxModels)) {
+		// AgentFlux 条目覆盖 pi 条目 (保留 capability + pricing)
+		merged[id] = entry;
+	}
+	return merged;
+}
+
+/**
+ * 模型降级: 从可用模型中选出比当前模型低一档的候选.
+ * 策略: 用 rankModels 按角色需求排序, 返回排在当前模型之后的第一个模型.
+ *
+ * @param failedModel 失败的模型名
+ * @param requirement 角色需求 (决定排序)
+ * @param models 全部可用模型
+ * @returns 降级模型名, 或 null (无可用降级)
+ */
+export function findFallbackModel(
+	failedModel: string,
+	requirement: RoleRequirement,
+	models: Record<string, ModelEntry>,
+): string | null {
+	const ranked = rankModels(requirement, models);
+	// 找到失败模型在排序列表中的位置
+	const failedIndex = ranked.findIndex(r => r.model === failedModel);
+	if (failedIndex === -1) {
+		// 失败模型不在列表中, 返回最后一个 (最低档)
+		return ranked.length > 0 ? ranked[ranked.length - 1].model : null;
+	}
+	// 返回排在后面的第一个 (更低档)
+	if (failedIndex + 1 < ranked.length) {
+		return ranked[failedIndex + 1].model;
+	}
+	// 已经是最低档, 无法降级
+	return null;
 }
 
 // ──────────────────────────────── 启发式 ────────────────────────────────
@@ -90,14 +200,16 @@ function detectFamily(modelName: string): string | null {
 }
 
 /**
- * 从 contextWindow 计算 context 维度分数 (log scale)
- * 4K → 0.36, 32K → 0.56, 128K → 0.70, 200K → 0.73, 1M → 0.84
+ * 从 contextWindow 计算 context 维度分数 (200K 饱和)
+ * 4K → 0.58, 32K → 0.72, 128K → 0.82, 200K+ → 0.85 (饱和)
+ * 超过 200K 后所有模型得分相同, 区分度来自其他维度.
  */
 export function contextToScore(contextWindow: number): number {
 	if (contextWindow <= 0) return 0;
-	// log2(contextWindow) / log2(1_000_000), clamp 0-1
-	const score = Math.log2(contextWindow) / Math.log2(1_000_000);
-	return Math.max(0, Math.min(1, score));
+	// 0.85 * min(1, log2(ctx)/log2(200000))
+	// 200K 及以上全部 = 0.85, 200K 以下按 log scale 递减
+	const ratio = Math.log2(contextWindow) / Math.log2(200000);
+	return Math.max(0, Math.min(0.85, 0.85 * Math.min(1, ratio)));
 }
 
 /**
@@ -226,16 +338,27 @@ export function resolveCapability(
 }
 
 /**
- * 计算亲和度 = 加权点积
- * 只累加 requirement 中明确指定的维度
+ * 计算亲和度 = 归一化加权点积
+ * 权重先归一化到总和=1, 再做加权平均,
+ * 这样每个维度按其相对重要性贡献, 不会被高权重低区分度维度淹没.
  */
 export function calcAffinity(capability: ModelCapability, requirement: RoleRequirement): number {
+	// 收集所有指定维度
+	const dims: Array<{weight: number; value: number}> = [];
+	if (requirement.coding !== undefined) dims.push({ weight: requirement.coding, value: capability.coding });
+	if (requirement.reasoning !== undefined) dims.push({ weight: requirement.reasoning, value: capability.reasoning });
+	if (requirement.speed !== undefined) dims.push({ weight: requirement.speed, value: capability.speed });
+	if (requirement.context !== undefined) dims.push({ weight: requirement.context, value: capability.context });
+	if (requirement.cost_eff !== undefined) dims.push({ weight: requirement.cost_eff, value: capability.cost_eff });
+	if (dims.length === 0) return 0;
+	// 归一化权重
+	const totalWeight = dims.reduce((s, d) => s + d.weight, 0);
+	if (totalWeight <= 0) return 0;
+	// 加权平均 (归一化后各维度按比例贡献)
 	let sum = 0;
-	if (requirement.coding !== undefined) sum += requirement.coding * capability.coding;
-	if (requirement.reasoning !== undefined) sum += requirement.reasoning * capability.reasoning;
-	if (requirement.speed !== undefined) sum += requirement.speed * capability.speed;
-	if (requirement.context !== undefined) sum += requirement.context * capability.context;
-	if (requirement.cost_eff !== undefined) sum += requirement.cost_eff * capability.cost_eff;
+	for (const d of dims) {
+		sum += (d.weight / totalWeight) * d.value;
+	}
 	return sum;
 }
 
@@ -248,6 +371,8 @@ export interface AffinityResult {
 /**
  * 为角色选最佳模型
  * 返回按亲和度降序排列的所有候选
+ * tie-breaking: 亲和度差 < 0.03 时, 只在角色 cost_eff 权重 > 0.5 时用 cost_eff 破局
+ * (reasoning-heavy 角色不应被成本覆盖)
  */
 export function rankModels(
 	requirement: RoleRequirement,
@@ -261,8 +386,9 @@ export function rankModels(
 	}
 	results.sort((a, b) => b.affinity - a.affinity);
 
-	// 亲和度差值 < 0.05 时用 cost_eff 破平局
-	if (results.length >= 2 && Math.abs(results[0].affinity - results[1].affinity) < 0.05) {
+	// tie-breaking: 只在角色关心成本时才用 cost_eff 破局
+	const costWeight = requirement.cost_eff ?? 0;
+	if (results.length >= 2 && Math.abs(results[0].affinity - results[1].affinity) < 0.03 && costWeight > 0.5) {
 		if (results[1].capability.cost_eff > results[0].capability.cost_eff) {
 			[results[0], results[1]] = [results[1], results[0]];
 		}
