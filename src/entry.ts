@@ -25,7 +25,7 @@ import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
-import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile } from "./core/types";
+import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile, CacheStats } from "./core/types";
 import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig, presetToExpectedMode } from "./core/config";
 import { route } from "./core/routing";
 import { TelemetryWriter, cacheStatsToSample } from "./telemetry/events";
@@ -69,21 +69,45 @@ export default function (pi: ExtensionAPI) {
 
 	const getState = () => state;
 
+	// 上一 turn 的累计值, 用于计算增量 (避免 telemetry 聚合时重复计算)
+	let prevCumulative: CacheStats | null = null;
+
 	function refreshCache(ctx: any) {
 		state.cache = collectCacheStats(ctx, pricingTable ?? undefined);
 	}
 
 	function emitSample(ctx: any) {
-		telemetry.writeCacheSample(cacheStatsToSample(state.cache, {
+		// state.cache 是累计值 (从 getBranch 全量累加)
+		// telemetry 需要记录增量 (per-turn delta), 避免聚合时重复计算
+		const cumulative = state.cache;
+		let delta: CacheStats;
+		if (prevCumulative) {
+			delta = {
+				input: Math.max(0, cumulative.input - prevCumulative.input),
+				output: Math.max(0, cumulative.output - prevCumulative.output),
+				cacheRead: Math.max(0, cumulative.cacheRead - prevCumulative.cacheRead),
+				cacheWrite: Math.max(0, cumulative.cacheWrite - prevCumulative.cacheWrite),
+				costUsd: Math.max(0, cumulative.costUsd - prevCumulative.costUsd),
+				contextTokens: cumulative.contextTokens,
+				contextWindow: cumulative.contextWindow,
+				contextPercent: cumulative.contextPercent,
+				cacheHitRate: cumulative.cacheHitRate,
+			};
+		} else {
+			delta = { ...cumulative };
+		}
+		prevCumulative = { ...cumulative };
+
+		telemetry.writeCacheSample(cacheStatsToSample(delta, {
 			turnIndex: state.turnIndex, model: ctx.model?.id ?? null,
 			mode: state.mode, stage: state.stage, role: state.role, preset: state.preset, sessionId,
 		}));
 		// 仅非 TUI 模式 stderr 实时观测 (TUI 模式用 footer, 避免 stderr 干扰渲染)
 		if (!ctx.hasUI) {
 			console.error(
-				`[flux] turn ${state.turnIndex} | in ${fmt(state.cache.input)} read ${fmt(state.cache.cacheRead)} ` +
-				`write ${fmt(state.cache.cacheWrite)} hit ${(state.cache.cacheHitRate * 100).toFixed(0)}% | ` +
-				`ctx ${pct(state.cache.contextPercent)} | ${fmtCost(state.cache.costUsd)} | ` +
+				`[flux] turn ${state.turnIndex} | in ${fmt(delta.input)} read ${fmt(delta.cacheRead)} ` +
+				`write ${fmt(delta.cacheWrite)} hit ${(delta.cacheHitRate * 100).toFixed(0)}% | ` +
+				`ctx ${pct(delta.contextPercent)} | ${fmtCost(delta.costUsd)} | ` +
 				`${state.mode} · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode}`,
 			);
 		}
@@ -134,6 +158,7 @@ export default function (pi: ExtensionAPI) {
 		state.mode = "M2"; state.preset = "balanced"; state.expectedMode = "M2";
 		state.turnIndex = 0;
 		state.cache = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, contextTokens: 0, contextWindow: 0, contextPercent: null, cacheHitRate: 0 };
+		prevCumulative = null;
 		decision = null; routeHint = null; pricingTable = null; complexitySignal = null;
 
 		step(2, "Reloading config", "done");

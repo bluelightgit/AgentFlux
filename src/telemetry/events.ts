@@ -32,6 +32,8 @@ export interface RoutingDecisionEvent extends BaseEvent {
 
 export interface CacheSampleEvent extends BaseEvent {
 	type: "cache.sample";
+	/** v=2: 增量值 (per-turn delta); v=1 或缺省: 累计值 (旧格式) */
+	v?: number;
 	turnIndex: number;
 	model: string | null;
 	mode: Mode;
@@ -127,5 +129,6 @@ export function cacheStatsToSample(
 		input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite,
 		costUsd: stats.costUsd, contextTokens: stats.contextTokens, contextWindow: stats.contextWindow,
 		contextPercent: stats.contextPercent, cacheHitRate: stats.cacheHitRate,
+		v: 2, // 标记为增量格式
 	};
 }

@@ -108,9 +108,12 @@ export function aggregateCostAnalysis(events: AnyEvent[], range: "1h" | "24h" | 
   const cacheSamples = filterByType<CacheSampleEvent>(filtered, "cache.sample");
   const subagentRuns = filterByType<SubagentRunEvent>(filtered, "subagent.run");
 
+  // 使用有效事件 (兼容 v1/v2)
+  const effectiveSamples = effectiveCacheSamples(cacheSamples);
+
   // By mode (from cache samples)
   const modeMap = new Map<string, number>();
-  for (const s of cacheSamples) {
+  for (const s of effectiveSamples) {
     modeMap.set(s.mode, (modeMap.get(s.mode) ?? 0) + s.costUsd);
   }
   // Also add subagent costs to mode (approximate: use mode from event if available)
@@ -124,7 +127,7 @@ export function aggregateCostAnalysis(events: AnyEvent[], range: "1h" | "24h" | 
 
   // By model
   const modelMap = new Map<string, number>();
-  for (const s of cacheSamples) {
+  for (const s of effectiveSamples) {
     modelMap.set(s.model, (modelMap.get(s.model) ?? 0) + s.costUsd);
   }
   for (const r of subagentRuns) {
@@ -146,7 +149,9 @@ export function aggregateCostAnalysis(events: AnyEvent[], range: "1h" | "24h" | 
     .map(([taskType, cost]) => ({ taskType, cost: Number(cost.toFixed(6)) }))
     .sort((a, b) => b.cost - a.cost);
 
-  const total = cacheSamples.reduce((s, e) => s + e.costUsd, 0) + subagentRuns.reduce((s, e) => s + e.costUsd, 0);
+  // 使用智能聚合 (兼容 v1 累计 + v2 增量)
+  const cacheSum = sumCacheSamples(cacheSamples);
+  const total = cacheSum.totalCost + subagentRuns.reduce((s, e) => s + e.costUsd, 0);
   const turnCount = new Set(cacheSamples.map((s) => s.sessionId + ":" + s.turnIndex)).size;
   const avgPerTurn = turnCount > 0 ? total / turnCount : 0;
 
@@ -159,7 +164,65 @@ export function aggregateCostAnalysis(events: AnyEvent[], range: "1h" | "24h" | 
   };
 }
 
-/** Agent 执行时间线 */
+/**
+ * 返回有效的 cache.sample 事件 (v2 全保留, v1 只保留每个 session 的最后一条)
+ * 用于 byMode/byModel 等分组聚合
+ */
+function effectiveCacheSamples(cacheSamples: CacheSampleEvent[]): CacheSampleEvent[] {
+  const v2 = cacheSamples.filter(e => (e as any).v === 2);
+  const v1 = cacheSamples.filter(e => (e as any).v !== 2);
+  // v1: 按 session 分组取最后一条
+  const v1BySession = new Map<string, CacheSampleEvent>();
+  for (const e of v1) {
+    const existing = v1BySession.get(e.sessionId);
+    if (!existing || e.ts > existing.ts) v1BySession.set(e.sessionId, e);
+  }
+  return [...v2, ...v1BySession.values()];
+}
+
+/**
+ * 智能聚合 cache.sample 事件的 cost/token (兼容 v1 累计格式 和 v2 增量格式)
+ * - v=2 事件: 直接求和 (每 turn 增量)
+ * - v=1 或无 v: 按 session 分组取最后一个值 (累计值的最终值)
+ */
+function sumCacheSamples(cacheSamples: CacheSampleEvent[]): {
+  totalCost: number; totalInput: number; totalOutput: number;
+  totalCacheRead: number; totalCacheWrite: number;
+} {
+  const v2Events = cacheSamples.filter(e => (e as any).v === 2);
+  const v1Events = cacheSamples.filter(e => (e as any).v !== 2);
+
+  // v2: 直接求和
+  const v2Sum = v2Events.reduce((s, e) => ({
+    totalCost: s.totalCost + e.costUsd,
+    totalInput: s.totalInput + e.input,
+    totalOutput: s.totalOutput + e.output,
+    totalCacheRead: s.totalCacheRead + e.cacheRead,
+    totalCacheWrite: s.totalCacheWrite + e.cacheWrite,
+  }), { totalCost: 0, totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0 });
+
+  // v1: 按 session 分组取最后一个事件 (累计值的最终值)
+  const v1BySession = new Map<string, CacheSampleEvent>();
+  for (const e of v1Events) {
+    const existing = v1BySession.get(e.sessionId);
+    if (!existing || e.ts > existing.ts) v1BySession.set(e.sessionId, e);
+  }
+  const v1Sum = [...v1BySession.values()].reduce((s, e) => ({
+    totalCost: s.totalCost + e.costUsd,
+    totalInput: s.totalInput + e.input,
+    totalOutput: s.totalOutput + e.output,
+    totalCacheRead: s.totalCacheRead + e.cacheRead,
+    totalCacheWrite: s.totalCacheWrite + e.cacheWrite,
+  }), { totalCost: 0, totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0 });
+
+  return {
+    totalCost: v2Sum.totalCost + v1Sum.totalCost,
+    totalInput: v2Sum.totalInput + v1Sum.totalInput,
+    totalOutput: v2Sum.totalOutput + v1Sum.totalOutput,
+    totalCacheRead: v2Sum.totalCacheRead + v1Sum.totalCacheRead,
+    totalCacheWrite: v2Sum.totalCacheWrite + v1Sum.totalCacheWrite,
+  };
+}
 export interface AgentTimelineEntry {
   ts: number;
   agent: string;
@@ -205,9 +268,9 @@ export function aggregateSummary(events: AnyEvent[]): {
   const subagentRuns = filterByType<SubagentRunEvent>(events, "subagent.run");
   const contextEvents = filterByType(events, "context.event");
 
-  const totalCost =
-    cacheSamples.reduce((s, e) => s + e.costUsd, 0) +
-    subagentRuns.reduce((s, e) => s + e.costUsd, 0);
+  // 使用智能聚合 (兼容 v1 累计 + v2 增量)
+  const cacheSum = sumCacheSamples(cacheSamples);
+  const totalCost = cacheSum.totalCost + subagentRuns.reduce((s, e) => s + e.costUsd, 0);
 
   const avgCacheHit = cacheSamples.length > 0
     ? cacheSamples.reduce((s, e) => s + e.cacheHitRate, 0) / cacheSamples.length
