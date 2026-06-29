@@ -78,13 +78,15 @@ export default function (pi: ExtensionAPI) {
 			turnIndex: state.turnIndex, model: ctx.model?.id ?? null,
 			mode: state.mode, stage: state.stage, role: state.role, preset: state.preset, sessionId,
 		}));
-		// 非 TUI 模式 stderr 实时观测
-		console.error(
-			`[flux] turn ${state.turnIndex} | in ${fmt(state.cache.input)} read ${fmt(state.cache.cacheRead)} ` +
-			`write ${fmt(state.cache.cacheWrite)} hit ${(state.cache.cacheHitRate * 100).toFixed(0)}% | ` +
-			`ctx ${pct(state.cache.contextPercent)} | ${fmtCost(state.cache.costUsd)} | ` +
-			`${state.mode} · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode}`,
-		);
+		// 仅非 TUI 模式 stderr 实时观测 (TUI 模式用 footer, 避免 stderr 干扰渲染)
+		if (!ctx.hasUI) {
+			console.error(
+				`[flux] turn ${state.turnIndex} | in ${fmt(state.cache.input)} read ${fmt(state.cache.cacheRead)} ` +
+				`write ${fmt(state.cache.cacheWrite)} hit ${(state.cache.cacheHitRate * 100).toFixed(0)}% | ` +
+				`ctx ${pct(state.cache.contextPercent)} | ${fmtCost(state.cache.costUsd)} | ` +
+				`${state.mode} · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode}`,
+			);
+		}
 	}
 
 	function runRouter(ctx: any) {
@@ -107,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 			const expected = presetToExpectedMode(state.preset);
 			if (decision.mode !== expected) {
 			routeHint = `router suggests ${decision.mode} (${(decision.confidence*100).toFixed(0)}%) | preset ${state.preset} expects ${expected}`;
-			console.error(`[flux] route hint: ${routeHint}`);
+			if (!ctx.hasUI) console.error(`[flux] route hint: ${routeHint}`);
 			} else {
 			routeHint = null;
 			}
@@ -203,15 +205,15 @@ export default function (pi: ExtensionAPI) {
 		try {
 			pricingTable = await loadPricing(fluxDir, config.pricing, currentModel);
 		} catch (e: any) {
-			console.error(`[flux pricing] load failed: ${e?.message}, cost 将回退上游 cost.total`);
+			if (!ctx.hasUI) console.error(`[flux pricing] load failed: ${e?.message}, cost 将回退上游 cost.total`);
 		}
 
 		// Phase 2: 收集复杂度信号 (RGAO 静态分析)
 		try {
 			complexitySignal = collectComplexitySignal(ctx.cwd);
-			console.error(`[flux] complexity: tier${complexitySignal.complexityTier} → ${complexitySignal.recommendedMode} (${complexitySignal.reason.join("; ")})`);
+			if (!ctx.hasUI) console.error(`[flux] complexity: tier${complexitySignal.complexityTier} → ${complexitySignal.recommendedMode} (${complexitySignal.reason.join("; ")})`);
 		} catch (e: any) {
-			console.error(`[flux] complexity analysis failed: ${e?.message}`);
+			if (!ctx.hasUI) console.error(`[flux] complexity analysis failed: ${e?.message}`);
 		}
 
 		// Phase 2: 加载 models.json (模型 + 角色定义)
@@ -220,10 +222,10 @@ export default function (pi: ExtensionAPI) {
 			const modelsPath = join(fluxDir, "models.json");
 			if (existsSync(modelsPath)) {
 				modelsConfig = JSON.parse(readFileSync(modelsPath, "utf-8"));
-				console.error(`[flux] models.json loaded: ${Object.keys(modelsConfig.models ?? {}).length} models, ${Object.keys(modelsConfig.roles ?? {}).length} roles`);
+				if (!ctx.hasUI) console.error(`[flux] models.json loaded: ${Object.keys(modelsConfig.models ?? {}).length} models, ${Object.keys(modelsConfig.roles ?? {}).length} roles`);
 			}
 		} catch (e: any) {
-			console.error(`[flux] models.json load failed: ${e?.message}`);
+			if (!ctx.hasUI) console.error(`[flux] models.json load failed: ${e?.message}`);
 		}
 		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
 
