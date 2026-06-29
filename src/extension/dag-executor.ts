@@ -177,7 +177,7 @@ export interface DAGExecutorOptions {
 	maxRetries?: number;       // M5-4: 质量门不通过时最大重试次数 (默认 2)
 	enableQualityGate?: boolean; // M5-4: 是否启用质量门 (默认 true)
 	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
-	persistent?: boolean;      // M5-persist: 是否保留 agent session 上下文
+	persistent?: boolean;      // M5-persist: 是否保留 agent session 上下文 (默认 true)
 }
 
 /**
@@ -362,7 +362,7 @@ async function executeNodeWithGate(
 			timeoutMs: opts.timeoutMs ?? 180000,   // DAG 节点默认 3min
 			maxRetries: 1,                        // 底层自动重试 1 次
 			retryDelayMs: 3000,
-			persistent: opts.persistent ?? false, // M5-persist: 可选保留 session
+			persistent: opts.persistent ?? true,  // M5-persist: 默认保留 session
 		});
 
 		lastResult = result;

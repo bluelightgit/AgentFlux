@@ -98,7 +98,7 @@ export interface M6ExecutorOptions {
 	sessionId: string;
 	sharedSkills?: string[];
 	timeoutMs?: number;        // 每个 agent 超时 (默认 180000 = 3min)
-	persistent?: boolean;      // M6-persist: 是否保留 agent session 上下文
+	persistent?: boolean;      // M6-persist: 是否保留 agent session 上下文 (默认 true)
 }
 
 /**
@@ -269,7 +269,7 @@ async function executeHeterogeneousAgent(
 			timeoutMs: opts.timeoutMs ?? 180000,
 			maxRetries: 1,
 			retryDelayMs: 3000,
-			persistent: opts.persistent ?? false, // M6-persist: 可选保留 session
+			persistent: opts.persistent ?? true,  // M6-persist: 默认保留 session
 		});
 
 		lastResult = result;

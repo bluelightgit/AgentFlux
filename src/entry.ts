@@ -13,6 +13,7 @@
  *   /flux fork [last|index|entryId]         # M3 conversation tree fork
  *   /flux complexity                        # show RGAO complexity signal
  *   /flux team status|plan|build|review|abort|roles|models|affinity|pipeline
+ *   /flux work <task>                      # MA-5: multi-agent DAG execution (persistent agents + quality gates)
  *   /flux compact                           # compaction advice (B-dimension adaptive)
  *   /flux status                            # full status report (version, mode, subsystems, issues)
  *   /flux health                            # health check (8 subsystem diagnostics)
@@ -46,6 +47,7 @@ import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
 import { loadAllRoles } from "./core/role-manager";
+import { generateTaskDAG, executeDAG, formatDAG, formatDAGResult, type TaskDAG, type DAGExecutionResult } from "./extension/dag-executor";
 
 export default function (pi: ExtensionAPI) {
 	// ---------- 可变运行时状态 ----------
@@ -520,6 +522,76 @@ export default function (pi: ExtensionAPI) {
 				const advice = analyzeCompaction(ctx);
 				const text = formatCompactionAdvice(advice);
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
+				return;
+			}
+
+			// ─── MA-5: /flux work <task> — 多 agent DAG 执行 ───
+			if (sub === "work") {
+				const taskText = parts.slice(1).join(" ").trim();
+				if (!taskText) {
+					const msg = "Usage: /flux work <task description>\n  Decomposes task into DAG, executes with persistent agents, quality gates, and retry.\n  Example: /flux work Implement a preference radar chart in the Desktop control panel";
+					if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
+					return;
+				}
+				if (!teamCtx) {
+					const msg = "team context not initialized (session_start incomplete?)";
+					if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
+					return;
+				}
+
+				// 异步执行 DAG, 不阻塞 pi 事件循环
+				const execDag = async () => {
+					try {
+						if (ctx.hasUI) ctx.ui.notify(`[flux work] Decomposing task: ${taskText.slice(0, 80)}...`, "info");
+						else console.log(`[flux work] Decomposing task: ${taskText.slice(0, 80)}...`);
+
+						// Step 1: 生成 DAG
+						const dag = await generateTaskDAG(taskText, {
+							cwd: ctx.cwd,
+							model: teamCtx.modelsConfig?.models?.["gpt-5.5"] ? "gpt-5.5" : undefined,
+							pricing: teamCtx.pricing,
+							telemetry,
+							sessionId,
+							prefixLayout: teamCtx.prefixLayout,
+						});
+
+						const dagStr = formatDAG(dag);
+						if (ctx.hasUI) ctx.ui.notify(`[flux work] DAG generated:\n${dagStr}`, "info");
+						else console.log(dagStr);
+
+						// Step 2: 执行 DAG
+						const result = await executeDAG(dag, {
+							cwd: ctx.cwd,
+							fluxDir,
+							modelsConfig: teamCtx.modelsConfig,
+							telemetry,
+							prefixLayout: teamCtx.prefixLayout,
+							pricing: teamCtx.pricing,
+							sessionId,
+							sharedSkills: teamCtx.sharedSkills,
+							persistent: true,       // MA-1: 默认持久 session
+							enableQualityGate: true,
+							maxRetries: 2,
+							timeoutMs: 300000,      // 5min per node (生产任务可能较复杂)
+						});
+
+						// Step 3: 输出结果
+						const resultStr = formatDAGResult(result);
+						if (ctx.hasUI) ctx.ui.notify(`[flux work] Done!\n${resultStr}`, "info");
+						else console.log(resultStr);
+
+						// Step 4: 更新 footer
+						refreshCache(ctx);
+						installFooter(ctx, buildFluxSummary(state));
+					} catch (e: any) {
+						const errMsg = `[flux work] Error: ${e?.message ?? e}`;
+						if (ctx.hasUI) ctx.ui.notify(errMsg, "error"); else console.error(errMsg);
+					}
+				};
+
+				execDag(); // fire-and-forget
+				if (ctx.hasUI) ctx.ui.notify("[flux work] Task dispatched. Use /flux agents to monitor progress.", "info");
+				else console.log("[flux work] Task dispatched. Use /flux agents to monitor progress.");
 				return;
 			}
 
