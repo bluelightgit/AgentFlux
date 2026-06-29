@@ -98,6 +98,7 @@ export interface M6ExecutorOptions {
 	sessionId: string;
 	sharedSkills?: string[];
 	timeoutMs?: number;        // 每个 agent 超时 (默认 180000 = 3min)
+	persistent?: boolean;      // M6-persist: 是否保留 agent session 上下文
 }
 
 /**
@@ -126,6 +127,9 @@ export async function executeHeterogeneousTeam(
 	let totalCost = 0;
 	const modelUsage: Record<string, number> = {};
 
+	// M6-shared: SharedBoard 状态更新供 /flux status 查看
+	const board = new SharedBoard(opts.fluxDir);
+
 	// 主循环: 拓扑序执行
 	while (completed.size + failed.size < teamConfig.agents.length) {
 		// 找就绪 agent
@@ -145,6 +149,9 @@ export async function executeHeterogeneousTeam(
 		console.error(`[flux m6] executing ${ready.length} agent(s): ${ready.map(a => `${a.name}(${a.model ?? a.role})`).join(", ")}`);
 
 		// 并行执行就绪 agent (每个用不同 model)
+		for (const agentConfig of ready) {
+			try { board.updateAgentStatus(`m6-${agentConfig.name}`, { status: "running", role: agentConfig.role, workingOn: agentConfig.task.slice(0, 100) }); } catch {}
+		}
 		const batchResults = await Promise.all(
 			ready.map(agentConfig => executeHeterogeneousAgent(agentConfig, roles, models, opts, maxRetries, enableGate))
 		);
@@ -157,9 +164,11 @@ export async function executeHeterogeneousTeam(
 			if (agentResult.passed) {
 				completed.add(agentResult.config.name);
 				console.error(`[flux m6] ${agentResult.config.name} ✅ passed (model=${agentResult.modelUsed}, thinking=${agentResult.thinkingUsed}, cost=$${agentResult.result.usage.cost.toFixed(6)})`);
+				try { board.updateAgentStatus(`m6-${agentResult.config.name}`, { status: "done", workingOn: agentResult.config.task.slice(0, 100) }); } catch {}
 			} else {
 				failed.add(agentResult.config.name);
 				console.error(`[flux m6] ${agentResult.config.name} ❌ failed after ${agentResult.retryCount} retries`);
+				try { board.updateAgentStatus(`m6-${agentResult.config.name}`, { status: "failed", workingOn: agentResult.config.task.slice(0, 100) }); } catch {}
 
 				// 条件分支: reviewer 失败 → 重跑依赖的 implementer
 				if (agentResult.config.role === "reviewer" && (agentResult.config.dependsOn ?? []).length > 0) {
@@ -240,6 +249,7 @@ async function executeHeterogeneousAgent(
 			timeoutMs: opts.timeoutMs ?? 180000,
 			maxRetries: 1,
 			retryDelayMs: 3000,
+			persistent: opts.persistent ?? false, // M6-persist: 可选保留 session
 		});
 
 		lastResult = result;

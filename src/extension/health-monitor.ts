@@ -384,6 +384,7 @@ export function formatStatusReport(
 	activeAgents: AgentInfo[],
 	issues: Issue[],
 	paths: { fluxDir: string; eventsPath: string; configPath: string },
+	dagInfo?: string,
 ): string {
 	const lines: string[] = [];
 	lines.push("AgentFlux Status");
@@ -414,6 +415,11 @@ export function formatStatusReport(
 	} else {
 		lines.push("");
 		lines.push("Active Agents: (none)");
+	}
+
+	if (dagInfo) {
+		lines.push("");
+		lines.push(`DAG: ${dagInfo}`);
 	}
 
 	if (issues.length > 0) {

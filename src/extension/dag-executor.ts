@@ -177,6 +177,7 @@ export interface DAGExecutorOptions {
 	maxRetries?: number;       // M5-4: 质量门不通过时最大重试次数 (默认 2)
 	enableQualityGate?: boolean; // M5-4: 是否启用质量门 (默认 true)
 	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
+	persistent?: boolean;      // M5-persist: 是否保留 agent session 上下文
 }
 
 /**
@@ -235,6 +236,17 @@ export async function executeDAG(
 		// 并行执行就绪任务
 		console.error(`[flux dag] executing ${ready.length} task(s): ${ready.map(n => n.id).join(", ")}`);
 
+		// M5-shared: 更新 SharedBoard 状态供 /flux status 查看
+		for (const node of ready) {
+			try {
+				board.updateAgentStatus(`dag-${node.id}`, {
+					status: "running",
+					role: node.role,
+					workingOn: node.title.slice(0, 100),
+				});
+			} catch {}
+		}
+
 		const batchResults = await Promise.all(
 			ready.map(node => executeNodeWithGate(node, roles, models, opts, maxRetries, enableGate))
 		);
@@ -246,9 +258,11 @@ export async function executeDAG(
 			if (passed) {
 				completed.add(node.id);
 				console.error(`[flux dag] ${node.id} ✅ passed (retries=${retryCount}, cost=$${cost.toFixed(6)})`);
+				try { board.updateAgentStatus(`dag-${node.id}`, { status: "done", workingOn: node.title.slice(0, 100) }); } catch {}
 			} else {
 				failed.add(node.id);
 				console.error(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
+				try { board.updateAgentStatus(`dag-${node.id}`, { status: "failed", workingOn: node.title.slice(0, 100) }); } catch {}
 
 				// M5-3: 如果 reviewer 失败, 检查是否有对应 implementer 可以重试
 				if (node.role === "reviewer" && node.dependsOn.length > 0) {
@@ -256,6 +270,7 @@ export async function executeDAG(
 					if (completed.has(implId)) {
 						console.error(`[flux dag] M5-3: reviewer failed, re-running implementer ${implId}`);
 						completed.delete(implId); // 重新执行 implementer
+						try { board.updateAgentStatus(`dag-${implId}`, { status: "running", workingOn: "re-run (reviewer failed)" }); } catch {}
 					}
 				}
 			}
@@ -327,6 +342,7 @@ async function executeNodeWithGate(
 			timeoutMs: opts.timeoutMs ?? 180000,   // DAG 节点默认 3min
 			maxRetries: 1,                        // 底层自动重试 1 次
 			retryDelayMs: 3000,
+			persistent: opts.persistent ?? false, // M5-persist: 可选保留 session
 		});
 
 		lastResult = result;

@@ -17,8 +17,17 @@ export function installFooter(ctx: any, getState: () => FluxRuntimeState, getRou
 			invalidate() {},
 			render(width: number): string[] {
 				const s = getState();
+				// 新 session 尚无 turn 数据时显示 'init' 而非误导性的 0%
+				const hasData = s.cache.input > 0 || s.cache.cacheRead > 0 || s.cache.costUsd > 0;
+				const cacheStr = hasData
+					? `cache ${(s.cache.cacheHitRate * 100).toFixed(0)}%`
+					: `cache --`;
+				const ctxStr = s.cache.contextPercent != null
+					? `ctx ${pct(s.cache.contextPercent)}`
+					: `ctx --`;
+				const costStr = hasData ? fmtCost(s.cache.costUsd) : `$--`;
 				const left = theme.fg("dim",
-					`flux ${s.mode} | cache ${(s.cache.cacheHitRate * 100).toFixed(0)}% | ctx ${pct(s.cache.contextPercent)} | ${fmtCost(s.cache.costUsd)}`);
+					`flux ${s.mode} | ${cacheStr} | ${ctxStr} | ${costStr}`);
 				const right = theme.fg("dim", `${s.stage}/${s.role} | ${s.preset}->${s.expectedMode}`);
 				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
 				const line1 = truncateToWidth(left + pad + right, width);

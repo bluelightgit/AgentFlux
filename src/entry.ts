@@ -177,7 +177,11 @@ export default function (pi: ExtensionAPI) {
 		runRouter(ctx);
 		step(7, "Re-running router", `${state.mode} (conf ${decision?.confidence.toFixed(2)})`);
 
-		step(8, "Updating footer", "done");
+		step(8, "Refreshing cache stats", "...");
+		refreshCache(ctx);
+		step(8, "Refreshing cache stats", `hit ${(state.cache.cacheHitRate * 100).toFixed(0)}% | ctx ${pct(state.cache.contextPercent)} | ${fmtCost(state.cache.costUsd)}`);
+
+		step(9, "Updating footer", "done");
 		setFluxStatus(ctx, getState);
 
 		lines.push("");
@@ -230,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
 
 		runRouter(ctx);
+		refreshCache(ctx);
 		setFluxStatus(ctx, getState);
 		installFooter(ctx, getState, () => routeHint);
 		if (ctx.hasUI) ctx.ui.notify(`AgentFlux · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode} · ${state.mode}`, "info");
@@ -251,7 +256,30 @@ export default function (pi: ExtensionAPI) {
 					if (!routeHint) {
 						routeHint = `⚠ ${issueText}`;
 					}
-					console.error(`[flux] health: ${issueText}`);
+					if (!ctx.hasUI) console.error(`[flux] health: ${issueText}`);
+
+					// 自动修复: 针对可自动处理的问题
+					for (const iss of issues) {
+						if (iss.category === "low_cache") {
+							// cache 命中率低 → 重新加载 pricing 确保 cache 统计准确
+							try {
+								const config = loadConfig(ctx.cwd);
+								if (!pricingTable) {
+									pricingTable = await loadPricing(fluxDir, config.pricing, ctx.model?.id ?? "deepseek-v4-flash");
+									refreshCache(ctx);
+									if (!ctx.hasUI) console.error(`[flux] auto-fix: reloaded pricing table for accurate cache stats`);
+								}
+							} catch {}
+						}
+						if (iss.category === "high_context") {
+							// 上下文 > 85% → 提示用户 /flux compact
+							routeHint = `⚠ ctx ${pct(state.cache.contextPercent)} → consider /flux compact or /flux fork`;
+						}
+						if (iss.category === "subagent_failure") {
+							// subagent 频繁失败 → 提示检查模型配置
+							routeHint = `⚠ subagent failures detected → check .agentflux/models.json + /flux health`;
+						}
+					}
 				}
 			} catch {}
 		}
@@ -472,6 +500,32 @@ export default function (pi: ExtensionAPI) {
 					}
 				} catch {}
 
+				// Read SharedBoard agents (DAG/M6 temporary agents)
+				try {
+					const bbPath = join(fluxDir, "blackboard.json");
+					if (existsSync(bbPath)) {
+						const bb = JSON.parse(readFileSync(bbPath, "utf-8"));
+						const agents = bb.agents ?? {};
+						for (const [name, info] of Object.entries(agents)) {
+							const a = info as any;
+							// 跳过已从 persistent-agents.json 加载的
+							if (activeAgents.some(x => x.name === name)) continue;
+							activeAgents.push({ name, role: a.role ?? "?", status: a.status ?? "?", model: undefined, callCount: 0, totalCost: 0 });
+						}
+					}
+				} catch {}
+
+				// Read DAG state
+				let dagInfo: string | undefined;
+				try {
+					const dagPath = join(fluxDir, "runtime", "dag-state.json");
+					if (existsSync(dagPath)) {
+						const ds = JSON.parse(readFileSync(dagPath, "utf-8"));
+						const age = Math.round((Date.now() - ds.timestamp) / 1000);
+						dagInfo = `${ds.description?.slice(0, 60) ?? "?"} | completed: ${ds.completed?.length ?? 0} | failed: ${ds.failed?.length ?? 0} | ${age}s ago`;
+					}
+				} catch {}
+
 				const issues = telemetry ? scanRecentIssues(telemetry.path, 20) : [];
 				const text = formatStatusReport(vInfo, {
 					mode: state.mode, preset: state.preset, stage: state.stage, role: state.role,
@@ -479,7 +533,7 @@ export default function (pi: ExtensionAPI) {
 					costUsd: state.cache.costUsd, branch: state.branch,
 				}, subsystems, activeAgents, issues, {
 					fluxDir, eventsPath: telemetry?.path ?? "", configPath: join(fluxDir, "agentflux.json"),
-				});
+				}, dagInfo);
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 				return;
 			}
