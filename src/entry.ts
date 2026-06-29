@@ -326,6 +326,8 @@ export default function (pi: ExtensionAPI) {
 				pricing: pricingTable ?? undefined,
 				persistent: params.persistent ?? false,
 				thinking: validThinking,
+				timeoutMs: 180000,   // 3min
+				maxRetries: 1,       // 自动重试 1 次
 			});
 			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
 		},
@@ -374,6 +376,8 @@ export default function (pi: ExtensionAPI) {
 				cwd: ctx.cwd, sessionId, telemetry,
 				prefixLayout: config.cache.prefix_layout === "static_first",
 				pricing: pricingTable ?? undefined,
+				timeoutMs: 180000,
+				maxRetries: 1,
 			});
 			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
 			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };

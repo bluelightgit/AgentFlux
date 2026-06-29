@@ -75,6 +75,7 @@ export interface SubagentRunEvent extends BaseEvent {
 	exitCode: number;
 	persistent?: boolean;   // M2-2: 是否使用持久 session
 	thinking?: string;     // M2-4: reasoning effort 级别
+	retryCount?: number;   // 自动重试次数 (0=首次成功)
 }
 
 export type FluxEvent = RoutingDecisionEvent | CacheSampleEvent | ContextEvent | SubagentRunEvent;

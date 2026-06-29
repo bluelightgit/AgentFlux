@@ -79,6 +79,8 @@ export async function runSubagentsParallel(
 				telemetry: common.telemetry,
 				prefixLayout: common.prefixLayout,
 				pricing: common.pricing,
+				timeoutMs: common.timeoutMs,
+				maxRetries: common.maxRetries ?? 1,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -175,6 +177,7 @@ export interface SubagentRunResult {
 	};
 	model: string | null;
 	errorMessage?: string;
+	retryCount?: number;  // 自动重试次数 (0=首次成功)
 }
 
 /** 从 .agentflux/agents/*.md 加载 agent 定义 (frontmatter + body), 回落到内建 reviewer */
@@ -273,137 +276,173 @@ export async function runSubagent(opts: {
 	persistent?: boolean;     // M2-2: 持久 session
 	sessionDir?: string;      // M2-2: 自定义 session 目录
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4
+	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
+	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
+	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
+	const timeoutMs = opts.timeoutMs ?? 120000;  // 默认 2min (之前 60s 太短)
+	const maxRetries = opts.maxRetries ?? 0;
+	const retryDelayMs = opts.retryDelayMs ?? 2000;
 
-	const args: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--approve"];
-
-	// M2-2: 持久 session vs 一次性 ephemeral
-	if (opts.persistent) {
-		const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
-		const agentSessionId = `flux-${agent.name}`;
-		args.push("--session-dir", sDir);
-		args.push("--session-id", agentSessionId);
-	} else {
-		args.push("--no-session");
-	}
-	// skills: 如果角色定义了 skills, 用 --skill 逐个传入; 否则 --no-skills
-	if (agent.skills && agent.skills.length > 0) {
-		for (const skill of agent.skills) {
-			args.push("--skill", skill);
-		}
-	} else {
-		args.push("--no-skills");
-	}
-	if (prefixLayout) {
-		args.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
-	} else {
-		args.push("--no-extensions");
-	}
-	const model = opts.model ?? agent.model ?? null;
-	const provider = opts.provider ?? agent.provider ?? null;
-	if (provider) args.push("--provider", provider);
-	if (model) args.push("--model", model);
-	// M2-4: reasoning effort — 优先 opts.thinking > agent.thinking > 默认 off
 	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
-	args.push("--thinking", thinkingLevel);
-	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
-	// 注入 agent system prompt (写到临时文件, 避免命令行长度/分词问题)
-	let tmpDir: string | null = null;
-	if (agent.systemPrompt.trim()) {
-		tmpDir = mkdtempSync(join(tmpdir(), "flux-agent-"));
-		const tmpPrompt = join(tmpDir, "prompt.md");
-		writeFileSync(tmpPrompt, agent.systemPrompt, "utf-8");
-		args.push("--append-system-prompt", tmpPrompt);
-	}
-	// task 作为最后一个位置参数 (shell:false 不分词, 安全)
-	args.push(`Task: ${task}`);
+	let retryCount = 0;
+	let lastResult: SubagentRunResult | null = null;
 
-	const result: SubagentRunResult = {
-		agent: agent.name, exitCode: 0, output: "",
-		usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
-		model: null,
-	};
+	while (retryCount <= maxRetries) {
+		// 每次迭代重建 args (因为 tmpDir 路径会变)
+		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--approve"];
 
-	try {
-		const outputParts: string[] = [];
-		let stderrBuf = "";
-		const exitCode = await new Promise<number>((resolveExit) => {
-			const invocation = getPiInvocation(args);
-			const proc = spawn(invocation.command, invocation.args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
-			let buffer = "";
-			let settled = false;
-			const done = (code: number) => { if (!settled) { settled = true; resolveExit(code); } };
-			const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* */ } done(124); }, 60000);
+		// M2-2: 持久 session vs 一次性 ephemeral
+		if (opts.persistent) {
+			const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
+			const agentSessionId = `flux-${agent.name}`;
+			attemptArgs.push("--session-dir", sDir);
+			attemptArgs.push("--session-id", agentSessionId);
+		} else {
+			attemptArgs.push("--no-session");
+		}
+		// skills
+		if (agent.skills && agent.skills.length > 0) {
+			for (const skill of agent.skills) attemptArgs.push("--skill", skill);
+		} else {
+			attemptArgs.push("--no-skills");
+		}
+		if (prefixLayout) {
+			attemptArgs.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
+		} else {
+			attemptArgs.push("--no-extensions");
+		}
+		const model = opts.model ?? agent.model ?? null;
+		const provider = opts.provider ?? agent.provider ?? null;
+		if (provider) attemptArgs.push("--provider", provider);
+		if (model) attemptArgs.push("--model", model);
+		attemptArgs.push("--thinking", thinkingLevel);
+		if (agent.tools?.length) attemptArgs.push("--tools", agent.tools.join(","));
 
-			const processLine = (line: string) => {
-				if (!line.trim()) return;
-				let ev: any;
-				try { ev = JSON.parse(line); } catch { return; }
-				if (ev.type === "message_end" && ev.message) {
-					const msg = ev.message;
-					if (msg.role === "assistant") {
-						result.usage.turns++;
-						const u = msg.usage || {};
-						result.usage.input += u.input || 0;
-						result.usage.output += u.output || 0;
-						result.usage.cacheRead += u.cacheRead || 0;
-						result.usage.cacheWrite += u.cacheWrite || 0;
-						// F1-14: 优先本地算成本 (父进程 pricing table × token), 上游 cost.total 兜底
-						if (opts.pricing && msg.model) {
-							result.usage.cost += calcCost(u, lookupPrice(opts.pricing, msg.model));
-						} else {
-							result.usage.cost += u.cost?.total || 0;
-						}
-						result.usage.contextTokens = u.totalTokens || 0;
-						if (!result.model && msg.model) result.model = msg.model;
-						if (msg.errorMessage) result.errorMessage = msg.errorMessage;
-						const content = msg.content;
-						if (Array.isArray(content)) {
-							for (const b of content) if (b?.type === "text" && b.text) outputParts.push(b.text);
+		let tmpDir: string | null = null;
+		if (agent.systemPrompt.trim()) {
+			tmpDir = mkdtempSync(join(tmpdir(), "flux-agent-"));
+			const tmpPrompt = join(tmpDir, "prompt.md");
+			writeFileSync(tmpPrompt, agent.systemPrompt, "utf-8");
+			attemptArgs.push("--append-system-prompt", tmpPrompt);
+		}
+		attemptArgs.push(`Task: ${task}`);
+
+		const result: SubagentRunResult = {
+			agent: agent.name, exitCode: 0, output: "",
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+			model: null,
+			retryCount,
+		};
+
+		try {
+			const outputParts: string[] = [];
+			let stderrBuf = "";
+			const exitCode = await new Promise<number>((resolveExit) => {
+				const invocation = getPiInvocation(attemptArgs);
+				const proc = spawn(invocation.command, invocation.args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+				let buffer = "";
+				let settled = false;
+				const done = (code: number) => { if (!settled) { settled = true; resolveExit(code); } };
+				const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* */ } done(124); }, timeoutMs);
+
+				const processLine = (line: string) => {
+					if (!line.trim()) return;
+					let ev: any;
+					try { ev = JSON.parse(line); } catch { return; }
+					if (ev.type === "message_end" && ev.message) {
+						const msg = ev.message;
+						if (msg.role === "assistant") {
+							result.usage.turns++;
+							const u = msg.usage || {};
+							result.usage.input += u.input || 0;
+							result.usage.output += u.output || 0;
+							result.usage.cacheRead += u.cacheRead || 0;
+							result.usage.cacheWrite += u.cacheWrite || 0;
+							if (opts.pricing && msg.model) {
+								result.usage.cost += calcCost(u, lookupPrice(opts.pricing, msg.model));
+							} else {
+								result.usage.cost += u.cost?.total || 0;
+							}
+							result.usage.contextTokens = u.totalTokens || 0;
+							if (!result.model && msg.model) result.model = msg.model;
+							if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+							const content = msg.content;
+							if (Array.isArray(content)) {
+								for (const b of content) if (b?.type === "text" && b.text) outputParts.push(b.text);
+							}
 						}
 					}
-				}
-			};
+				};
 
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-				for (const ln of lines) processLine(ln);
+				proc.stdout.on("data", (data) => {
+					buffer += data.toString();
+					const lines = buffer.split("\n");
+					buffer = lines.pop() ?? "";
+					for (const ln of lines) processLine(ln);
+				});
+				proc.stderr.on("data", (data) => { stderrBuf += data.toString(); });
+				proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(1); });
+				proc.on("close", (code) => { clearTimeout(timer); done(code ?? 0); });
 			});
-			proc.stderr.on("data", (data) => { stderrBuf += data.toString(); });
-			proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(1); });
-			proc.on("close", (code) => { clearTimeout(timer); done(code ?? 0); });
-		});
 
-		result.exitCode = exitCode;
-		result.output = outputParts.join("\n").slice(0, 50 * 1024);
-		if (stderrBuf.trim() && exitCode !== 0) result.errorMessage = (result.errorMessage ?? "") + ` stderr: ${stderrBuf.slice(0, 500)}`;
-	} finally {
-		if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ } }
+			result.exitCode = exitCode;
+			result.output = outputParts.join("\n").slice(0, 50 * 1024);
+			if (stderrBuf.trim() && exitCode !== 0) result.errorMessage = (result.errorMessage ?? "") + ` stderr: ${stderrBuf.slice(0, 500)}`;
+		} finally {
+			if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ } }
+		}
+
+		lastResult = result;
+
+		// 成功 → 返回 (exitCode=0 且无 errorMessage)
+		if (result.exitCode === 0 && !result.errorMessage) {
+			break;
+		}
+
+		// 失败 → 判断是否应该重试
+		const isTimeout = result.exitCode === 124;
+		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
+		const isModelError = result.errorMessage && /model not found|404|not found/i.test(result.errorMessage);
+
+		if (retryCount < maxRetries && (isTimeout || isProcessError || isModelError)) {
+			const delay = retryDelayMs * Math.pow(2, retryCount);  // 指数退避
+			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : isModelError ? `model error: ${result.errorMessage.slice(0, 60)}` : `exit code ${result.exitCode}`;
+			console.error(`[flux subagent] ${agent.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries} in ${delay}ms...`);
+			await new Promise(r => setTimeout(r, delay));
+			retryCount++;
+			continue;
+		}
+
+		// 不重试或达到上限 → 跳出
+		break;
 	}
 
-	const hitRate = result.usage.cacheRead / (result.usage.cacheRead + result.usage.input + 1e-9);
+	const finalResult = lastResult!;
+
+	const hitRate = finalResult.usage.cacheRead / (finalResult.usage.cacheRead + finalResult.usage.input + 1e-9);
 	telemetry?.writeSubagentRun({
-		sessionId, agent: agent.name, task: task.slice(0, 200), model: result.model,
-		turns: result.usage.turns, input: result.usage.input, output: result.usage.output,
-		cacheRead: result.usage.cacheRead, cacheWrite: result.usage.cacheWrite,
-		costUsd: Number(result.usage.cost.toFixed(6)), contextTokens: result.usage.contextTokens,
-		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: result.exitCode,
+		sessionId, agent: agent.name, task: task.slice(0, 200), model: finalResult.model,
+		turns: finalResult.usage.turns, input: finalResult.usage.input, output: finalResult.usage.output,
+		cacheRead: finalResult.usage.cacheRead, cacheWrite: finalResult.usage.cacheWrite,
+		costUsd: Number(finalResult.usage.cost.toFixed(6)), contextTokens: finalResult.usage.contextTokens,
+		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: finalResult.exitCode,
 		persistent: opts.persistent ?? false, thinking: thinkingLevel,
+		retryCount: finalResult.retryCount,
 	});
 
-	return result;
+	return finalResult;
 }
 
 /** 格式化 subagent 结果为工具返回 content */
 export function formatSubagentResult(r: SubagentRunResult): string {
 	const hitRate = r.usage.cacheRead / (r.usage.cacheRead + r.usage.input + 1e-9);
+	const retryInfo = r.retryCount && r.retryCount > 0 ? ` · retries=${r.retryCount}` : "";
 	return [
 		`[AgentFlux subagent: ${r.agent}]`,
-		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}`,
+		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}`,
 		``,
 		r.output || "(no output)",
 	].join("\n");

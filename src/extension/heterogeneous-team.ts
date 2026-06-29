@@ -97,6 +97,7 @@ export interface M6ExecutorOptions {
 	pricing?: PricingTable;
 	sessionId: string;
 	sharedSkills?: string[];
+	timeoutMs?: number;        // 每个 agent 超时 (默认 180000 = 3min)
 }
 
 /**
@@ -236,10 +237,24 @@ async function executeHeterogeneousAgent(
 			provider: providerUsed,
 			pricing: opts.pricing,
 			thinking: thinkingUsed,
+			timeoutMs: opts.timeoutMs ?? 180000,
+			maxRetries: 1,
+			retryDelayMs: 3000,
 		});
 
 		lastResult = result;
 		totalAgentCost += result.usage.cost;
+
+		// 超时/进程失败且无质量门 → 上层重试
+		if ((result.exitCode !== 0 || result.errorMessage) && (!enableGate || (config.acceptanceCriteria ?? []).length === 0)) {
+			if (retryCount < maxRetries) {
+				const reason = result.exitCode === 124 ? "timeout" : `exit ${result.exitCode}`;
+				console.error(`[flux m6] ${config.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
+				retryCount++;
+				continue;
+			}
+			return { config, result, gateResult: null, retryCount, passed: false, modelUsed, thinkingUsed };
+		}
 
 		// 质量门
 		if (enableGate && (config.acceptanceCriteria ?? []).length > 0 && result.output) {

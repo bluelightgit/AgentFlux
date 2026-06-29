@@ -176,6 +176,7 @@ export interface DAGExecutorOptions {
 	sharedSkills?: string[];
 	maxRetries?: number;       // M5-4: 质量门不通过时最大重试次数 (默认 2)
 	enableQualityGate?: boolean; // M5-4: 是否启用质量门 (默认 true)
+	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
 }
 
 /**
@@ -323,10 +324,26 @@ async function executeNodeWithGate(
 			provider: agentDef.provider,
 			pricing: opts.pricing,
 			thinking: agentDef.thinking,
+			timeoutMs: opts.timeoutMs ?? 180000,   // DAG 节点默认 3min
+			maxRetries: 1,                        // 底层自动重试 1 次
+			retryDelayMs: 3000,
 		});
 
 		lastResult = result;
 		totalNodeCost += result.usage.cost;
+
+		// 超时/进程失败且无质量门 → 上层重试
+		if ((result.exitCode !== 0 || result.errorMessage) && (!enableGate || node.acceptanceCriteria.length === 0)) {
+			if (retryCount < maxRetries) {
+				const reason = result.exitCode === 124 ? "timeout" : `exit ${result.exitCode}`;
+				console.error(`[flux dag] ${node.id} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
+				retryCount++;
+				continue;
+			}
+			return {
+				node, result, gateResult: null, retryCount, passed: false, cost: totalNodeCost,
+			};
+		}
 
 		// M5-4: 质量门检查
 		if (enableGate && node.acceptanceCriteria.length > 0 && result.output) {

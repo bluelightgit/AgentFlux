@@ -418,7 +418,7 @@ export function formatStatusReport(
 
 	if (issues.length > 0) {
 		lines.push("");
-		lines.push(`Recent Issues (${issues.length}):`);
+		lines.push(`Recent Issues: (${issues.length})`);
 		for (const iss of issues) {
 			const icon = iss.severity === "error" ? "❌" : "⚠️ ";
 			lines.push(`  ${icon} ${iss.category}: ${iss.message}`);

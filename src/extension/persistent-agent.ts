@@ -145,6 +145,8 @@ export async function runPersistentAgent(
 		persistent: true,
 		sessionDir,
 		thinking: agentDef.thinking,
+		timeoutMs: 180000,
+		maxRetries: 1,
 	});
 
 	// 更新注册表
