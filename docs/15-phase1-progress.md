@@ -393,3 +393,32 @@ pi --no-extensions --no-skills --no-prompt-templates -e src/entry.ts \
 | F3-5 Python sidecar | ✅ | `SidecarClient` stdio JSON 协议, Python 不可用时 TS 启发式回退 |
 | F3-6 层2 预算路由 | ✅ | `optimizeBudget()` 启发式降级: 非关键角色先降, 关键角色保底能力 |
 | F3-7 层3 经验路由 | ✅ | `SidecarClient.suggestMode/rlUpdate` 回退到 ExperienceStore 统计 (穷人 RL) |
+
+### Phase 4.1.5: 多 Agent 执行基础设施
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| MA-1 DAG persistent 默认 true | ✅ | dag-executor.ts: `opts.persistent ?? true` (was false) |
+| MA-2 M6 persistent 默认 true | ✅ | heterogeneous-team.ts: `opts.persistent ?? true` (was false) |
+| MA-3 models.json + glm-5.2 | ✅ | glm-5.2 加入 models.json, 角色模型分配 planner/reviewer=gpt-5.5, impl/tester=glm-5.2 |
+| MA-4 Agent 定义文件 | ✅ | .agentflux/agents/: planner.md, implementer.md, reviewer.md, tester.md |
+| MA-5 /flux work 命令 | ✅ | `/flux work <task>`: generateTaskDAG → executeDAG (persistent+质量门+retry), fire-and-forget |
+| MA-6 /flux agents 可见性 | ✅ | persistent-agents.json + blackboard.json + dag-state.json 三源聚合 |
+
+### Phase 4.1.6: Electron 集成测试
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| ET-1 vitest 安装 | ✅ | vitest + @testing-library/react + jsdom + node:fs/path mocks |
+| ET-2 IPC 桥测试 | ✅ | IT-1/IT-2: 8 tests (readFile/writeFile/fileSize/pathExists/deleteFile roundtrip) |
+| ET-3 Store 状态测试 | ✅ | IT-3/IT-4: 6 tests (init/recompute/setTimeRange/setAutoRefresh/page nav) |
+| ET-4 组件渲染测试 | ✅ | IT-5~IT-8: 7 tests (RouteMap/CacheChart/AgentTimeline/SummaryCards + empty states) |
+
+### Phase 4.1.7: Electron 性能测试
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| PT-1 100 点渲染 | ✅ | RouteMap 19ms, CacheChart 2.3ms (目标 < 500ms) |
+| PT-2 1000 点渲染 | ✅ | RouteMap 1.2ms, CacheChart 1.4ms (目标 < 2s, mock canvas) |
+
+**Desktop 测试总计: 25/25 通过** (8 IPC + 6 Store + 7 Component + 4 Performance)
