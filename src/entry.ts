@@ -414,6 +414,10 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `AgentFlux: unknown subagent '${params.agent}'. 可用: reviewer (内建) 或 .agentflux/agents/*.md` }], details: {} };
 			}
 			const config = loadConfig(ctx.cwd);
+			// Resolve provider from config if not specified in agent definition
+			if (!agent.provider && agent.model) {
+				agent.provider = config.models?.models?.[agent.model]?.provider;
+			}
 			const validThinking = params.thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(params.thinking)
 				? params.thinking as any : undefined;
 			const r = await runSubagent({
@@ -459,6 +463,10 @@ export default function (pi: ExtensionAPI) {
 				if (!agent) {
 					loadErrors.push(`unknown subagent '${a.agent}'`);
 					continue;
+				}
+				// Resolve provider from config if not specified in agent definition
+				if (!agent.provider && agent.model) {
+					agent.provider = config.models?.models?.[agent.model]?.provider;
 				}
 				tasks.push({ agent, task: a.task, label: a.label });
 			}

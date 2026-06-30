@@ -17,4 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   ipcRenderer: {
     invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
   },
+  listDirectory: (dirPath: string) => ipcRenderer.invoke('list-directory', dirPath),
+  readDirectoryFiles: (dirPath: string) => ipcRenderer.invoke('read-directory-files', dirPath),
+  getUserDataPath: () => ipcRenderer.invoke('get-user-data-path'),
+  showFolderDialog: () => ipcRenderer.invoke('show-folder-dialog'),
 });

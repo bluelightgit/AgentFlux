@@ -10,9 +10,11 @@ import { aggregateSummary, aggregateRouteHistory, aggregateCacheTrend, aggregate
 import { EventWatcher } from "../lib/event-watcher";
 import { discoverProject, validateProjectPath, type ProjectConfig } from "../lib/project-discovery";
 import { readAgentStatus, type AgentStatusData } from "../lib/agent-status-enhanced";
+import { loadRegistry, addWorkspace, removeWorkspace, setActive, getActiveWorkspace, type WorkspaceEntry, type WorkspaceRegistry } from "../lib/workspace-registry";
+import { listSessions, type SessionMetadata } from "../lib/session-reader";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
-export type PageName = "dashboard" | "agents" | "control" | "preference" | "budget" | "settings";
+export type PageName = 'overview' | 'sessions' | 'agents' | 'routing' | 'telemetry' | 'dag' | 'config' | 'settings';
 
 interface DashboardState {
   // 导航
@@ -21,6 +23,12 @@ interface DashboardState {
 
   // 配置
   project: ProjectConfig | null;
+
+  // 工作区与会话
+  workspaces: WorkspaceEntry[];
+  activeWorkspace: WorkspaceEntry | null;
+  sessions: SessionMetadata[];
+  selectedSessionFile: string | null;
 
   // 原始数据
   events: AnyEvent[];
@@ -54,13 +62,25 @@ interface DashboardState {
   recompute: () => void;
   refreshAgentStatus: () => Promise<void>;
   setProjectPath: (path: string) => Promise<void>;
+
+  // 工作区与会话 Actions
+  loadWorkspaces: () => Promise<void>;
+  selectWorkspace: (id: string) => Promise<void>;
+  addWorkspacePath: (path: string) => Promise<void>;
+  removeWorkspaceById: (id: string) => Promise<void>;
+  loadSessions: () => Promise<void>;
+  selectSession: (fileName: string) => void;
 }
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
-  currentPage: "dashboard",
+  currentPage: "overview",
   setPage: (page) => set({ currentPage: page }),
 
   project: null,
+  workspaces: [],
+  activeWorkspace: null,
+  sessions: [],
+  selectedSessionFile: null,
   events: [],
   summary: null,
   routeHistory: [],
@@ -105,6 +125,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         startWatcher(set, get, project.eventsPath);
         startStatusPolling(set, get, project.fluxDir);
       }
+
+      // 加载工作区列表与会话列表
+      await get().loadWorkspaces();
+      await get().loadSessions();
     } catch (err: any) {
       set({ loading: false, error: `Failed to load events: ${err.message}` });
     }
@@ -171,6 +195,68 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
     // 重新初始化
     await get().init(path);
+  },
+
+  // ─── 工作区与会话 Actions ───
+  loadWorkspaces: async () => {
+    try {
+      const reg: WorkspaceRegistry = await loadRegistry();
+      const active = reg.activeId ? reg.workspaces.find((w) => w.id === reg.activeId) ?? null : null;
+      set({ workspaces: reg.workspaces, activeWorkspace: active });
+    } catch {
+      // 无注册表或读取失败：保持空状态，回退到 discoverProject 已由 init 处理
+      set({ workspaces: [], activeWorkspace: null });
+    }
+  },
+
+  selectWorkspace: async (id: string) => {
+    try {
+      const entry = await setActive(id);
+      if (!entry) return;
+      set({ activeWorkspace: entry });
+      // 通过 setProjectPath 重新加载项目数据
+      await get().setProjectPath(entry.path);
+      await get().loadSessions();
+    } catch (err: any) {
+      set({ error: `Failed to select workspace: ${err.message}` });
+    }
+  },
+
+  addWorkspacePath: async (path: string) => {
+    try {
+      const entry = await addWorkspace(path);
+      await get().loadWorkspaces();
+      await get().selectWorkspace(entry.id);
+    } catch (err: any) {
+      set({ error: `Failed to add workspace: ${err.message}` });
+    }
+  },
+
+  removeWorkspaceById: async (id: string) => {
+    try {
+      await removeWorkspace(id);
+      await get().loadWorkspaces();
+    } catch (err: any) {
+      set({ error: `Failed to remove workspace: ${err.message}` });
+    }
+  },
+
+  loadSessions: async () => {
+    const { project } = get();
+    if (!project) {
+      set({ sessions: [] });
+      return;
+    }
+    try {
+      const sessions = await listSessions(project.fluxDir + '/runtime/sessions');
+      set({ sessions });
+    } catch {
+      set({ sessions: [] });
+    }
+  },
+
+  selectSession: (fileName: string) => {
+    set({ selectedSessionFile: fileName });
   },
 }));
 

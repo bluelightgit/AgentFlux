@@ -3,14 +3,15 @@
  * Adjusts the 5-dimensional routing preference vector and writes to agentflux.json.
  */
 import React, { useState, useEffect } from "react";
+import { Icon } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
 
 const DIMENSIONS = [
-  { key: "cost_sensitivity", label: "Cost", icon: "💰", desc: "Lower cost = higher priority" },
-  { key: "accuracy_priority", label: "Accuracy", icon: "🎯", desc: "Quality over speed" },
-  { key: "latency_priority", label: "Latency", icon: "⚡", desc: "Faster response" },
-  { key: "parallelism_willingness", label: "Parallel", icon: "🔀", desc: "Parallel execution" },
-  { key: "multi_agent_willingness", label: "Multi-Agent", icon: "🤖", desc: "Multiple agents" },
+  { key: "cost_sensitivity", label: "Cost", icon: "DollarSign", desc: "Lower cost = higher priority" },
+  { key: "accuracy_priority", label: "Accuracy", icon: "Target", desc: "Quality over speed" },
+  { key: "latency_priority", label: "Latency", icon: "Zap", desc: "Faster response" },
+  { key: "parallelism_willingness", label: "Parallel", icon: "Split", desc: "Parallel execution" },
+  { key: "multi_agent_willingness", label: "Multi-Agent", icon: "Bot", desc: "Multiple agents" },
 ] as const;
 
 const PRESET_PROFILES: Record<string, Record<string, number>> = {
@@ -216,7 +217,7 @@ export const PreferenceRadar: React.FC = () => {
                     dominantBaseline="middle"
                     className="text-xs fill-slate-600"
                   >
-                    {dim.icon}
+                    {dim.label}
                   </text>
                 );
               })}
@@ -267,7 +268,7 @@ export const PreferenceRadar: React.FC = () => {
               <div key={dim.key}>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-slate-700">
-                    {dim.icon} {dim.label}
+                    <Icon name={dim.icon} size={16} className="inline mr-1" /> {dim.label}
                   </span>
                   <span className="text-sm font-mono text-slate-500">
                     {vector[dim.key]?.toFixed(2) ?? "0.50"}

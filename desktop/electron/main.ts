@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -51,6 +51,28 @@ ipcMain.handle('delete-file', (_event, filePath: string) => {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     return true;
   } catch (err: any) { throw new Error(`delete-file failed: ${err.message}`); }
+});
+
+ipcMain.handle('list-directory', (_event, dirPath: string) => {
+  try {
+    if (!fs.existsSync(dirPath)) return [];
+    return fs.readdirSync(dirPath);
+  } catch { return []; }
+});
+
+ipcMain.handle('read-directory-files', (_event, dirPath: string) => {
+  try {
+    if (!fs.existsSync(dirPath)) return [];
+    const files = fs.readdirSync(dirPath);
+    return files.map(f => ({ name: f, content: fs.readFileSync(path.join(dirPath, f), 'utf-8') }));
+  } catch { return []; }
+});
+
+ipcMain.handle('get-user-data-path', () => app.getPath('userData'));
+
+ipcMain.handle('show-folder-dialog', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  return result.canceled ? null : result.filePaths[0];
 });
 
 function createWindow(): BrowserWindow {

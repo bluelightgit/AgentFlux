@@ -162,7 +162,7 @@ export const EventStream: React.FC = () => {
               <span>📖 cache {formatTokens(a.totalCacheRead)}</span>
               <span>📤 out {formatTokens(a.totalOutput)}</span>
               <span>🔄 avg {a.avgTurns.toFixed(1)} turns</span>
-              <span>🤖 {a.models.join(", ")}</span>
+              <span>Models: {a.models.join(", ")}</span>
             </div>
           </div>
         ))}

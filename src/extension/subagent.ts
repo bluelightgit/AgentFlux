@@ -197,6 +197,7 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 			return {
 				name: frontmatter.name, description: frontmatter.description ?? "",
 				tools: tools?.length ? tools : undefined, model: frontmatter.model,
+				provider: frontmatter.provider,
 				systemPrompt: body,
 				thinking: thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinking) ? thinking : undefined,
 			};

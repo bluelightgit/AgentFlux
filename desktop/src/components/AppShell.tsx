@@ -1,0 +1,211 @@
+import React, { useState, useEffect } from 'react';
+import { useDashboardStore, type PageName } from '../store/dashboard-store';
+import { Icon, StatusDot } from './ui';
+
+// ---------------------------------------------------------------------------
+// Navigation items (per design spec §2.2 / §3)
+// ---------------------------------------------------------------------------
+const NAV_ITEMS: { id: PageName; label: string; icon: string }[] = [
+  { id: 'overview', label: 'Overview', icon: 'LayoutDashboard' },
+  { id: 'sessions', label: 'Sessions', icon: 'MessageSquare' },
+  { id: 'agents', label: 'Agents', icon: 'Users' },
+  { id: 'routing', label: 'Routing', icon: 'Route' },
+  { id: 'telemetry', label: 'Telemetry', icon: 'Activity' },
+  { id: 'dag', label: 'DAG', icon: 'Workflow' },
+  { id: 'config', label: 'Config', icon: 'Settings2' },
+  { id: 'settings', label: 'Settings', icon: 'Settings' },
+];
+
+// ---------------------------------------------------------------------------
+// TopBar
+// ---------------------------------------------------------------------------
+const TopBar: React.FC = () => {
+  const workspaces = useDashboardStore((s) => s.workspaces);
+  const activeWorkspace = useDashboardStore((s) => s.activeWorkspace);
+  const selectWorkspace = useDashboardStore((s) => s.selectWorkspace);
+  const addWorkspacePath = useDashboardStore((s) => s.addWorkspacePath);
+  const reload = useDashboardStore((s) => s.reload);
+
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+
+  // Close dropdown on outside click / escape
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const onDown = () => setDropdownOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDropdownOpen(false);
+    };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [dropdownOpen]);
+
+  const handleAddWorkspace = () => {
+    setDropdownOpen(false);
+    const path = window.prompt('Enter workspace path:');
+    if (path && path.trim()) {
+      addWorkspacePath(path.trim());
+    }
+  };
+
+  const handleSelect = (id: string) => {
+    setDropdownOpen(false);
+    selectWorkspace(id);
+  };
+
+  const currentName = activeWorkspace?.name ?? 'Select Workspace';
+
+  return (
+    <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-4">
+      {/* Left: Workspace selector */}
+      <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          onClick={() => setDropdownOpen((v) => !v)}
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-700"
+        >
+          <Icon name="FolderOpen" size={18} className="text-slate-500" />
+          <span className="font-medium truncate max-w-[180px]">{currentName}</span>
+          <Icon name="ChevronDown" size={16} className="text-slate-400" />
+        </button>
+
+        {dropdownOpen && (
+          <div className="absolute left-0 top-full mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-lg z-50 overflow-hidden">
+            <ul className="max-h-72 overflow-auto py-1">
+              {workspaces.length === 0 && (
+                <li className="px-3 py-2 text-sm text-slate-400">No workspaces</li>
+              )}
+              {workspaces.map((w) => (
+                <li key={w.id}>
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(w.id)}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 ${
+                      activeWorkspace?.id === w.id
+                        ? 'text-blue-600 font-medium'
+                        : 'text-slate-700'
+                    }`}
+                  >
+                    <Icon name="FolderOpen" size={16} className="text-slate-400" />
+                    <span className="truncate">{w.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="border-t border-slate-200">
+              <button
+                type="button"
+                onClick={handleAddWorkspace}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-600 hover:bg-slate-50"
+              >
+                <Icon name="Plus" size={16} />
+                <span>Add Workspace</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Center: App title */}
+      <div className="flex-1 text-center text-lg font-bold text-slate-800">
+        AgentFlux
+      </div>
+
+      {/* Right: Refresh */}
+      <button
+        type="button"
+        onClick={() => reload()}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+        title="Refresh"
+      >
+        <Icon name="RefreshCw" size={16} className="text-slate-500" />
+        <span>Refresh</span>
+      </button>
+    </header>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Sidebar
+// ---------------------------------------------------------------------------
+const Sidebar: React.FC = () => {
+  const currentPage = useDashboardStore((s) => s.currentPage);
+  const setPage = useDashboardStore((s) => s.setPage);
+  const project = useDashboardStore((s) => s.project);
+  const agentStatus = useDashboardStore((s) => s.agentStatus);
+
+  const activeCount = agentStatus
+    ? [...agentStatus.persistentAgents, ...agentStatus.blackboardAgents].filter(
+        (a) => a.status === 'running',
+      ).length
+    : 0;
+
+  return (
+    <aside className="w-60 bg-slate-900 text-slate-200 min-h-screen flex flex-col">
+      <nav className="flex-1 px-3 py-4 space-y-1">
+        {NAV_ITEMS.map((item) => {
+          const active = currentPage === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setPage(item.id)}
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                active
+                  ? 'bg-slate-800 text-white'
+                  : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+              }`}
+            >
+              <Icon name={item.icon} size={18} />
+              <span>{item.label}</span>
+              {item.id === 'agents' && activeCount > 0 && (
+                <span className="ml-auto bg-blue-500 text-white text-xs px-2 py-0.5 rounded-full">
+                  {activeCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
+      {project && (
+        <div className="px-4 py-4 border-t border-slate-700 text-xs">
+          <div className="text-slate-500 mb-1 flex items-center gap-1.5">
+            <StatusDot status="running" />
+            <span>Workspace</span>
+          </div>
+          <div className="font-medium text-slate-300 truncate">
+            {project.projectName}
+          </div>
+        </div>
+      )}
+    </aside>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// MainContent
+// ---------------------------------------------------------------------------
+const MainContent: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <main className="flex-1 p-8 overflow-auto bg-slate-100">{children}</main>
+);
+
+// ---------------------------------------------------------------------------
+// AppShell
+// ---------------------------------------------------------------------------
+export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col min-h-screen">
+      <TopBar />
+      <div className="flex flex-1">
+        <Sidebar />
+        <MainContent>{children}</MainContent>
+      </div>
+    </div>
+  );
+}
+
+export default AppShell;
