@@ -70,6 +70,40 @@ ipcMain.handle('read-directory-files', (_event, dirPath: string) => {
 
 ipcMain.handle('get-user-data-path', () => app.getPath('userData'));
 
+// ─── 文件监听 (fs.watch 实时推送) ───
+// 跟踪每个文件路径对应的 watcher, 避免重复监听并支持清理
+const fileWatchers = new Map<string, fs.FSWatcher>();
+
+ipcMain.handle('watch-file', (event, filePath: string) => {
+  try {
+    // 关闭已存在的 watcher 避免重复监听
+    const existing = fileWatchers.get(filePath);
+    if (existing) { existing.close(); fileWatchers.delete(filePath); }
+    const watcher = fs.watch(filePath, { persistent: false }, (eventType) => {
+      // Send event to renderer via webContents.send
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('file-changed', { filePath, eventType, timestamp: Date.now() });
+      }
+    });
+    // 监听错误, 自动清理失效的 watcher
+    watcher.on('error', () => {
+      const w = fileWatchers.get(filePath);
+      if (w) { w.close(); fileWatchers.delete(filePath); }
+    });
+    fileWatchers.set(filePath, watcher);
+    return { ok: true };
+  } catch { return { ok: false }; }
+});
+
+ipcMain.handle('unwatch-file', (_event, filePath: string) => {
+  try {
+    const watcher = fileWatchers.get(filePath);
+    if (watcher) { watcher.close(); fileWatchers.delete(filePath); }
+    return { ok: true };
+  } catch { return { ok: false }; }
+});
+
 ipcMain.handle('show-folder-dialog', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   return result.canceled ? null : result.filePaths[0];

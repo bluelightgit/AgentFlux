@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useDashboardStore, type PageName } from '../store/dashboard-store';
 import { Icon, StatusDot } from './ui';
+import { useTheme } from './ThemeProvider';
+import { useKeyboardNav } from '../hooks/useKeyboardNav';
+import { useCommandPalette } from '../hooks/useCommandPalette';
+import { CommandPalette } from './CommandPalette';
 
 // ---------------------------------------------------------------------------
 // Navigation items (per design spec §2.2 / §3)
@@ -26,6 +30,8 @@ const TopBar: React.FC = () => {
   const addWorkspacePath = useDashboardStore((s) => s.addWorkspacePath);
   const removeWorkspaceById = useDashboardStore((s) => s.removeWorkspaceById);
   const reload = useDashboardStore((s) => s.reload);
+  const { theme, toggleTheme } = useTheme();
+  const { toggle: togglePalette } = useCommandPalette();
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
@@ -65,7 +71,7 @@ const TopBar: React.FC = () => {
   const currentName = activeWorkspace?.name ?? 'Select Workspace';
 
   return (
-    <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-4">
+    <header className="h-14 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center px-4 gap-4">
       {/* Left: Workspace selector */}
       <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
         <button
@@ -141,17 +147,45 @@ const TopBar: React.FC = () => {
         AgentFlux
       </div>
 
-      {/* Right: Refresh */}
-      <button
-        type="button"
-        onClick={() => reload()}
-        aria-label="Refresh"
-        title="Refresh"
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
-      >
-        <Icon name="RefreshCw" size={16} className="text-slate-500" />
-        <span>Refresh</span>
-      </button>
+      {/* Right: Live indicator, Command palette, Theme toggle, Refresh */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5" title="Live updates active">
+          <span className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-xs text-green-600">Live</span>
+        </div>
+
+        <button
+          type="button"
+          onClick={togglePalette}
+          aria-label="Command palette"
+          title="Command palette (Cmd+K)"
+          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+        >
+          <Icon name="Search" size={18} />
+          <span className="text-xs text-slate-400 ml-2">Cmd+K</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-label="Toggle theme"
+          title="Toggle theme"
+          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+        >
+          <Icon name={theme === 'dark' ? 'Sun' : 'Moon'} size={18} className="text-slate-500" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => reload()}
+          aria-label="Refresh"
+          title="Refresh"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+        >
+          <Icon name="RefreshCw" size={16} className="text-slate-500" />
+          <span>Refresh</span>
+        </button>
+      </div>
     </header>
   );
 };
@@ -172,7 +206,7 @@ const Sidebar: React.FC = () => {
     : 0;
 
   return (
-    <aside className="w-60 bg-slate-900 text-slate-200 min-h-screen flex flex-col">
+    <aside className="w-60 bg-slate-900 dark:bg-black text-slate-200 dark:text-slate-300 min-h-screen flex flex-col">
       <nav className="flex-1 px-3 py-4 space-y-1">
         {NAV_ITEMS.map((item) => {
           const active = currentPage === item.id;
@@ -183,8 +217,8 @@ const Sidebar: React.FC = () => {
               onClick={() => setPage(item.id)}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
                 active
-                  ? 'bg-slate-800 text-white'
-                  : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                  ? 'bg-slate-800 dark:bg-slate-700 text-white'
+                  : 'text-slate-400 dark:text-slate-500 hover:bg-slate-800/50 dark:hover:bg-slate-800/50 hover:text-slate-200'
               }`}
             >
               <Icon name={item.icon} size={18} />
@@ -218,13 +252,18 @@ const Sidebar: React.FC = () => {
 // MainContent
 // ---------------------------------------------------------------------------
 const MainContent: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <main className="flex-1 p-8 overflow-auto bg-slate-100">{children}</main>
+  <main className="flex-1 p-8 overflow-auto bg-slate-100 dark:bg-slate-900">{children}</main>
 );
 
 // ---------------------------------------------------------------------------
 // AppShell
 // ---------------------------------------------------------------------------
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const currentPage = useDashboardStore((s) => s.currentPage);
+  const setPage = useDashboardStore((s) => s.setPage);
+  const { open: paletteOpen, close: closePalette } = useCommandPalette();
+  useKeyboardNav(currentPage, setPage);
+
   return (
     <div className="flex flex-col min-h-screen">
       <TopBar />
@@ -232,6 +271,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <Sidebar />
         <MainContent>{children}</MainContent>
       </div>
+      <CommandPalette open={paletteOpen} onClose={closePalette} />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import React, { useEffect } from "react";
 import { useDashboardStore } from "./store/dashboard-store";
 import { AppShell } from "./components/AppShell";
+import { ThemeProvider } from "./components/ThemeProvider";
 import { OverviewPage } from "./components/OverviewPage";
 import { SessionsPage } from "./components/SessionsPage";
 import { AgentsPage } from "./components/AgentsPage";
@@ -20,16 +21,18 @@ const App: React.FC = () => {
   }, []); // eslint-disable-line
 
   return (
-    <AppShell>
-      {currentPage === "overview" && <OverviewPage />}
-      {currentPage === "sessions" && <SessionsPage />}
-      {currentPage === "agents" && <AgentsPage />}
-      {currentPage === "routing" && <PreferenceRadar />}
-      {currentPage === "telemetry" && <TelemetryPage />}
-      {currentPage === "dag" && <DAGPage />}
-      {currentPage === "config" && <ConfigPage />}
-      {currentPage === "settings" && <Settings />}
-    </AppShell>
+    <ThemeProvider>
+      <AppShell>
+        {currentPage === "overview" && <OverviewPage />}
+        {currentPage === "sessions" && <SessionsPage />}
+        {currentPage === "agents" && <AgentsPage />}
+        {currentPage === "routing" && <PreferenceRadar />}
+        {currentPage === "telemetry" && <TelemetryPage />}
+        {currentPage === "dag" && <DAGPage />}
+        {currentPage === "config" && <ConfigPage />}
+        {currentPage === "settings" && <Settings />}
+      </AppShell>
+    </ThemeProvider>
   );
 };
 

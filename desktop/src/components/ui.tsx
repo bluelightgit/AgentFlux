@@ -35,6 +35,8 @@ import {
   Target,
   Zap,
   Split,
+  Sun,
+  Moon,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -77,6 +79,8 @@ const ICONS: Record<string, LucideIcon> = {
   Target,
   Zap,
   Split,
+  Sun,
+  Moon,
 };
 
 // ----------------------------------------------------------------------------
@@ -90,7 +94,7 @@ export interface CardProps {
 export function Card({ children, className }: CardProps): React.ReactElement {
   return (
     <div
-      className={`bg-white rounded-lg shadow border border-slate-200 p-6 ${className ?? ''}`}
+      className={`bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6 ${className ?? ''}`}
     >
       {children}
     </div>
@@ -108,12 +112,12 @@ export interface BadgeProps {
 }
 
 const BADGE_CLASSES: Record<BadgeColor, string> = {
-  blue: 'bg-blue-50 text-blue-600 border-blue-200',
-  green: 'bg-green-50 text-green-600 border-green-200',
-  red: 'bg-red-50 text-red-600 border-red-200',
-  amber: 'bg-amber-50 text-amber-600 border-amber-200',
-  slate: 'bg-slate-50 text-slate-600 border-slate-200',
-  purple: 'bg-purple-50 text-purple-600 border-purple-200',
+  blue: 'bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700',
+  green: 'bg-green-50 text-green-600 border-green-200 dark:bg-green-900/40 dark:text-green-300 dark:border-green-700',
+  red: 'bg-red-50 text-red-600 border-red-200 dark:bg-red-900/40 dark:text-red-300 dark:border-red-700',
+  amber: 'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700',
+  slate: 'bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-700/40 dark:text-slate-300 dark:border-slate-600',
+  purple: 'bg-purple-50 text-purple-600 border-purple-200 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-700',
 };
 
 export function Badge({ children, color = 'slate' }: BadgeProps): React.ReactElement {
@@ -189,13 +193,13 @@ export function DataTable({
   rows,
 }: DataTableProps): React.ReactElement {
   return (
-    <table className="w-full text-sm text-slate-700">
+    <table className="w-full text-sm text-slate-700 dark:text-slate-200">
       <thead>
         <tr>
           {columns.map((col) => (
             <th
               key={col.key}
-              className="bg-slate-50 text-slate-500 font-medium text-left px-3 py-2"
+              className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 font-medium text-left px-3 py-2"
               style={col.width ? { width: col.width } : undefined}
             >
               {col.label}
@@ -207,7 +211,7 @@ export function DataTable({
         {rows.map((row, i) => (
           <tr key={i}>
             {columns.map((col) => (
-              <td key={col.key} className="px-3 py-2 border-t border-slate-100">
+              <td key={col.key} className="px-3 py-2 border-t border-slate-100 dark:border-slate-700">
                 {row[col.key]}
               </td>
             ))}
@@ -255,7 +259,7 @@ export function JsonEditor({
         value={value}
         onChange={handleChange}
         spellCheck={false}
-        className="w-full h-80 font-mono text-sm rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="w-full h-80 font-mono text-sm rounded-lg bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {error ? (
         <div className="text-xs text-red-600">Invalid JSON: {error}</div>
@@ -293,18 +297,18 @@ export function MetricCard({
   const isUp = trend?.startsWith('+');
   const isDown = trend?.startsWith('-');
   const trendClass = isUp
-    ? 'text-green-600'
+    ? 'text-green-600 dark:text-green-400'
     : isDown
-      ? 'text-red-600'
-      : 'text-slate-500';
+      ? 'text-red-600 dark:text-red-400'
+      : 'text-slate-500 dark:text-slate-400';
 
   return (
     <Card>
       <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">{label}</span>
-        <Icon name={icon} size={18} className="text-slate-400" />
+        <span className="text-xs text-slate-500 dark:text-slate-400">{label}</span>
+        <Icon name={icon} size={18} className="text-slate-400 dark:text-slate-500" />
       </div>
-      <div className="mt-2 text-2xl font-bold text-slate-800">{value}</div>
+      <div className="mt-2 text-2xl font-bold text-slate-800 dark:text-slate-100">{value}</div>
       {trend ? <div className={`mt-1 text-xs ${trendClass}`}>{trend}</div> : null}
     </Card>
   );
@@ -324,8 +328,8 @@ export function EmptyState({
 }: EmptyStateProps): React.ReactElement {
   return (
     <div className="flex flex-col items-center justify-center py-12">
-      <Icon name={icon} size={48} className="text-slate-300" />
-      <p className="mt-3 text-sm text-slate-400">{message}</p>
+      <Icon name={icon} size={48} className="text-slate-300 dark:text-slate-600" />
+      <p className="mt-3 text-sm text-slate-400 dark:text-slate-500">{message}</p>
     </div>
   );
 }
