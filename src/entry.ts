@@ -36,6 +36,7 @@ import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } fr
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, type ParallelSubagentTask } from "./extension/subagent";
+import { runTeamWithReview, formatTeamWorkflowResult, type TeamTask } from "./extension/team-workflow";
 import { registerForkMode, handleForkCommand, getForkCandidates } from "./extension/fork-mode";
 import { handleForkExploreCommand, handleForkCompareCommand, handleForkPruneCommand } from "./extension/fork-workflow";
 import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } from "./extension/compaction-advisor";
@@ -485,6 +486,51 @@ export default function (pi: ExtensionAPI) {
 			});
 			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
 			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };
+		},
+	});
+
+	// ---------- Team Review-Feedback Workflow ----------
+
+	pi.registerTool({
+		name: "flux_team_review",
+		label: "Flux Team with Review Loop",
+		description: "多 agent 团队工作流: implement (parallel, persistent) → review → feedback → re-implement. Reviewer 反馈写入 SharedBoard messages/, 失败的 implementer 带 feedback 重新 dispatch. 实现→审查→反馈→修复的闭环. 参数: tasks (implementer 任务数组), reviewer (reviewer agent 名), maxRounds (可选, 默认 2).",
+		parameters: Type.Object({
+			tasks: Type.Array(Type.Object({
+				agent: Type.String({ description: "implementer agent 名称" }),
+				task: Type.String({ description: "任务描述 (含完整规格)" }),
+				label: Type.String({ description: "唯一标签, 用作 session ID 和 reviewer 反馈路由" }),
+			})),
+			reviewer: Type.Optional(Type.String({ description: "reviewer agent 名称, 默认 'reviewer'" })),
+			maxRounds: Type.Optional(Type.Number({ description: "最大轮次 (默认 2 = 初始 + 1 retry)" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+			if (!params.tasks || params.tasks.length === 0) {
+				return { content: [{ type: "text", text: "AgentFlux: no tasks specified" }], details: {} };
+			}
+			if (params.tasks.length > 5) {
+				return { content: [{ type: "text", text: `AgentFlux: too many tasks (${params.tasks.length}), max 5` }], details: {} };
+			}
+
+			const config = loadConfig(ctx.cwd);
+			const reviewerAgent = params.reviewer ?? "reviewer";
+			const fluxDir = join(ctx.cwd, ".agentflux");
+
+			const result = await runTeamWithReview(
+				params.tasks as TeamTask[],
+				reviewerAgent,
+				{
+					cwd: ctx.cwd,
+					fluxDir,
+					telemetry,
+					pricing: pricingTable ?? undefined,
+					prefixLayout: config.cache.prefix_layout === "static_first",
+					maxRounds: params.maxRounds ?? 2,
+					timeoutMs: 180000,
+				},
+			);
+
+			return { content: [{ type: "text", text: formatTeamWorkflowResult(result) }], details: {} };
 		},
 	});
 

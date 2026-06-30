@@ -62,6 +62,11 @@ export async function runSubagentsParallel(
 		telemetry?: TelemetryWriter;
 		prefixLayout: boolean;
 		pricing?: PricingTable;
+		persistent?: boolean;               // M2-2: 持久 session
+		sessionIds?: Map<string, string>;   // per-label session ID (team-workflow 用)
+		sessionDir?: string;                // 自定义 session 目录
+		timeoutMs?: number;                 // 超时 (默认 120000)
+		maxRetries?: number;                // 重试次数 (默认 1)
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
@@ -73,14 +78,18 @@ export async function runSubagentsParallel(
 	const settled = await Promise.allSettled(
 		tasks.map((t, i) => {
 			const individualStart = Date.now();
+			// per-label session ID 优先, fallback 到 common.sessionId
+			const sid = common.sessionIds?.get(t.label) ?? common.sessionId;
 			return runSubagent({
 				cwd: common.cwd,
 				agent: t.agent,
 				task: t.task,
-				sessionId: common.sessionId,
+				sessionId: sid,
 				telemetry: common.telemetry,
 				prefixLayout: common.prefixLayout,
 				pricing: common.pricing,
+				persistent: common.persistent,
+				sessionDir: common.sessionDir,
 				timeoutMs: common.timeoutMs,
 				maxRetries: common.maxRetries ?? 1,
 			}).then(result => {
