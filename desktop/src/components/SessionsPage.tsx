@@ -5,7 +5,8 @@
 import React, { useEffect, useState } from "react";
 import { Icon, StatusDot, EmptyState } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
-import { readSessionMessages, type SessionMessage } from "../lib/session-reader";
+import { readSessionMessages, type SessionMessage, type SessionMetadata } from "../lib/session-reader";
+import { formatPct, formatCost } from "../lib/format";
 
 // Cache hit rate → StatusDot status
 function cacheStatus(rate: number): "done" | "pending" | "failed" {
@@ -14,15 +15,6 @@ function cacheStatus(rate: number): "done" | "pending" | "failed" {
   return "failed"; // red
 }
 
-function formatPct(rate: number): string {
-  return `${(rate * 100).toFixed(0)}%`;
-}
-
-function formatCost(cost: number): string {
-  if (cost === 0) return "$0";
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
-}
 
 // Extract readable text from a message content array
 function extractContent(content: any[]): string {
@@ -109,7 +101,7 @@ function SessionListItem({
   active,
   onClick,
 }: {
-  meta: import("../lib/session-reader").SessionMetadata;
+  meta: SessionMetadata;
   active: boolean;
   onClick: () => void;
 }): React.ReactElement {

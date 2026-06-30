@@ -10,7 +10,7 @@ import { aggregateSummary, aggregateRouteHistory, aggregateCacheTrend, aggregate
 import { EventWatcher } from "../lib/event-watcher";
 import { discoverProject, validateProjectPath, type ProjectConfig } from "../lib/project-discovery";
 import { readAgentStatus, type AgentStatusData } from "../lib/agent-status-enhanced";
-import { loadRegistry, addWorkspace, removeWorkspace, setActive, getActiveWorkspace, type WorkspaceEntry, type WorkspaceRegistry } from "../lib/workspace-registry";
+import { loadRegistry, addWorkspace, removeWorkspace, setActive, type WorkspaceEntry, type WorkspaceRegistry } from "../lib/workspace-registry";
 import { listSessions, type SessionMetadata } from "../lib/session-reader";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
@@ -183,7 +183,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     try {
       const status = await readAgentStatus(project.fluxDir);
       set({ agentStatus: status });
-    } catch {}
+    } catch (e) { console.warn("[flux] agent status refresh failed:", e); }
   },
 
   setProjectPath: async (path: string) => {
@@ -286,7 +286,7 @@ function startStatusPolling(
     try {
       const status = await readAgentStatus(fluxDir);
       set({ agentStatus: status });
-    } catch {}
+    } catch (e) { console.warn("[flux] agent status refresh failed:", e); }
   }, 2000); // 每 2 秒刷新 agent 状态
   set({ statusTimer: timer });
 }

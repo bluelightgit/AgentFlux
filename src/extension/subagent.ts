@@ -208,6 +208,9 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 		return {
 			name: "reviewer",
 			description: "Code review specialist (read-only)",
+			model: "oa/glm-5.2",
+			provider: "octopus-completions",
+			thinking: "high",
 			tools: ["read", "grep", "find", "ls", "bash"],
 			systemPrompt: "You are a senior code reviewer. Analyze code for quality, security, maintainability. Bash is read-only only (git diff/log/show). Output: ## Files Reviewed / ## Critical / ## Warnings / ## Suggestions / ## Summary. Be specific with file paths and line numbers.",
 		};

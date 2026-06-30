@@ -1,4 +1,4 @@
-import { readFileContent, pathExists } from './file-access';
+import { readFileContent } from './file-access';
 
 export interface WorkspaceEntry { id: string; name: string; path: string; lastOpened: number; pinned: boolean; }
 export interface WorkspaceRegistry { workspaces: WorkspaceEntry[]; activeId: string | null; }

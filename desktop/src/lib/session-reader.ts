@@ -10,7 +10,7 @@ export interface SessionMessage { role: string; content: any[]; usage?: any; err
 
 export async function listSessions(sessionsDir: string): Promise<SessionMetadata[]> {
   let files: string[] = [];
-  try { if (window.api?.listDirectory) files = await window.api.listDirectory(sessionsDir); } catch {}
+  try { if (typeof window !== 'undefined' && window.api?.listDirectory) files = await window.api.listDirectory(sessionsDir); } catch {}
   const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
   const metas: SessionMetadata[] = [];
   for (const f of jsonlFiles) { const m = await parseSessionMetadata(sessionsDir + '/' + f); if (m) metas.push(m); }

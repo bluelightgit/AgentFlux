@@ -34,6 +34,7 @@ export interface DAGState {
   completed: string[];
   failed: string[];
   totalNodes: number;
+  nodes?: { id: string; title?: string; role?: string; status?: string }[];
 }
 
 export interface OverrideInfo {
@@ -280,21 +281,6 @@ async function readAgentTelemetry(fluxDir: string): Promise<Map<string, AgentTel
   return telemetry;
 }
 
-// ─── Formatting helpers ───
+// ─── Formatting helpers (re-exported from shared lib/format.ts) ───
 
-export function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return `${n}`;
-}
-
-export function formatCost(c: number): string {
-  if (c === 0) return "$0";
-  if (c < 0.001) return `$${c.toExponential(2)}`;
-  if (c < 0.01) return `$${c.toFixed(6)}`;
-  return `$${c.toFixed(4)}`;
-}
-
-export function formatHitRate(r: number): string {
-  return `${(r * 100).toFixed(1)}%`;
-}
+export { formatTokens, formatCost, formatPct as formatHitRate } from './format';

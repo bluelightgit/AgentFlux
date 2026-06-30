@@ -28,6 +28,7 @@ import {
 import { DAGWorkflow } from "./DAGWorkflow";
 import type { AnyEvent, SubagentRunEvent } from "../lib/events-parser";
 import type { DAGState } from "../lib/agent-status-enhanced";
+import { formatTs, formatCost, formatPct } from "../lib/format";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,29 +46,7 @@ function nodeStatus(
   return "pending";
 }
 
-/** Format a millisecond timestamp as a short local string. */
-function formatTs(ts: number): string {
-  if (!ts) return "-";
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return "-";
-  }
-}
 
-/** Format a cost in USD. */
-function formatCost(c: number): string {
-  if (c === 0) return "$0";
-  if (c < 0.001) return `$${c.toFixed(6)}`;
-  if (c < 0.01) return `$${c.toFixed(4)}`;
-  return `$${c.toFixed(2)}`;
-}
-
-/** Format a 0..1 ratio as a percentage string. */
-function formatPct(r: number): string {
-  if (!isFinite(r) || r <= 0) return "0%";
-  return `${(r * 100).toFixed(1)}%`;
-}
 
 interface DagRunSummary {
   /** Session/group identifier for the run. */
@@ -187,8 +166,8 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
   // Collect all known node ids: from nodes array (if present), completed,
   // failed, and running blackboard agents.
   const allIds = new Set<string>();
-  if (Array.isArray((dagState as any).nodes)) {
-    for (const n of (dagState as any).nodes) {
+  if (Array.isArray(dagState.nodes)) {
+    for (const n of dagState.nodes) {
       if (n && typeof n === "object" && typeof n.id === "string") allIds.add(n.id);
     }
   }
@@ -220,8 +199,8 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
     const bbAgent = blackboardAgents.find((a) => a.name === `dag-${id}`);
     const role =
       bbAgent?.role ??
-      (Array.isArray((dagState as any).nodes)
-        ? ((dagState as any).nodes as any[]).find((n) => n?.id === id)?.role
+      (Array.isArray(dagState.nodes)
+        ? (dagState.nodes as any[]).find((n) => n?.id === id)?.role
         : undefined) ??
       "unknown";
     return {

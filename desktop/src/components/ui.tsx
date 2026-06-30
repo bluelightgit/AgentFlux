@@ -32,6 +32,9 @@ import {
   Cpu,
   AlertTriangle,
   Info,
+  Target,
+  Zap,
+  Split,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -71,6 +74,9 @@ const ICONS: Record<string, LucideIcon> = {
   Cpu,
   AlertTriangle,
   Info,
+  Target,
+  Zap,
+  Split,
 };
 
 // ----------------------------------------------------------------------------

@@ -5,6 +5,7 @@
 import React, { useState, useEffect } from "react";
 import { JsonEditor, Icon, Card } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
+import { readFileContent } from "../lib/file-access";
 
 type ActiveTab = "agentflux" | "models" | "roles";
 
@@ -55,14 +56,13 @@ export const ConfigPage: React.FC = () => {
     setAgentfluxLoading(true);
     setAgentfluxError(null);
     setAgentfluxSaved(false);
-    try {
-      const content = window.api?.readFile ? window.api.readFile(path) : "";
+    readFileContent(path).then((content) => {
       setAgentfluxValue(content ?? "");
-    } catch (err: any) {
-      setAgentfluxError(err?.message ?? "Failed to load agentflux.json");
-    } finally {
       setAgentfluxLoading(false);
-    }
+    }).catch((err: any) => {
+      setAgentfluxError(err?.message ?? "Failed to load agentflux.json");
+      setAgentfluxLoading(false);
+    });
   }, [fluxDir]);
 
   // ── Load models.json ──
@@ -76,14 +76,13 @@ export const ConfigPage: React.FC = () => {
     setModelsLoading(true);
     setModelsError(null);
     setModelsSaved(false);
-    try {
-      const content = window.api?.readFile ? window.api.readFile(path) : "";
+    readFileContent(path).then((content) => {
       setModelsValue(content ?? "");
-    } catch (err: any) {
-      setModelsError(err?.message ?? "Failed to load models.json");
-    } finally {
       setModelsLoading(false);
-    }
+    }).catch((err: any) => {
+      setModelsError(err?.message ?? "Failed to load models.json");
+      setModelsLoading(false);
+    });
   }, [fluxDir]);
 
   // ── Load agent roles ──

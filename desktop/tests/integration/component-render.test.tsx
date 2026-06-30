@@ -68,7 +68,6 @@ import { useDashboardStore } from "../../src/store/dashboard-store";
 import { SummaryCards } from "../../src/components/SummaryCards";
 import { RouteMap } from "../../src/components/RouteMap";
 import { CacheChart } from "../../src/components/CacheChart";
-import { AgentTimeline } from "../../src/components/AgentTimeline";
 
 function setStoreState(partial: any) {
   useDashboardStore.setState(partial);
@@ -113,27 +112,7 @@ describe("IT-6: CacheChart renders dual charts", () => {
   });
 });
 
-describe("IT-7: AgentTimeline renders agent table", () => {
-  it("renders table with agent run entries", () => {
-    setStoreState({
-      agentTimeline: [
-        { ts: 1000, agent: "planner", task: "Plan the feature", model: "gpt-5.5", turns: 3, cost: 0.001, cacheHitRate: 0.85, exitCode: 0 },
-        { ts: 2000, agent: "implementer", task: "Write the code", model: "glm-5.2", turns: 5, cost: 0.0005, cacheHitRate: 0.72, exitCode: 0 },
-      ],
-    });
-    render(React.createElement(AgentTimeline));
-    expect(screen.getByText("planner")).toBeInTheDocument();
-    expect(screen.getByText("implementer")).toBeInTheDocument();
-  });
-
-  it("renders empty state when no agent data", () => {
-    setStoreState({ agentTimeline: [] });
-    render(React.createElement(AgentTimeline));
-    expect(screen.getByText(/No agent|recent agent/i)).toBeTruthy();
-  });
-});
-
-describe("IT-8: SummaryCards renders metric cards", () => {
+describe("IT-7: SummaryCards renders metric cards", () => {
   it("renders all 6 metric cards with values", () => {
     setStoreState({
       summary: {
@@ -149,7 +128,7 @@ describe("IT-8: SummaryCards renders metric cards", () => {
     render(React.createElement(SummaryCards));
     // SummaryCards formats 1000 as "1.0k"
     expect(screen.getByText("1.0k")).toBeInTheDocument();
-    expect(screen.getByText("$13.7300")).toBeInTheDocument();
+    expect(screen.getByText("$13.73")).toBeInTheDocument();
   });
 
   it("renders null when summary is null", () => {

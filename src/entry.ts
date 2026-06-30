@@ -571,7 +571,7 @@ export default function (pi: ExtensionAPI) {
 						// Step 1: 生成 DAG
 						const dag = await generateTaskDAG(taskText, {
 							cwd: ctx.cwd,
-							model: teamCtx.modelsConfig?.models?.["gpt-5.5"] ? "gpt-5.5" : undefined,
+							model: teamCtx.modelsConfig?.models?.["oa/glm-5.2"] ? "oa/glm-5.2" : undefined,
 							pricing: teamCtx.pricing,
 							telemetry,
 							sessionId,

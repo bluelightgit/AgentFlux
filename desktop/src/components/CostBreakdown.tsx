@@ -13,12 +13,7 @@ const MODE_COLORS: Record<string, string> = {
   subagent: "#64748b",
 };
 
-function formatCost(c: number): string {
-  if (c === 0) return "$0";
-  if (c < 0.001) return `$${c.toExponential(2)}`;
-  if (c < 0.01) return `$${c.toFixed(6)}`;
-  return `$${c.toFixed(4)}`;
-}
+import { formatCost } from "../lib/format";
 
 export const CostBreakdown: React.FC = () => {
   const costAnalysis = useDashboardStore((s) => s.costAnalysis);

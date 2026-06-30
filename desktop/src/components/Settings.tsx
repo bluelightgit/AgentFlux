@@ -76,7 +76,7 @@ export const Settings: React.FC = () => {
         <div className="text-sm text-slate-600 space-y-2">
           <div>Platform: <span className="font-mono">{typeof window !== "undefined" ? window.api?.platform : "node"}</span></div>
           <div>Electron: <span className="font-mono">{typeof window !== "undefined" && window.api ? "yes" : "no (browser only)"}</span></div>
-          <div>AGENTFLUX_PROJECT_ROOT: <span className="font-mono">{process.env.AGENTFLUX_PROJECT_ROOT ?? "not set"}</span></div>
+          <div>AGENTFLUX_PROJECT_ROOT: <span className="font-mono">{typeof process !== 'undefined' ? process.env?.AGENTFLUX_PROJECT_ROOT ?? "not set" : "not set"}</span></div>
         </div>
       </div>
 

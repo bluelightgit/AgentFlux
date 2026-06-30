@@ -8,16 +8,7 @@ import {
 } from "recharts";
 import { useDashboardStore } from "../store/dashboard-store";
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return `${n}`;
-}
-
+import { formatTime, formatTokens } from "../lib/format";
 export const CacheChart: React.FC = () => {
   const cacheTrend = useDashboardStore((s) => s.cacheTrend);
   const tokenBreakdown = useDashboardStore((s) => s.tokenBreakdown);

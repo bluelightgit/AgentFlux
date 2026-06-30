@@ -4,17 +4,7 @@
 import React from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 
-function formatCost(c: number): string {
-  if (c === 0) return "$0";
-  if (c < 0.001) return `$${c.toExponential(2)}`;
-  if (c < 0.01) return `$${c.toFixed(6)}`;
-  return `$${c.toFixed(4)}`;
-}
-
-function formatNum(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return `${n}`;
-}
+import { formatCost, formatNum } from "../lib/format";
 
 export const SummaryCards: React.FC = () => {
   const summary = useDashboardStore((s) => s.summary);
