@@ -16,6 +16,7 @@ const NAV_ITEMS: { id: PageName; label: string; icon: string }[] = [
   { id: 'routing', label: 'Routing', icon: 'Route' },
   { id: 'telemetry', label: 'Telemetry', icon: 'Activity' },
   { id: 'dag', label: 'DAG', icon: 'Workflow' },
+  { id: 'issues', label: 'Issues', icon: 'ClipboardList' },
   { id: 'config', label: 'Config', icon: 'Settings2' },
   { id: 'settings', label: 'Settings', icon: 'Settings' },
 ];

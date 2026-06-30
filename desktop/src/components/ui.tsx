@@ -37,6 +37,8 @@ import {
   Split,
   Sun,
   Moon,
+  Bell,
+  ClipboardList,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -81,6 +83,8 @@ const ICONS: Record<string, LucideIcon> = {
   Split,
   Sun,
   Moon,
+  Bell,
+  ClipboardList,
 };
 
 // ----------------------------------------------------------------------------

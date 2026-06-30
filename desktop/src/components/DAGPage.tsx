@@ -5,6 +5,17 @@
  *   - Reads dagState from store.agentStatus?.dagState
  *   - Shows description, progress bar (completed/failed/running), DAGWorkflow
  *     visual, and a node details DataTable.
+ *   - Live updates: watches `.agentflux/runtime/dag-state.json` for changes and
+ *     auto-refreshes agent status. A 'Live' indicator + start/stop toggle.
+ *   - Progress ETA: estimates remaining time from average node duration in
+ *     history (gaps between consecutive dag-* subagent.run events).
+ *
+ * Execution Logs Panel:
+ *   - Collapsible panel below the DAG visualization.
+ *   - Lists recent dag-* subagent.run events chronologically with timestamp,
+ *     agent name, exit code, cost, and turns. Color-coded by exit code.
+ *   - Auto-scrolls to bottom when new logs arrive (if live mode is on).
+ *   - Max 50 entries shown, with 'Show All' to expand.
  *
  * Section 2: DAG Execution History
  *   - Filters store.events for subagent.run events whose agent name starts
@@ -13,8 +24,9 @@
  *     proximity when sessionId is missing).
  *   - Renders a DataTable summarizing each past DAG run.
  */
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
+import { useLiveUpdate } from "../hooks/useLiveUpdate";
 import {
   Card,
   Icon,
@@ -46,7 +58,33 @@ function nodeStatus(
   return "pending";
 }
 
+/** Filter events to dag-* subagent.run events, sorted ascending by ts. */
+function filterDagEvents(events: AnyEvent[]): SubagentRunEvent[] {
+  return events
+    .filter(
+      (e): e is SubagentRunEvent =>
+        e.type === "subagent.run" &&
+        typeof (e as any).agent === "string" &&
+        (e as any).agent.startsWith("dag-"),
+    )
+    .sort((a, b) => a.ts - b.ts);
+}
 
+/**
+ * Estimate average per-node execution duration (ms) from the gaps between
+ * consecutive dag-* subagent.run events in history. Returns 0 when there
+ * is not enough data to estimate.
+ */
+function estimateAvgNodeDurationMs(dagEvents: SubagentRunEvent[]): number {
+  if (dagEvents.length < 2) return 0;
+  const gaps: number[] = [];
+  for (let i = 1; i < dagEvents.length; i++) {
+    const gap = dagEvents[i].ts - dagEvents[i - 1].ts;
+    if (gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return 0;
+  return gaps.reduce((s, g) => s + g, 0) / gaps.length;
+}
 
 interface DagRunSummary {
   /** Session/group identifier for the run. */
@@ -137,20 +175,41 @@ function groupDagRuns(events: SubagentRunEvent[]): DagRunSummary[] {
 // Section 1: Current DAG State
 // ---------------------------------------------------------------------------
 
-const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
-  const blackboardAgents = useDashboardStore((s) => s.agentStatus?.blackboardAgents ?? []);
+interface Section1Props {
+  dagState: DAGState | null;
+  events: AnyEvent[];
+  isLive: boolean;
+  onToggleLive: () => void;
+}
+
+const Section1: React.FC<Section1Props> = ({
+  dagState,
+  events,
+  isLive,
+  onToggleLive,
+}) => {
+  const blackboardAgents = useDashboardStore(
+    (s) => s.agentStatus?.blackboardAgents ?? [],
+  );
+
+  // dag-* events for ETA estimation.
+  const dagEvents = useMemo(() => filterDagEvents(events), [events]);
+  const avgDurationMs = useMemo(
+    () => estimateAvgNodeDurationMs(dagEvents),
+    [dagEvents],
+  );
 
   if (!dagState) {
     return (
       <Card>
-        <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-700 mb-4">
-          <Icon name="Workflow" size={18} className="text-slate-500" />
-          Current DAG State
-        </h2>
-        <EmptyState
-          icon="Workflow"
-          message="No active DAG execution"
-        />
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-700">
+            <Icon name="Workflow" size={18} className="text-slate-500" />
+            Current DAG State
+          </h2>
+          <LiveToggle isLive={isLive} onToggle={onToggleLive} />
+        </div>
+        <EmptyState icon="Workflow" message="No active DAG execution" />
       </Card>
     );
   }
@@ -193,6 +252,20 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
   const segFailed = totalNodes > 0 ? (failedCount / totalNodes) * 100 : 0;
   const segRunning = totalNodes > 0 ? (runningCount / totalNodes) * 100 : 0;
 
+  // ETA: only show when DAG is actively executing (some done, some pending/running).
+  const isExecuting =
+    completedCount > 0 && (pendingCount > 0 || runningCount > 0) && totalNodes > 0;
+  const remainingNodes = pendingCount + runningCount;
+  let etaText: string | null = null;
+  if (isExecuting) {
+    if (avgDurationMs > 0) {
+      const etaSeconds = Math.round((remainingNodes * avgDurationMs) / 1000);
+      etaText = `ETA: ~${etaSeconds}s remaining`;
+    } else {
+      etaText = "ETA: calculating...";
+    }
+  }
+
   // Build node detail rows.
   const nodeRows = nodeIds.map((id) => {
     const status = nodeStatus(id, dagState, runningIds);
@@ -223,10 +296,13 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
 
   return (
     <Card>
-      <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-700 mb-4">
-        <Icon name="Workflow" size={18} className="text-slate-500" />
-        Current DAG State
-      </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-700">
+          <Icon name="Workflow" size={18} className="text-slate-500" />
+          Current DAG State
+        </h2>
+        <LiveToggle isLive={isLive} onToggle={onToggleLive} />
+      </div>
 
       {/* Description */}
       <p className="text-lg font-bold text-slate-800 mb-3 break-words">
@@ -271,9 +347,14 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
           style={{ width: `${segRunning}%` }}
         />
       </div>
-      <div className="text-xs text-slate-400 mb-4">
-        {progressPct.toFixed(1)}% complete
-        {dagState.startTime ? ` — started ${formatTs(dagState.startTime)}` : ""}
+      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400 mb-4">
+        <span>{progressPct.toFixed(1)}% complete</span>
+        {dagState.startTime ? (
+          <span>— started {formatTs(dagState.startTime)}</span>
+        ) : null}
+        {etaText ? (
+          <span className="text-slate-600 font-medium">{etaText}</span>
+        ) : null}
       </div>
 
       {/* Visual DAG workflow */}
@@ -284,14 +365,156 @@ const Section1: React.FC<{ dagState: DAGState | null }> = ({ dagState }) => {
       {/* Node details table */}
       <h3 className="text-sm font-semibold text-slate-700 mb-2">Node Details</h3>
       {nodeRows.length === 0 ? (
-        <EmptyState
-          icon="Workflow"
-          message="No DAG nodes recorded yet."
-        />
+        <EmptyState icon="Workflow" message="No DAG nodes recorded yet." />
       ) : (
         <div className="overflow-x-auto">
           <DataTable columns={nodeColumns} rows={nodeRows} />
         </div>
+      )}
+    </Card>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Live indicator + toggle
+// ---------------------------------------------------------------------------
+
+const LiveToggle: React.FC<{ isLive: boolean; onToggle: () => void }> = ({
+  isLive,
+  onToggle,
+}) => (
+  <div className="flex items-center gap-3">
+    {isLive && (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-green-600">
+        <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        Live
+      </span>
+    )}
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded border transition-colors ${
+        isLive
+          ? "border-green-300 bg-green-50 text-green-700 hover:bg-green-100"
+          : "border-slate-300 bg-slate-50 text-slate-600 hover:bg-slate-100"
+      }`}
+      aria-label={isLive ? "Stop live updates" : "Start live updates"}
+    >
+      <Icon
+        name="RefreshCw"
+        size={14}
+        className={isLive ? "animate-spin" : ""}
+      />
+      {isLive ? "Stop" : "Live"}
+    </button>
+  </div>
+);
+
+// ---------------------------------------------------------------------------
+// Execution Logs Panel
+// ---------------------------------------------------------------------------
+
+const MAX_LOG_ENTRIES = 50;
+
+const ExecutionLogsPanel: React.FC<{
+  events: AnyEvent[];
+  isLive: boolean;
+}> = ({ events, isLive }) => {
+  const [collapsed, setCollapsed] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const dagEvents = useMemo(() => filterDagEvents(events), [events]);
+  const visible = showAll ? dagEvents : dagEvents.slice(-MAX_LOG_ENTRIES);
+  const hiddenCount = Math.max(0, dagEvents.length - visible.length);
+
+  // Auto-scroll to bottom when new logs arrive (only if live mode is on and
+  // the panel is expanded).
+  useEffect(() => {
+    if (collapsed || !isLive) return;
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [dagEvents.length, collapsed, isLive]);
+
+  return (
+    <Card>
+      <button
+        type="button"
+        onClick={() => setCollapsed((c) => !c)}
+        className="flex items-center gap-2 text-lg font-semibold text-slate-700 w-full text-left"
+      >
+        <Icon
+          name={collapsed ? "ChevronRight" : "ChevronDown"}
+          size={18}
+          className="text-slate-500"
+        />
+        Execution Logs
+        <span className="text-xs font-normal text-slate-400">
+          {dagEvents.length} {dagEvents.length === 1 ? "entry" : "entries"}
+        </span>
+      </button>
+
+      {!collapsed && (
+        <>
+          {dagEvents.length === 0 ? (
+            <div className="mt-4">
+              <EmptyState
+                icon="Activity"
+                message="No dag-* subagent.run events recorded yet."
+              />
+            </div>
+          ) : (
+            <>
+              <div
+                ref={listRef}
+                className="mt-4 max-h-80 overflow-y-auto bg-slate-50 dark:bg-slate-900/40 rounded border border-slate-200 dark:border-slate-700 p-3 space-y-1"
+              >
+                {visible.map((e, i) => {
+                  const exitCode = e.exitCode ?? 0;
+                  const ok = exitCode === 0;
+                  return (
+                    <div
+                      key={`${e.ts}-${i}`}
+                      className={`font-mono text-xs flex flex-wrap items-center gap-x-3 gap-y-0.5 ${
+                        ok ? "text-green-700" : "text-red-600"
+                      }`}
+                    >
+                      <span className="text-slate-500">{formatTs(e.ts)}</span>
+                      <span className="font-semibold">{e.agent}</span>
+                      <span>exit={exitCode}</span>
+                      <span>{formatCost(e.costUsd ?? 0)}</span>
+                      <span className="text-slate-500">
+                        {e.turns ?? 0} turns
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {!showAll && hiddenCount > 0 && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                  >
+                    Show All ({dagEvents.length} entries)
+                  </button>
+                </div>
+              )}
+              {showAll && dagEvents.length > MAX_LOG_ENTRIES && (
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                  >
+                    Show Recent ({MAX_LOG_ENTRIES})
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </>
       )}
     </Card>
   );
@@ -370,10 +593,34 @@ const Section2: React.FC<{ events: AnyEvent[] }> = ({ events }) => {
 export const DAGPage: React.FC = () => {
   const agentStatus = useDashboardStore((s) => s.agentStatus);
   const events = useDashboardStore((s) => s.events);
+  const project = useDashboardStore((s) => s.project);
+  const refreshAgentStatus = useDashboardStore((s) => s.refreshAgentStatus);
+
+  // Path to the DAG state file we watch for live changes.
+  const dagStatePath = project
+    ? `${project.fluxDir}/runtime/dag-state.json`
+    : null;
+
+  const { isLive, start, stop } = useLiveUpdate(dagStatePath, {
+    onNewData: () => {
+      refreshAgentStatus();
+    },
+  });
+
+  const handleToggleLive = () => {
+    if (isLive) stop();
+    else start();
+  };
 
   return (
     <div className="space-y-6 p-6">
-      <Section1 dagState={agentStatus?.dagState ?? null} />
+      <Section1
+        dagState={agentStatus?.dagState ?? null}
+        events={events}
+        isLive={isLive}
+        onToggleLive={handleToggleLive}
+      />
+      <ExecutionLogsPanel events={events} isLive={isLive} />
       <Section2 events={events} />
     </div>
   );

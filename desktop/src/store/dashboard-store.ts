@@ -14,7 +14,7 @@ import { loadRegistry, addWorkspace, removeWorkspace, setActive, type WorkspaceE
 import { listSessions, type SessionMetadata } from "../lib/session-reader";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
-export type PageName = 'overview' | 'sessions' | 'agents' | 'routing' | 'telemetry' | 'dag' | 'config' | 'settings';
+export type PageName = 'overview' | 'sessions' | 'agents' | 'routing' | 'telemetry' | 'dag' | 'issues' | 'config' | 'settings';
 
 interface DashboardState {
   // 导航
