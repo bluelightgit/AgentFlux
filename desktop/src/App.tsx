@@ -1,20 +1,14 @@
 import React, { useEffect } from "react";
 import { useDashboardStore } from "./store/dashboard-store";
 import { AppShell } from "./components/AppShell";
-import { EmptyState } from "./components/ui";
-import Dashboard from "./Dashboard";
+import { OverviewPage } from "./components/OverviewPage";
 import { SessionsPage } from "./components/SessionsPage";
 import { AgentsPage } from "./components/AgentsPage";
 import { PreferenceRadar } from "./components/PreferenceRadar";
+import { TelemetryPage } from "./components/TelemetryPage";
+import { DAGPage } from "./components/DAGPage";
 import { ConfigPage } from "./components/ConfigPage";
 import { Settings } from "./components/Settings";
-
-// Placeholder for pages not yet implemented
-const Placeholder: React.FC<{ page: string; icon: string }> = ({ page, icon }) => (
-  <div className="flex-1 flex items-center justify-center">
-    <EmptyState icon={icon} message={`${page} page — implementation pending`} />
-  </div>
-);
 
 const App: React.FC = () => {
   const currentPage = useDashboardStore((s) => s.currentPage);
@@ -27,12 +21,12 @@ const App: React.FC = () => {
 
   return (
     <AppShell>
-      {currentPage === "overview" && <Dashboard />}
+      {currentPage === "overview" && <OverviewPage />}
       {currentPage === "sessions" && <SessionsPage />}
       {currentPage === "agents" && <AgentsPage />}
       {currentPage === "routing" && <PreferenceRadar />}
-      {currentPage === "telemetry" && <Placeholder page="Telemetry" icon="Activity" />}
-      {currentPage === "dag" && <Placeholder page="DAG" icon="Workflow" />}
+      {currentPage === "telemetry" && <TelemetryPage />}
+      {currentPage === "dag" && <DAGPage />}
       {currentPage === "config" && <ConfigPage />}
       {currentPage === "settings" && <Settings />}
     </AppShell>

@@ -7,9 +7,9 @@ import { useDashboardStore } from "../store/dashboard-store";
 import { formatTokens, formatCost, formatHitRate } from "../lib/agent-status-enhanced";
 
 const STATUS_ICON: Record<number, string> = {
-  0: "✅",
-  124: "⏱️",
-  [-1]: "❌",
+  0: "OK",
+  124: "TIMEOUT",
+  [-1]: "ERROR",
 };
 
 export const EventStream: React.FC = () => {
@@ -158,10 +158,10 @@ export const EventStream: React.FC = () => {
 
             {/* Detail line */}
             <div className="flex items-center gap-3 text-xs text-slate-400">
-              <span>📦 in {formatTokens(a.totalInput)}</span>
-              <span>📖 cache {formatTokens(a.totalCacheRead)}</span>
-              <span>📤 out {formatTokens(a.totalOutput)}</span>
-              <span>🔄 avg {a.avgTurns.toFixed(1)} turns</span>
+              <span>in {formatTokens(a.totalInput)}</span>
+              <span>cache {formatTokens(a.totalCacheRead)}</span>
+              <span>out {formatTokens(a.totalOutput)}</span>
+              <span>avg {a.avgTurns.toFixed(1)} turns</span>
               <span>Models: {a.models.join(", ")}</span>
             </div>
           </div>

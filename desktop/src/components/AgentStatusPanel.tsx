@@ -4,6 +4,7 @@
  */
 import React from "react";
 import { useDashboardStore } from "../store/dashboard-store";
+import { Icon } from "./ui";
 
 const STATUS_ICON: Record<string, string> = {
   running: "●",
@@ -185,7 +186,7 @@ export const AgentStatusPanel: React.FC = () => {
       {/* Override Status */}
       {override && (
         <div className="bg-amber-50 rounded-lg shadow p-6 border border-amber-200">
-          <h3 className="text-lg font-semibold text-amber-800 mb-2">⚠ Runtime Override Active</h3>
+          <h3 className="text-lg font-semibold text-amber-800 mb-2 flex items-center gap-2"><Icon name="AlertTriangle" size={20} className="text-amber-600" /> Runtime Override Active</h3>
           <div className="text-sm text-amber-700 space-y-1">
             {override.preset && <div>Preset override: <span className="font-mono">{override.preset}</span></div>}
             {override.forceMode && <div>Force mode: <span className="font-mono">{override.forceMode}</span></div>}

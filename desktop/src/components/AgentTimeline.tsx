@@ -15,9 +15,9 @@ function formatCost(c: number): string {
 }
 
 const statusIcon = (exitCode: number, retryCount?: number): string => {
-  if (exitCode === 0 && (!retryCount || retryCount === 0)) return "✅";
-  if (exitCode === 0 && retryCount && retryCount > 0) return "🔄";
-  return "❌";
+  if (exitCode === 0 && (!retryCount || retryCount === 0)) return "OK";
+  if (exitCode === 0 && retryCount && retryCount > 0) return "RETRY";
+  return "ERR";
 };
 
 export const AgentTimeline: React.FC = () => {

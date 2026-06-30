@@ -4,6 +4,7 @@ export interface WorkspaceEntry { id: string; name: string; path: string; lastOp
 export interface WorkspaceRegistry { workspaces: WorkspaceEntry[]; activeId: string | null; }
 
 async function getRegistryPath(): Promise<string> {
+  if (typeof window === 'undefined' || !window.api?.getUserDataPath) throw new Error('no window.api');
   const userDataPath = await window.api.getUserDataPath();
   return userDataPath + '/workspaces.json';
 }
@@ -12,6 +13,7 @@ export async function loadRegistry(): Promise<WorkspaceRegistry> {
   try { const p = await getRegistryPath(); const content = await readFileContent(p); if (!content) return { workspaces: [], activeId: null }; return JSON.parse(content); } catch { return { workspaces: [], activeId: null }; }
 }
 export async function saveRegistry(reg: WorkspaceRegistry): Promise<void> {
+  if (typeof window === 'undefined' || !window.api?.ipcRenderer) throw new Error('no window.api');
   const p = await getRegistryPath(); await window.api.ipcRenderer.invoke('write-file', p, JSON.stringify(reg, null, 2));
 }
 export async function addWorkspace(path: string): Promise<WorkspaceEntry> {

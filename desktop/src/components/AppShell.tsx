@@ -24,6 +24,7 @@ const TopBar: React.FC = () => {
   const activeWorkspace = useDashboardStore((s) => s.activeWorkspace);
   const selectWorkspace = useDashboardStore((s) => s.selectWorkspace);
   const addWorkspacePath = useDashboardStore((s) => s.addWorkspacePath);
+  const removeWorkspaceById = useDashboardStore((s) => s.removeWorkspaceById);
   const reload = useDashboardStore((s) => s.reload);
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -43,11 +44,16 @@ const TopBar: React.FC = () => {
     };
   }, [dropdownOpen]);
 
-  const handleAddWorkspace = () => {
+  const handleAddWorkspace = async () => {
     setDropdownOpen(false);
-    const path = window.prompt('Enter workspace path:');
-    if (path && path.trim()) {
-      addWorkspacePath(path.trim());
+    try {
+      if (typeof window === 'undefined' || !window.api?.showFolderDialog) return;
+      const path = await window.api.showFolderDialog();
+      if (path) {
+        await addWorkspacePath(path);
+      }
+    } catch (e) {
+      console.error('Failed to open folder dialog:', e);
     }
   };
 
@@ -89,8 +95,29 @@ const TopBar: React.FC = () => {
                         : 'text-slate-700'
                     }`}
                   >
-                    <Icon name="FolderOpen" size={16} className="text-slate-400" />
-                    <span className="truncate">{w.name}</span>
+                    <Icon name="FolderOpen" size={16} className="text-slate-400 shrink-0" />
+                    <span className="flex-1 min-w-0 text-left">
+                      <span className="block truncate">{w.name}</span>
+                      <span className="block text-xs text-slate-400 truncate">{w.path}</span>
+                    </span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Remove workspace ${w.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeWorkspaceById(w.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.stopPropagation();
+                          removeWorkspaceById(w.id);
+                        }
+                      }}
+                      className="shrink-0 p-1 rounded text-slate-400 hover:text-red-500 hover:bg-slate-100 cursor-pointer"
+                    >
+                      <Icon name="X" size={14} />
+                    </span>
                   </button>
                 </li>
               ))}
@@ -118,8 +145,9 @@ const TopBar: React.FC = () => {
       <button
         type="button"
         onClick={() => reload()}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+        aria-label="Refresh"
         title="Refresh"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
       >
         <Icon name="RefreshCw" size={16} className="text-slate-500" />
         <span>Refresh</span>
