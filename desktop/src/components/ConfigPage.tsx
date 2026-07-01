@@ -6,6 +6,7 @@ import React, { useState, useEffect } from "react";
 import { JsonEditor, Icon, Card } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
 import { readFileContent } from "../lib/file-access";
+import { ModelComparisonPanel } from "./ModelComparisonPanel";
 
 type ActiveTab = "agentflux" | "models" | "roles";
 
@@ -378,6 +379,11 @@ export const ConfigPage: React.FC = () => {
           )}
         </Card>
       )}
+
+      {/* Model Comparison */}
+      <div className="mt-4">
+        <ModelComparisonPanel />
+      </div>
     </div>
   );
 };

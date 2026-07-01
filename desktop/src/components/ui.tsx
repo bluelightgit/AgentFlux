@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   File,
+  Wallet,
   LayoutDashboard,
   MessageSquare,
   Users,
@@ -45,6 +46,7 @@ import {
   Lightbulb,
   Palette,
   Keyboard,
+  GanttChart,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -53,6 +55,7 @@ export type { LucideIcon };
 // Icon name → Lucide component map
 const ICONS: Record<string, LucideIcon> = {
   File,
+  Wallet,
   LayoutDashboard,
   MessageSquare,
   Users,
@@ -97,6 +100,7 @@ const ICONS: Record<string, LucideIcon> = {
   Lightbulb,
   Palette,
   Keyboard,
+  GanttChart,
 };
 
 // ----------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import { CostBreakdown } from './CostBreakdown';
 import { CacheChart } from './CacheChart';
 import { EventStream } from './EventStream';
 import { CostTrendChart } from './CostTrendChart';
+import { AgentWorkflowTimeline } from './AgentWorkflowTimeline';
 
 const TIME_RANGES: { id: TimeRange; label: string }[] = [
   { id: '1h', label: '1 Hour' },
@@ -117,6 +118,11 @@ export const TelemetryPage: React.FC = () => {
       {/* Cost Trend */}
       <div className='mt-4'>
         <CostTrendChart />
+      </div>
+
+      {/* Agent Workflow Timeline */}
+      <div className='mt-4'>
+        <AgentWorkflowTimeline />
       </div>
     </div>
   );

@@ -9,6 +9,7 @@ import { RouteMap } from './RouteMap';
 import { CostTrendChart } from './CostTrendChart';
 import { InsightsCard, type InsightItem } from './InsightsCard';
 import { generateInsights } from '../lib/insights-generator';
+import { CostBudgetPanel } from './CostBudgetPanel';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -137,6 +138,7 @@ export const OverviewPage: React.FC = () => {
       <div className='mt-4 grid gap-6'>
         <CostTrendChart />
         <InsightsCard insights={insights} />
+        <CostBudgetPanel />
       </div>
     </div>
   );
