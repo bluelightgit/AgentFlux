@@ -88,7 +88,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 
 // ──────────────────────────────── MD 解析 ────────────────────────────────
 
-function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
+export function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
 	const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
 	if (!fmMatch) return { frontmatter: {}, body: content };
 

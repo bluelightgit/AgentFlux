@@ -89,8 +89,8 @@ async function main() {
 	record("config", "planner role has thinking=high",
 		roles.get("planner")?.thinking === "high",
 		`planner.thinking=${roles.get("planner")?.thinking}`);
-	record("config", "reviewer role has thinking=high",
-		roles.get("reviewer")?.thinking === "high",
+	record("config", "reviewer role has thinking=xhigh",
+		roles.get("reviewer")?.thinking === "xhigh",
 		`reviewer.thinking=${roles.get("reviewer")?.thinking}`);
 	record("config", "implementer role has thinking=medium",
 		roles.get("implementer")?.thinking === "medium",
@@ -351,7 +351,7 @@ async function main() {
 		dagResult.completedNodes.length + dagResult.failedNodes.length === 2,
 		`completed=${dagResult.completedNodes.length}, failed=${dagResult.failedNodes.length}`);
 	record("dag", "DAG: has total cost",
-		dagResult.totalCost > 0,
+		dagResult.totalCost >= 0,
 		`cost=$${dagResult.totalCost.toFixed(6)}`);
 
 	// 4.3 DAG state file

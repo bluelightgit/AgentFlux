@@ -21,7 +21,7 @@ import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
-import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { parseFrontmatter } from "../core/role-manager";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { ModelEntry, RoleRequirement } from "../core/model-capability";
 import { findFallbackModel } from "../core/model-capability";
@@ -202,7 +202,7 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 	const file = join(dir, `${name}.md`);
 	if (existsSync(file)) {
 		try {
-			const { frontmatter, body } = parseFrontmatter<Record<string, string>>(readFileSync(file, "utf-8"));
+			const { frontmatter, body } = parseFrontmatter(readFileSync(file, "utf-8"));
 			if (!frontmatter.name) return null;
 			const tools = frontmatter.tools?.split(",").map((t) => t.trim()).filter(Boolean);
 			const thinking = frontmatter.thinking as SubagentDef["thinking"] | undefined;

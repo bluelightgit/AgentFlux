@@ -123,6 +123,16 @@ function createWindow(): BrowserWindow {
   if (isDev) {
     win.loadURL('http://localhost:5173');
     win.webContents.openDevTools({ mode: 'detach' });
+
+    // Suppress benign DevTools Autofill protocol errors (CDP domain not implemented in Electron)
+    win.webContents.on('devtools-opened', () => {
+      const dt = win.webContents.devToolsWebContents;
+      if (dt) {
+        dt.on('console-message', (e: Electron.Event, _level: number, message: string) => {
+          if (message.includes('Autofill')) e.preventDefault();
+        });
+      }
+    });
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
   }
