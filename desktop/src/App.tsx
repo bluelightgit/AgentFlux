@@ -19,7 +19,7 @@ import { Settings } from "./components/Settings";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { useEventNotifications } from "./hooks/useEventNotifications";
 
-const App: React.FC = () => {
+const AppInner: React.FC = () => {
   const currentPage = useDashboardStore((s) => s.currentPage);
   const init = useDashboardStore((s) => s.init);
   const loadWorkspaces = useDashboardStore((s) => s.loadWorkspaces);
@@ -44,28 +44,36 @@ const App: React.FC = () => {
   }, []);
 
   return (
+    <>
+      <AppShell>
+        {currentPage === "overview" && <OverviewPage />}
+        {currentPage === "sessions" && <SessionsPage />}
+        {currentPage === "agents" && <AgentsPage />}
+        {currentPage === "routing" && (
+          <div className="space-y-4">
+            <PreferenceRadar />
+            <RoutingHistoryChart />
+            <RoutingFlowDiagram />
+            <AgentAffinityPanel />
+          </div>
+        )}
+        {currentPage === "telemetry" && <TelemetryPage />}
+        {currentPage === "dag" && <DAGPage />}
+        {currentPage === "issues" && <IssuesPage />}
+        {currentPage === "chat" && <GroupChatPage />}
+        {currentPage === "config" && <ConfigPage />}
+        {currentPage === "settings" && <Settings />}
+      </AppShell>
+      {showHelp && <HelpOverlay isOpen={showHelp} onClose={() => setShowHelp(false)} />}
+    </>
+  );
+};
+
+const App: React.FC = () => {
+  return (
     <ThemeProvider>
       <NotificationProvider>
-        <AppShell>
-          {currentPage === "overview" && <OverviewPage />}
-          {currentPage === "sessions" && <SessionsPage />}
-          {currentPage === "agents" && <AgentsPage />}
-          {currentPage === "routing" && (
-            <div className="space-y-4">
-              <PreferenceRadar />
-              <RoutingHistoryChart />
-              <RoutingFlowDiagram />
-              <AgentAffinityPanel />
-            </div>
-          )}
-          {currentPage === "telemetry" && <TelemetryPage />}
-          {currentPage === "dag" && <DAGPage />}
-          {currentPage === "issues" && <IssuesPage />}
-          {currentPage === "chat" && <GroupChatPage />}
-          {currentPage === "config" && <ConfigPage />}
-          {currentPage === "settings" && <Settings />}
-        </AppShell>
-        {showHelp && <HelpOverlay isOpen={showHelp} onClose={() => setShowHelp(false)} />}
+        <AppInner />
       </NotificationProvider>
     </ThemeProvider>
   );
