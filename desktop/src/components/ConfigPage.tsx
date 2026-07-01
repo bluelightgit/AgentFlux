@@ -7,6 +7,7 @@ import { JsonEditor, Icon, Card } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
 import { readFileContent } from "../lib/file-access";
 import { ModelComparisonPanel } from "./ModelComparisonPanel";
+import { ConfigSummary } from "./ConfigSummary";
 
 type ActiveTab = "agentflux" | "models" | "roles";
 
@@ -202,6 +203,10 @@ export const ConfigPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <div className="mb-4">
+        <ConfigSummary />
+      </div>
+
       <div>
         <h1 className="text-2xl font-bold text-slate-800">Config</h1>
         <p className="text-sm text-slate-500 mt-1">

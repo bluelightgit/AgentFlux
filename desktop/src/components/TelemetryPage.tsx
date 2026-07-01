@@ -9,6 +9,7 @@ import { CostTrendChart } from './CostTrendChart';
 import { AgentWorkflowTimeline } from './AgentWorkflowTimeline';
 import { CacheHitDistribution } from './CacheHitDistribution';
 import { ModelUsageStats } from './ModelUsageStats';
+import { AgentTimelineGantt } from './AgentTimelineGantt';
 
 const TIME_RANGES: { id: TimeRange; label: string }[] = [
   { id: '1h', label: '1 Hour' },
@@ -133,6 +134,11 @@ export const TelemetryPage: React.FC = () => {
 
       <div className='mt-4'>
         <ModelUsageStats />
+      </div>
+
+      {/* Execution Timeline (Gantt) */}
+      <div className='mt-4'>
+        <AgentTimelineGantt />
       </div>
     </div>
   );
