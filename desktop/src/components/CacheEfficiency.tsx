@@ -78,8 +78,8 @@ export const CacheEfficiency: React.FC = () => {
 
   if (!stats) {
     return (
-      <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-        <h3 className="text-lg font-semibold text-slate-700 mb-2">Cache Efficiency</h3>
+      <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-2">Cache Efficiency</h3>
         <div className="h-32 flex items-center justify-center text-slate-400">
           No cache data available.
         </div>
@@ -88,37 +88,37 @@ export const CacheEfficiency: React.FC = () => {
   }
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-      <h3 className="text-lg font-semibold text-slate-700 mb-4">Cache Efficiency</h3>
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+      <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">Cache Efficiency</h3>
 
       {/* Overall stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <div className="bg-slate-50 rounded-lg p-3">
-          <div className="text-xs text-slate-500">Overall Hit Rate</div>
+        <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-500 dark:text-slate-400">Overall Hit Rate</div>
           <div className={`text-lg font-bold ${
-            stats.overallHitRate > 0.7 ? "text-green-600" :
-            stats.overallHitRate > 0.3 ? "text-amber-600" : "text-red-500"
+            stats.overallHitRate > 0.7 ? "text-green-600 dark:text-green-400" :
+            stats.overallHitRate > 0.3 ? "text-amber-600 dark:text-amber-400" : "text-red-500 dark:text-red-400"
           }`}>
             {formatHitRate(stats.overallHitRate)}
           </div>
         </div>
-        <div className="bg-slate-50 rounded-lg p-3">
-          <div className="text-xs text-slate-500">Cache Read</div>
-          <div className="text-lg font-bold text-green-600">{formatTokens(stats.totalCacheRead)}</div>
+        <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-500 dark:text-slate-400">Cache Read</div>
+          <div className="text-lg font-bold text-green-600 dark:text-green-400">{formatTokens(stats.totalCacheRead)}</div>
         </div>
-        <div className="bg-slate-50 rounded-lg p-3">
-          <div className="text-xs text-slate-500">Cache Miss (Input)</div>
-          <div className="text-lg font-bold text-blue-600">{formatTokens(stats.totalInput)}</div>
+        <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-500 dark:text-slate-400">Cache Miss (Input)</div>
+          <div className="text-lg font-bold text-blue-600 dark:text-blue-400">{formatTokens(stats.totalInput)}</div>
         </div>
-        <div className="bg-slate-50 rounded-lg p-3">
-          <div className="text-xs text-slate-500">Est. Savings</div>
-          <div className="text-lg font-bold text-purple-600">{formatCost(stats.savings)}</div>
+        <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
+          <div className="text-xs text-slate-500 dark:text-slate-400">Est. Savings</div>
+          <div className="text-lg font-bold text-purple-600 dark:text-purple-400">{formatCost(stats.savings)}</div>
         </div>
       </div>
 
       {/* Hit rate distribution */}
       <div className="mb-4">
-        <div className="text-xs text-slate-500 mb-2">Run Hit Rate Distribution ({stats.totalRuns} runs)</div>
+        <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">Run Hit Rate Distribution ({stats.totalRuns} runs)</div>
         <div className="flex h-6 rounded-lg overflow-hidden">
           <div
             className="bg-green-500 flex items-center justify-center text-xs text-white"
@@ -151,7 +151,7 @@ export const CacheEfficiency: React.FC = () => {
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-slate-500 border-b border-slate-200">
+            <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
               <th className="py-2 px-2">Agent</th>
               <th className="py-2 px-2 text-right">Runs</th>
               <th className="py-2 px-2 text-right">Cache Read</th>
@@ -162,17 +162,17 @@ export const CacheEfficiency: React.FC = () => {
           </thead>
           <tbody>
             {stats.perAgent.map((a, i) => (
-              <tr key={i} className="border-b border-slate-100">
-                <td className="py-1.5 px-2 font-mono text-xs text-slate-700">{a.name}</td>
-                <td className="py-1.5 px-2 text-right text-slate-600">{a.runs}</td>
-                <td className="py-1.5 px-2 text-right text-green-600">{formatTokens(a.cacheRead)}</td>
-                <td className="py-1.5 px-2 text-right text-blue-600">{formatTokens(a.input)}</td>
+              <tr key={i} className="border-b border-slate-100 dark:border-slate-700/60">
+                <td className="py-1.5 px-2 font-mono text-xs text-slate-700 dark:text-slate-200">{a.name}</td>
+                <td className="py-1.5 px-2 text-right text-slate-600 dark:text-slate-400">{a.runs}</td>
+                <td className="py-1.5 px-2 text-right text-green-600 dark:text-green-400">{formatTokens(a.cacheRead)}</td>
+                <td className="py-1.5 px-2 text-right text-blue-600 dark:text-blue-400">{formatTokens(a.input)}</td>
                 <td className={`py-1.5 px-2 text-right font-medium ${
-                  a.hitRate > 0.7 ? "text-green-600" : a.hitRate > 0.3 ? "text-amber-600" : "text-red-500"
+                  a.hitRate > 0.7 ? "text-green-600 dark:text-green-400" : a.hitRate > 0.3 ? "text-amber-600 dark:text-amber-400" : "text-red-500 dark:text-red-400"
                 }`}>
                   {formatHitRate(a.hitRate)}
                 </td>
-                <td className="py-1.5 px-2 text-right text-slate-600">{formatCost(a.cost)}</td>
+                <td className="py-1.5 px-2 text-right text-slate-600 dark:text-slate-400">{formatCost(a.cost)}</td>
               </tr>
             ))}
           </tbody>

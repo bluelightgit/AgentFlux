@@ -41,8 +41,8 @@ export const EventStream: React.FC = () => {
 
   if (!agentTelemetry || agents.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-        <h3 className="text-lg font-semibold text-slate-700 mb-2">Event Stream</h3>
+      <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-2">Event Stream</h3>
         <div className="h-32 flex items-center justify-center text-slate-400">
           No subagent events recorded yet.
         </div>
@@ -57,19 +57,19 @@ export const EventStream: React.FC = () => {
   const totalFailures = agents.reduce((s, a) => s + a.failures, 0);
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-slate-700">Multi-Agent Event Stream</h3>
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200">Multi-Agent Event Stream</h3>
         <div className="flex gap-2 text-xs">
-          <span className="text-slate-500">{totalRuns} runs</span>
+          <span className="text-slate-500 dark:text-slate-400">{totalRuns} runs</span>
           <span className="text-slate-300">|</span>
-          <span className="text-slate-500">{formatTokens(totalInput + totalCacheRead)} tokens</span>
+          <span className="text-slate-500 dark:text-slate-400">{formatTokens(totalInput + totalCacheRead)} tokens</span>
           <span className="text-slate-300">|</span>
-          <span className="text-green-600">{formatCost(totalCost)}</span>
+          <span className="text-green-600 dark:text-green-400">{formatCost(totalCost)}</span>
           {totalFailures > 0 && (
             <>
               <span className="text-slate-300">|</span>
-              <span className="text-red-500">{totalFailures} failures</span>
+              <span className="text-red-500 dark:text-red-400">{totalFailures} failures</span>
             </>
           )}
         </div>
@@ -82,12 +82,12 @@ export const EventStream: React.FC = () => {
           placeholder="Filter by agent or model..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          className="flex-1 px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-blue-400"
+          className="flex-1 px-3 py-1.5 text-sm border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none focus:border-blue-400"
         />
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as any)}
-          className="px-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white"
+          className="px-3 py-1.5 text-sm border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800"
         >
           <option value="recent">Most Recent</option>
           <option value="cost">By Cost</option>
@@ -100,33 +100,33 @@ export const EventStream: React.FC = () => {
         {agents.map((a) => (
           <div
             key={a.name}
-            className="border border-slate-100 rounded-lg p-3 hover:bg-slate-50 transition-colors"
+            className="border border-slate-100 dark:border-slate-700/60 rounded-lg p-3 hover:bg-slate-50 dark:hover:bg-slate-700/40 transition-colors"
           >
             {/* Header row */}
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <span className={`text-sm font-mono font-medium ${
-                  a.failures > 0 ? "text-red-600" : "text-slate-700"
+                  a.failures > 0 ? "text-red-600 dark:text-red-400" : "text-slate-700 dark:text-slate-200"
                 }`}>
                   {a.name}
                 </span>
                 {a.retries > 0 && (
-                  <span className="text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                  <span className="text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 px-1.5 py-0.5 rounded">
                     {a.retries} retries
                   </span>
                 )}
               </div>
-              <div className="flex gap-3 text-xs text-slate-500">
+              <div className="flex gap-3 text-xs text-slate-500 dark:text-slate-400">
                 <span>{a.runs} runs</span>
                 <span>{formatCost(a.totalCost)}</span>
-                <span className={a.avgHitRate > 0.7 ? "text-green-600" : a.avgHitRate > 0.3 ? "text-amber-600" : "text-red-500"}>
+                <span className={a.avgHitRate > 0.7 ? "text-green-600 dark:text-green-400" : a.avgHitRate > 0.3 ? "text-amber-600 dark:text-amber-400" : "text-red-500 dark:text-red-400"}>
                   cache {formatHitRate(a.avgHitRate)}
                 </span>
               </div>
             </div>
 
             {/* Token breakdown bar */}
-            <div className="flex items-center gap-1 h-4 rounded overflow-hidden bg-slate-100 mb-1">
+            <div className="flex items-center gap-1 h-4 rounded overflow-hidden bg-slate-100 dark:bg-slate-800 mb-1">
               {a.totalCacheRead > 0 && (
                 <div
                   className="bg-green-400 h-full"

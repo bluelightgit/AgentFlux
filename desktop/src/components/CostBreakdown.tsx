@@ -22,13 +22,13 @@ export const CostBreakdown: React.FC = () => {
   const hasData = costAnalysis.total > 0;
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-slate-700">Cost Analysis</h3>
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200">Cost Analysis</h3>
         {hasData && (
           <div className="text-right">
-            <div className="text-2xl font-bold text-slate-800">{formatCost(costAnalysis.total)}</div>
-            <div className="text-xs text-slate-500">avg {formatCost(costAnalysis.avgPerTurn)}/turn</div>
+            <div className="text-2xl font-bold text-slate-800 dark:text-slate-100">{formatCost(costAnalysis.total)}</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">avg {formatCost(costAnalysis.avgPerTurn)}/turn</div>
           </div>
         )}
       </div>
@@ -39,7 +39,7 @@ export const CostBreakdown: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* By Mode */}
           <div>
-            <h4 className="text-sm font-medium text-slate-600 mb-2">By Mode</h4>
+            <h4 className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">By Mode</h4>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={costAnalysis.byMode} layout="horizontal" margin={{ top: 5, right: 10, bottom: 5, left: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
@@ -57,7 +57,7 @@ export const CostBreakdown: React.FC = () => {
 
           {/* By Model */}
           <div>
-            <h4 className="text-sm font-medium text-slate-600 mb-2">By Model</h4>
+            <h4 className="text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">By Model</h4>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={costAnalysis.byModel} layout="horizontal" margin={{ top: 5, right: 10, bottom: 5, left: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />

@@ -1,25 +1,36 @@
 /**
- * Sessions Page — two-panel session browser
- * Left: filter bar + session list with cache hit rate / errors. Right: tab bar + conversation messages.
+ * Sessions Page — two-panel session browser.
+ *
+ * Left panel  (w-80, fixed):    search/filter bar + session list with cache
+ *                               hit rate, turn count, cost, error badges.
+ * Right panel (flex-1, scroll): view-mode tab bar (Conversation / Agent
+ *                               Sessions) + message stream rendered through
+ *                               MarkdownRenderer.
+ *
+ * All text content is rendered via MarkdownRenderer — no plain <pre> blocks.
  */
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Icon, StatusDot, EmptyState } from "./ui";
 import { useDashboardStore } from "../store/dashboard-store";
 import { readSessionMessages, type SessionMessage, type SessionMetadata } from "../lib/session-reader";
-import { formatPct, formatCost } from "../lib/format";
+import { formatTokens, formatTs, formatPct, formatCost } from "../lib/format";
 import { useLiveUpdate } from "../hooks/useLiveUpdate";
 import { AgentSessionViewer } from "./AgentSessionViewer";
 import { SessionMessageFlow } from "./SessionMessageFlow";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
-// Cache hit rate → StatusDot status
+// ----------------------------------------------------------------------------
+// helpers
+// ----------------------------------------------------------------------------
+
+/** Cache hit rate → StatusDot status. */
 function cacheStatus(rate: number): "done" | "pending" | "failed" {
-  if (rate > 0.7) return "done"; // green
-  if (rate >= 0.3) return "pending"; // amber
-  return "failed"; // red
+  if (rate > 0.7) return "done";
+  if (rate >= 0.3) return "pending";
+  return "failed";
 }
 
-
-// Extract readable text from a message content array
+/** Extract readable text from a message content array (text / tool blocks). */
 function extractContent(content: any[]): string {
   if (!Array.isArray(content)) return String(content ?? "");
   const parts: string[] = [];
@@ -28,76 +39,102 @@ function extractContent(content: any[]): string {
     if (item.type === "text" && typeof item.text === "string") {
       parts.push(item.text);
     } else if (item.type === "toolCall") {
-      parts.push(`[tool: ${item.name ?? "unknown"}]`);
+      parts.push(`**[tool: ${item.name ?? "unknown"}]**`);
     } else if (item.type === "toolResult") {
       const raw = typeof item.result === "string" ? item.result : JSON.stringify(item.result ?? "");
-      parts.push(raw.length > 200 ? raw.slice(0, 200) + "…" : raw);
+      parts.push("```\n" + (raw.length > 200 ? raw.slice(0, 200) + "…" : raw) + "\n```");
     }
   }
-  return parts.join("\n");
+  return parts.join("\n\n");
 }
 
 const ROLE_BADGE: Record<string, string> = {
-  user: "bg-blue-50 text-blue-600",
-  assistant: "bg-green-50 text-green-600",
-  tool: "bg-slate-50 text-slate-600",
+  user: "bg-blue-50 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300",
+  assistant: "bg-green-50 text-green-600 dark:bg-green-900/40 dark:text-green-300",
+  tool: "bg-slate-50 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300",
 };
 
 function roleBadgeClass(role: string): string {
-  return ROLE_BADGE[role] ?? "bg-slate-50 text-slate-600";
+  return ROLE_BADGE[role] ?? "bg-slate-50 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300";
 }
 
-// Usage bar — proportional input (blue) + cacheRead (green) + output (amber)
-function UsageBar({ usage }: { usage: any }): React.ReactElement {
-  if (!usage) return <></>;
+/** Resolve a session/message timestamp (string) into a locale label. */
+function tsLabel(ts: string): string {
+  if (!ts) return "";
+  if (/^\d+$/.test(ts)) return formatTs(Number(ts));
+  const ms = Date.parse(ts);
+  if (Number.isFinite(ms)) return new Date(ms).toLocaleString();
+  return ts;
+}
+
+// ----------------------------------------------------------------------------
+// UsageBar — proportional input (blue) + cacheRead (green) + output (amber)
+// ----------------------------------------------------------------------------
+
+function UsageBar({ usage }: { usage: any }): React.ReactElement | null {
+  if (!usage) return null;
   const input = Number(usage.input ?? 0);
   const cacheRead = Number(usage.cacheRead ?? 0);
   const output = Number(usage.output ?? 0);
   const total = input + cacheRead + output;
-  if (total <= 0) return <></>;
+  if (total <= 0) return null;
   const inPct = (input / total) * 100;
   const cachePct = (cacheRead / total) * 100;
   const outPct = (output / total) * 100;
   return (
-    <div className="mt-2">
-      <div className="flex h-2 w-full overflow-hidden rounded bg-slate-100">
+    <div className="mt-3">
+      <div className="flex h-2 w-full overflow-hidden rounded bg-slate-100 dark:bg-slate-700/60">
         <div style={{ width: `${inPct}%` }} className="bg-blue-500" />
         <div style={{ width: `${cachePct}%` }} className="bg-green-500" />
         <div style={{ width: `${outPct}%` }} className="bg-amber-500" />
       </div>
-      <div className="mt-1 text-xs text-slate-500">
-        in={input} cache={cacheRead} out={output}
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+        <span>in {formatTokens(input)}</span>
+        <span>cache {formatTokens(cacheRead)}</span>
+        <span>out {formatTokens(output)}</span>
       </div>
     </div>
   );
 }
 
+// ----------------------------------------------------------------------------
+// MessageItem
+// ----------------------------------------------------------------------------
+
 function MessageItem({ msg }: { msg: SessionMessage }): React.ReactElement {
   const text = extractContent(msg.content);
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
+    <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
       <div className="flex items-center gap-2">
-        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${roleBadgeClass(msg.role)}`}>
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs font-medium ${roleBadgeClass(msg.role)}`}
+        >
           {msg.role}
         </span>
         {msg.timestamp ? (
-          <span className="text-xs text-slate-400">{msg.timestamp}</span>
+          <span className="text-xs text-slate-400 dark:text-slate-500">
+            {tsLabel(msg.timestamp)}
+          </span>
         ) : null}
       </div>
       {text ? (
-        <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-sm text-slate-700">
-          {text}
-        </pre>
+        <div className="mt-2">
+          <MarkdownRenderer content={text} />
+        </div>
       ) : null}
       {msg.usage ? <UsageBar usage={msg.usage} /> : null}
       {msg.errorMessage ? (
-        <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-600">
+        <div className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-600 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300">
           {msg.errorMessage}
         </div>
       ) : null}
     </div>
   );
 }
+
+// ----------------------------------------------------------------------------
+// SessionListItem
+// ----------------------------------------------------------------------------
 
 function SessionListItem({
   meta,
@@ -109,37 +146,49 @@ function SessionListItem({
   onClick: () => void;
 }): React.ReactElement {
   const cacheStatusKind = cacheStatus(meta.cacheHitRate);
+  const turns = meta.userMsgs + meta.assistantMsgs;
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full border-b border-slate-100 px-3 py-2 text-left hover:bg-slate-50 ${
-        active ? "border-l-2 border-blue-500 bg-blue-50" : "border-l-2 border-transparent"
+      className={`w-full border-b border-slate-100 px-3 py-2.5 text-left hover:bg-slate-50 dark:border-slate-700/60 dark:hover:bg-slate-700/40 ${
+        active
+          ? "border-l-2 border-blue-500 bg-blue-50 dark:bg-blue-900/30"
+          : "border-l-2 border-transparent"
       }`}
     >
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-slate-800">{meta.agentName || meta.sessionId}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-medium text-slate-800 dark:text-slate-100">
+          {meta.agentName || meta.sessionId}
+        </span>
         {meta.hasErrors ? (
-          <Icon name="AlertTriangle" size={14} className="text-red-500" />
+          <Icon name="AlertTriangle" size={14} className="shrink-0 text-red-500" />
         ) : null}
       </div>
-      <div className="text-xs text-slate-500">
-        {meta.model || "unknown"} · {meta.userMsgs + meta.assistantMsgs} turns · {formatCost(meta.totalCost)}
+      <div className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
+        {meta.model || "unknown"}
+      </div>
+      <div className="mt-1.5 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+        <span>{turns} turns</span>
+        <span>{formatCost(meta.totalCost)}</span>
       </div>
       <div className="mt-1 flex items-center gap-1.5">
         <StatusDot status={cacheStatusKind} />
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-slate-500 dark:text-slate-400">
           cache {formatPct(meta.cacheHitRate)}
         </span>
       </div>
-      <div className="text-xs text-slate-400">{meta.timestamp}</div>
+      <div className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+        {tsLabel(meta.timestamp)}
+      </div>
     </button>
   );
 }
 
 // ----------------------------------------------------------------------------
-// Filter bar — search + model / status / sort controls
+// FilterBar — search + model / status / sort controls
 // ----------------------------------------------------------------------------
+
 type StatusFilter = "all" | "errors" | "no-errors";
 type SortKey = "recent" | "cost" | "cache" | "turns";
 
@@ -171,27 +220,29 @@ function FilterBar({
   sort: SortKey;
   onSort: (v: SortKey) => void;
 }): React.ReactElement {
+  const selectClass =
+    "flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200";
   return (
-    <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2">
+    <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-700">
       <div className="relative">
         <Icon
           name="Search"
           size={14}
-          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400"
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500"
         />
         <input
           type="text"
           value={search}
           onChange={(e) => onSearch(e.target.value)}
           placeholder="Search agent or model"
-          className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
         />
       </div>
       <div className="flex items-center gap-2">
         <select
           value={modelFilter}
           onChange={(e) => onModelFilter(e.target.value)}
-          className="flex-1 rounded-md border border-slate-200 bg-white px-1 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className={selectClass}
           title="Filter by model"
         >
           <option value="all">All models</option>
@@ -204,7 +255,7 @@ function FilterBar({
         <select
           value={statusFilter}
           onChange={(e) => onStatusFilter(e.target.value as StatusFilter)}
-          className="flex-1 rounded-md border border-slate-200 bg-white px-1 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className={selectClass}
           title="Filter by status"
         >
           <option value="all">All</option>
@@ -214,7 +265,7 @@ function FilterBar({
         <select
           value={sort}
           onChange={(e) => onSort(e.target.value as SortKey)}
-          className="flex-1 rounded-md border border-slate-200 bg-white px-1 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className={selectClass}
           title="Sort sessions"
         >
           {SORT_OPTIONS.map((o) => (
@@ -229,8 +280,9 @@ function FilterBar({
 }
 
 // ----------------------------------------------------------------------------
-// Session tabs — recently viewed sessions
+// SessionTabs — recently viewed sessions
 // ----------------------------------------------------------------------------
+
 function SessionTabs({
   openTabs,
   activeTab,
@@ -246,7 +298,7 @@ function SessionTabs({
 }): React.ReactElement | null {
   if (openTabs.length === 0) return null;
   return (
-    <div className="flex items-stretch gap-1 border-b border-slate-200 bg-slate-50 px-2 pt-1">
+    <div className="flex items-stretch gap-1 border-b border-slate-200 bg-slate-50 px-2 pt-1 dark:border-slate-700 dark:bg-slate-900/40">
       {openTabs.map((fileName) => {
         const meta = metaByFile.get(fileName);
         const label = meta ? meta.agentName || meta.sessionId : fileName;
@@ -256,10 +308,9 @@ function SessionTabs({
             key={fileName}
             className={`group flex items-center gap-1 rounded-t border border-b-0 px-3 py-1.5 text-sm ${
               isActive
-                ? "border-blue-500 border-b-2 border-b-white bg-blue-50 text-blue-700"
-                : "border-transparent bg-white/60 text-slate-600 hover:bg-white"
+                ? "border-slate-200 bg-white text-blue-700 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
+                : "border-transparent bg-white/60 text-slate-600 hover:bg-white dark:bg-slate-800/40 dark:text-slate-300 dark:hover:bg-slate-800"
             }`}
-            style={isActive ? { borderBottom: "2px solid #3b82f6" } : undefined}
           >
             <button
               type="button"
@@ -275,7 +326,7 @@ function SessionTabs({
                 e.stopPropagation();
                 onClose(fileName);
               }}
-              className="ml-1 rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+              className="ml-1 rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-200"
               title="Close tab"
             >
               <Icon name="X" size={12} />
@@ -286,6 +337,51 @@ function SessionTabs({
     </div>
   );
 }
+
+// ----------------------------------------------------------------------------
+// ViewModeTabBar — switch right panel between Conversation / Agent Sessions
+// ----------------------------------------------------------------------------
+
+type ViewMode = "conversation" | "agent-sessions";
+
+function ViewModeTabBar({
+  mode,
+  onChange,
+}: {
+  mode: ViewMode;
+  onChange: (m: ViewMode) => void;
+}): React.ReactElement {
+  const tabs: { id: ViewMode; label: string; icon: string }[] = [
+    { id: "conversation", label: "Conversation", icon: "MessageSquare" },
+    { id: "agent-sessions", label: "Agent Sessions", icon: "Users" },
+  ];
+  return (
+    <div className="flex items-center gap-1 border-b border-slate-200 px-3 py-1.5 dark:border-slate-700">
+      {tabs.map((t) => {
+        const isActive = mode === t.id;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onChange(t.id)}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium ${
+              isActive
+                ? "bg-blue-50 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
+                : "text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-700/40 dark:hover:text-slate-200"
+            }`}
+          >
+            <Icon name={t.icon} size={14} />
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// main component
+// ----------------------------------------------------------------------------
 
 export const SessionsPage: React.FC = () => {
   const sessions = useDashboardStore((s) => s.sessions);
@@ -300,6 +396,9 @@ export const SessionsPage: React.FC = () => {
   // Session tabs state
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
+
+  // Right-panel view mode
+  const [viewMode, setViewMode] = useState<ViewMode>("conversation");
 
   // Filter state
   const [search, setSearch] = useState("");
@@ -372,8 +471,9 @@ export const SessionsPage: React.FC = () => {
         if (next.length > 5) next.splice(0, next.length - 5);
         return next;
       });
+      setViewMode("conversation");
     },
-    [selectSession]
+    [selectSession],
   );
 
   // close a tab: remove, switch to next available or clear
@@ -392,7 +492,7 @@ export const SessionsPage: React.FC = () => {
         return next;
       });
     },
-    [activeTab, selectSession]
+    [activeTab, selectSession],
   );
 
   // Load messages when selection changes
@@ -433,35 +533,40 @@ export const SessionsPage: React.FC = () => {
     }
   }, [sessions, metaByFile, openTabs, activeTab, selectSession]);
 
+  const activeMeta = selectedSessionFile ? metaByFile.get(selectedSessionFile) : null;
+
   return (
     <div className="flex h-full">
-      {/* Left panel */}
-      <div className="flex w-80 flex-col border-r border-slate-200">
+      {/* ─── Left panel — session list ─────────────────────────────────── */}
+      <div className="flex w-80 shrink-0 flex-col border-r border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between px-3 py-2">
-          <span className="text-lg font-bold text-slate-800">Sessions</span>
+          <span className="text-lg font-bold text-slate-800 dark:text-slate-100">
+            Sessions
+          </span>
           <div className="flex items-center gap-2">
-            {/* Live update indicator */}
-            <div className="flex items-center gap-1">
-              {isLive ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-xs text-green-600">
-                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-green-500" />
-                  Live
-                  {hasNewData ? <span className="text-green-400">·</span> : null}
-                </span>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => (isLive ? stop() : start())}
-                className={`rounded p-1 ${isLive ? "text-green-600 hover:bg-green-100" : "text-slate-500 hover:bg-slate-100"}`}
-                title={isLive ? "Stop live updates" : "Start live updates"}
-              >
-                <Icon name={isLive ? "Activity" : "RefreshCw"} size={14} />
-              </button>
-            </div>
+            {isLive ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-green-50 px-2 py-0.5 text-xs text-green-600 dark:bg-green-900/40 dark:text-green-300">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-green-500" />
+                Live
+                {hasNewData ? <span className="text-green-400">·</span> : null}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => (isLive ? stop() : start())}
+              className={`rounded p-1 ${
+                isLive
+                  ? "text-green-600 hover:bg-green-100 dark:text-green-400 dark:hover:bg-green-900/40"
+                  : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700/40"
+              }`}
+              title={isLive ? "Stop live updates" : "Start live updates"}
+            >
+              <Icon name={isLive ? "Activity" : "RefreshCw"} size={14} />
+            </button>
             <button
               type="button"
               onClick={() => loadSessions()}
-              className="rounded p-1 text-slate-500 hover:bg-slate-100"
+              className="rounded p-1 text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700/40"
               title="Refresh"
             >
               <Icon name="RefreshCw" size={16} />
@@ -495,7 +600,7 @@ export const SessionsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Right panel */}
+      {/* ─── Right panel — tab bar + message stream ────────────────────── */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <SessionTabs
           openTabs={openTabs}
@@ -504,35 +609,52 @@ export const SessionsPage: React.FC = () => {
           onActivate={(fileName) => openSession(fileName)}
           onClose={closeTab}
         />
-        <div className="flex-1 overflow-auto p-6">
-          {!selectedSessionFile ? (
-            <EmptyState icon="MessageSquare" message="Select a session to view conversation" />
-          ) : loading ? (
-            <div className="flex items-center justify-center py-12 text-sm text-slate-400">
-              <Icon name="RefreshCw" size={20} className="mr-2 animate-spin" />
-              Loading messages…
-            </div>
-          ) : messages.length === 0 ? (
-            <EmptyState icon="MessageSquare" message="No messages in this session" />
-          ) : (
-            <div className="flex flex-col gap-3">
-              {messages.map((m, i) => (
-                <MessageItem key={i} msg={m} />
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+        <ViewModeTabBar mode={viewMode} onChange={setViewMode} />
 
-      {/* Agent Session Viewer section */}
-      <div className="border-t border-slate-200">
-        <div className="px-4 py-3">
-          <h2 className="text-lg font-bold text-slate-800">Agent Session Viewer</h2>
-        </div>
-        <AgentSessionViewer />
-        <div className="mt-4">
-          <SessionMessageFlow />
-        </div>
+        {viewMode === "conversation" ? (
+          <div className="flex-1 overflow-auto p-6">
+            {!selectedSessionFile ? (
+              <EmptyState
+                icon="MessageSquare"
+                message="Select a session to view conversation"
+              />
+            ) : loading ? (
+              <div className="flex items-center justify-center py-12 text-sm text-slate-400 dark:text-slate-500">
+                <Icon name="RefreshCw" size={20} className="mr-2 animate-spin" />
+                Loading messages…
+              </div>
+            ) : messages.length === 0 ? (
+              <EmptyState
+                icon="MessageSquare"
+                message="No messages in this session"
+              />
+            ) : (
+              <div className="mx-auto flex max-w-4xl flex-col gap-3">
+                {activeMeta ? (
+                  <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <span className="font-medium text-slate-700 dark:text-slate-200">
+                      {activeMeta.agentName || activeMeta.sessionId}
+                    </span>
+                    <span>{activeMeta.model || "unknown"}</span>
+                    <span>{activeMeta.userMsgs + activeMeta.assistantMsgs} turns</span>
+                    <span>cache {formatPct(activeMeta.cacheHitRate)}</span>
+                    <span>{formatCost(activeMeta.totalCost)}</span>
+                  </div>
+                ) : null}
+                {messages.map((m, i) => (
+                  <MessageItem key={i} msg={m} />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex-1 overflow-auto p-4">
+            <AgentSessionViewer />
+            <div className="mt-4">
+              <SessionMessageFlow />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

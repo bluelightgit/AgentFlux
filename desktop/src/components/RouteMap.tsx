@@ -31,11 +31,11 @@ const RouteTooltip: React.FC<{ active?: boolean; payload?: any[] }> = ({ active,
   if (!active || !payload?.length) return null;
   const d = payload[0].payload as RoutePoint;
   return (
-    <div className="bg-white border border-slate-200 rounded-lg shadow-lg p-3 text-xs max-w-xs">
-      <div className="font-semibold text-slate-800">{d.mode} · conf {(d.confidence * 100).toFixed(0)}%</div>
-      <div className="text-slate-500 mt-1">{formatTime(d.ts)}</div>
-      <div className="text-slate-600 mt-1">preset: {d.preset}</div>
-      <div className="text-slate-500 mt-1 break-words">{d.reason}</div>
+    <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg p-3 text-xs max-w-xs">
+      <div className="font-semibold text-slate-800 dark:text-slate-100">{d.mode} · conf {(d.confidence * 100).toFixed(0)}%</div>
+      <div className="text-slate-500 dark:text-slate-400 mt-1">{formatTime(d.ts)}</div>
+      <div className="text-slate-600 dark:text-slate-400 mt-1">preset: {d.preset}</div>
+      <div className="text-slate-500 dark:text-slate-400 mt-1 break-words">{d.reason}</div>
     </div>
   );
 };
@@ -61,8 +61,8 @@ export const RouteMap: React.FC = () => {
   );
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-      <h3 className="text-lg font-semibold text-slate-700 mb-4">Route History</h3>
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+      <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">Route History</h3>
       {data.length === 0 ? (
         <div className="h-64 flex items-center justify-center text-slate-400">No routing decisions in {timeRange}</div>
       ) : (

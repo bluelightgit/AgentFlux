@@ -73,6 +73,8 @@ import {
   Pause,
   ChevronLeft,
   RotateCcw,
+  Minus,
+  Square,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -154,6 +156,8 @@ const ICONS: Record<string, LucideIcon> = {
   Pause,
   ChevronLeft,
   RotateCcw,
+  Minus,
+  Square,
 };
 
 // ----------------------------------------------------------------------------

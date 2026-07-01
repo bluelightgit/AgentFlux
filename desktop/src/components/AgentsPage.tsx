@@ -203,13 +203,13 @@ export const AgentsPage: React.FC = () => {
   if (agentStatus) {
     for (const a of agentStatus.persistentAgents) {
       statusRows.push({
-        name: <span className="font-medium text-slate-700">{a.name}</span>,
+        name: <span className="font-medium text-slate-700 dark:text-slate-200">{a.name}</span>,
         role: a.role ?? "-",
-        model: <span className="text-xs text-slate-500">{a.model || "-"}</span>,
+        model: <span className="text-xs text-slate-500 dark:text-slate-400">{a.model || "-"}</span>,
         status: (
           <div className="flex items-center gap-2">
             <StatusDot status={toStatusKind(a.status)} />
-            <span className="text-slate-600">{a.status}</span>
+            <span className="text-slate-600 dark:text-slate-400">{a.status}</span>
           </div>
         ),
         calls: a.callCount ?? 0,
@@ -219,13 +219,13 @@ export const AgentsPage: React.FC = () => {
     }
     for (const a of agentStatus.blackboardAgents) {
       statusRows.push({
-        name: <span className="font-medium text-slate-700">{a.name}</span>,
+        name: <span className="font-medium text-slate-700 dark:text-slate-200">{a.name}</span>,
         role: a.role ?? "-",
         model: <span className="text-xs text-slate-400">blackboard</span>,
         status: (
           <div className="flex items-center gap-2">
             <StatusDot status={toStatusKind(a.status)} />
-            <span className="text-slate-600">{a.status}</span>
+            <span className="text-slate-600 dark:text-slate-400">{a.status}</span>
           </div>
         ),
         calls: "-",
@@ -251,14 +251,14 @@ export const AgentsPage: React.FC = () => {
     telemetry = Array.from(agentStatus.agentTelemetry.values());
   }
   const telemetryRows: Record<string, any>[] = telemetry.map((t) => ({
-    name: <span className="font-medium text-slate-700">{t.name}</span>,
+    name: <span className="font-medium text-slate-700 dark:text-slate-200">{t.name}</span>,
     runs: t.runs,
     hitRate: formatHitRate(t.avgHitRate),
     turns: t.avgTurns.toFixed(1),
     failures: t.failures,
     retries: t.retries,
     models: (
-      <span className="text-xs text-slate-500">{t.models.join(", ") || "-"}</span>
+      <span className="text-xs text-slate-500 dark:text-slate-400">{t.models.join(", ") || "-"}</span>
     ),
   }));
 
@@ -284,13 +284,13 @@ export const AgentsPage: React.FC = () => {
         {definitions.map((d) => (
           <div
             key={d.name}
-            className="bg-white rounded-lg shadow border border-slate-200 p-5 flex flex-col gap-2"
+            className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-5 flex flex-col gap-2"
           >
             <div className="flex items-center gap-2">
               <Icon name="Bot" size={18} className="text-blue-500" />
-              <span className="font-bold text-slate-800">{d.name}</span>
+              <span className="font-bold text-slate-800 dark:text-slate-200">{d.name}</span>
             </div>
-            <p className="text-sm text-slate-500">{d.description || "No description"}</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{d.description || "No description"}</p>
             <div className="flex flex-wrap gap-1.5 mt-1">
               <Badge color="blue">{d.model}</Badge>
               <Badge color="purple">thinking: {d.thinking}</Badge>
@@ -311,33 +311,33 @@ export const AgentsPage: React.FC = () => {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">Agents</h1>
-          <p className="mt-1 text-sm text-slate-500">
+          <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-200">Agents</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             Agent definitions, live status, and per-agent telemetry.
           </p>
         </div>
         <button
           type="button"
           onClick={handleRefresh}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-sm text-slate-600"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40 text-sm text-slate-600 dark:text-slate-400"
           title="Refresh agent status"
         >
-          <Icon name="RefreshCw" size={16} className="text-slate-500" />
+          <Icon name="RefreshCw" size={16} className="text-slate-500 dark:text-slate-400" />
           <span>Refresh</span>
         </button>
       </div>
 
       {/* Section 1: Agent Definitions */}
-      <section className="bg-white rounded-lg shadow border border-slate-200 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 mb-4">
+      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
+        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
           Agent Definitions
         </h2>
         {renderDefinitions()}
       </section>
 
       {/* Section 2: Agent Status */}
-      <section className="bg-white rounded-lg shadow border border-slate-200 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 mb-4">
+      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
+        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
           Agent Status
         </h2>
         {statusRows.length === 0 ? (
@@ -353,8 +353,8 @@ export const AgentsPage: React.FC = () => {
       </section>
 
       {/* Section 3: Agent Telemetry */}
-      <section className="bg-white rounded-lg shadow border border-slate-200 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 mb-4">
+      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
+        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
           Agent Telemetry
         </h2>
         {telemetryRows.length === 0 ? (

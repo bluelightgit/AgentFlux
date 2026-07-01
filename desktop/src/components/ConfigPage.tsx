@@ -208,14 +208,14 @@ export const ConfigPage: React.FC = () => {
       </div>
 
       <div>
-        <h1 className="text-2xl font-bold text-slate-800">Config</h1>
-        <p className="text-sm text-slate-500 mt-1">
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-200">Config</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           Edit AgentFlux configuration files. Changes are written back to the project directory.
         </p>
       </div>
 
       {/* Tab bar */}
-      <div className="flex border-b border-slate-200">
+      <div className="flex border-b border-slate-200 dark:border-slate-700">
         {TABS.map((tab) => {
           const active = activeTab === tab.id;
           return (
@@ -225,8 +225,8 @@ export const ConfigPage: React.FC = () => {
               onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                 active
-                  ? "bg-white border-blue-500 text-blue-600"
-                  : "border-transparent text-slate-500 hover:text-slate-700"
+                  ? "bg-white dark:bg-slate-800 border-blue-500 text-blue-600 dark:text-blue-400"
+                  : "border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
               }`}
             >
               <Icon name={tab.icon} size={16} />
@@ -239,8 +239,8 @@ export const ConfigPage: React.FC = () => {
       {/* Tab content */}
       {activeTab === "agentflux" && (
         <Card>
-          <h3 className="text-lg font-semibold text-slate-700 mb-1">agentflux.json</h3>
-          <p className="text-xs text-slate-500 mb-4 font-mono">
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-1">agentflux.json</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 font-mono">
             {fluxDir ? `${fluxDir}/agentflux.json` : "No project configured"}
           </p>
           {agentfluxLoading ? (
@@ -248,12 +248,12 @@ export const ConfigPage: React.FC = () => {
           ) : (
             <>
               {agentfluxError && (
-                <div className="mb-3 rounded-lg p-3 text-sm bg-red-50 text-red-700 border border-red-200">
+                <div className="mb-3 rounded-lg p-3 text-sm bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-700/60">
                   {agentfluxError}
                 </div>
               )}
               {agentfluxSaved && (
-                <div className="mb-3 rounded-lg p-3 text-sm bg-green-50 text-green-700 border border-green-200">
+                <div className="mb-3 rounded-lg p-3 text-sm bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-700/60">
                   Saved agentflux.json
                 </div>
               )}
@@ -269,8 +269,8 @@ export const ConfigPage: React.FC = () => {
 
       {activeTab === "models" && (
         <Card>
-          <h3 className="text-lg font-semibold text-slate-700 mb-1">models.json</h3>
-          <p className="text-xs text-slate-500 mb-4 font-mono">
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-1">models.json</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 font-mono">
             {fluxDir ? `${fluxDir}/models.json` : "No project configured"}
           </p>
           {modelsLoading ? (
@@ -278,12 +278,12 @@ export const ConfigPage: React.FC = () => {
           ) : (
             <>
               {modelsError && (
-                <div className="mb-3 rounded-lg p-3 text-sm bg-red-50 text-red-700 border border-red-200">
+                <div className="mb-3 rounded-lg p-3 text-sm bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-700/60">
                   {modelsError}
                 </div>
               )}
               {modelsSaved && (
-                <div className="mb-3 rounded-lg p-3 text-sm bg-green-50 text-green-700 border border-green-200">
+                <div className="mb-3 rounded-lg p-3 text-sm bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-700/60">
                   Saved models.json
                 </div>
               )}
@@ -299,15 +299,15 @@ export const ConfigPage: React.FC = () => {
 
       {activeTab === "roles" && (
         <Card>
-          <h3 className="text-lg font-semibold text-slate-700 mb-1">Agent Roles</h3>
-          <p className="text-xs text-slate-500 mb-4 font-mono">
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-1">Agent Roles</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4 font-mono">
             {fluxDir ? `${fluxDir}/agents` : "No project configured"}
           </p>
 
           {rolesLoading ? (
             <div className="text-sm text-slate-400 py-8 text-center">Loading...</div>
           ) : rolesError ? (
-            <div className="rounded-lg p-3 text-sm bg-red-50 text-red-700 border border-red-200">
+            <div className="rounded-lg p-3 text-sm bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-700/60">
               {rolesError}
             </div>
           ) : roleFiles.length === 0 ? (
@@ -317,8 +317,8 @@ export const ConfigPage: React.FC = () => {
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
               {/* File list */}
-              <div className="lg:col-span-1 border border-slate-200 rounded-lg overflow-hidden">
-                <div className="bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500 border-b border-slate-200">
+              <div className="lg:col-span-1 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                <div className="bg-slate-50 dark:bg-slate-800/50 px-3 py-2 text-xs font-medium text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                   Role Files ({roleFiles.length})
                 </div>
                 <ul className="max-h-96 overflow-y-auto divide-y divide-slate-100">
@@ -331,8 +331,8 @@ export const ConfigPage: React.FC = () => {
                           onClick={() => selectRole(f.name)}
                           className={`w-full text-left px-3 py-2 text-sm font-mono transition-colors ${
                             active
-                              ? "bg-blue-50 text-blue-700"
-                              : "text-slate-600 hover:bg-slate-50"
+                              ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
+                              : "text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700/40"
                           }`}
                         >
                           {f.name}
@@ -346,13 +346,13 @@ export const ConfigPage: React.FC = () => {
               {/* Editor */}
               <div className="lg:col-span-2 flex flex-col gap-3">
                 {rolesSaved && (
-                  <div className="rounded-lg p-3 text-sm bg-green-50 text-green-700 border border-green-200">
+                  <div className="rounded-lg p-3 text-sm bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-700/60">
                     Saved {selectedFile}
                   </div>
                 )}
                 {selectedFile ? (
                   <>
-                    <div className="text-sm font-medium text-slate-700 font-mono">
+                    <div className="text-sm font-medium text-slate-700 dark:text-slate-200 font-mono">
                       {selectedFile}
                     </div>
                     <textarea
@@ -362,7 +362,7 @@ export const ConfigPage: React.FC = () => {
                         setRolesSaved(false);
                       }}
                       spellCheck={false}
-                      className="w-full h-80 font-mono text-sm rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-full h-80 font-mono text-sm rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <div>
                       <button

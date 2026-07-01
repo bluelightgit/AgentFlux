@@ -129,15 +129,15 @@ export const PreferenceRadar: React.FC = () => {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-800">Preference Radar</h1>
-        <p className="text-sm text-slate-500 mt-1">
+        <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">Preference Radar</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           Adjust the 5-dimensional routing preference vector. The predicted mode updates in real-time.
         </p>
       </div>
 
       {message && (
         <div className={`rounded-lg p-4 text-sm ${
-          message.type === "success" ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"
+          message.type === "success" ? "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-700" : "bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-700"
         }`}>
           {message.text}
         </div>
@@ -145,8 +145,8 @@ export const PreferenceRadar: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Radar chart visualization */}
-        <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-          <h3 className="text-lg font-semibold text-slate-700 mb-4">Preference Vector</h3>
+        <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">Preference Vector</h3>
 
           {/* SVG Radar */}
           <div className="flex justify-center mb-4">
@@ -225,25 +225,25 @@ export const PreferenceRadar: React.FC = () => {
           </div>
 
           {/* Mode prediction */}
-          <div className="bg-slate-50 rounded-lg p-4 flex items-center justify-between">
+          <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-4 flex items-center justify-between">
             <div>
-              <div className="text-xs text-slate-500">Predicted Mode</div>
-              <div className="text-2xl font-bold text-blue-600">{prediction.mode}</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">Predicted Mode</div>
+              <div className="text-2xl font-bold text-blue-600 dark:text-blue-400">{prediction.mode}</div>
             </div>
             <div>
-              <div className="text-xs text-slate-500">Confidence</div>
-              <div className="text-2xl font-bold text-slate-700">{(prediction.confidence * 100).toFixed(0)}%</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">Confidence</div>
+              <div className="text-2xl font-bold text-slate-700 dark:text-slate-200">{(prediction.confidence * 100).toFixed(0)}%</div>
             </div>
             <div>
-              <div className="text-xs text-slate-500">Profile</div>
-              <div className="text-sm font-medium text-slate-600">{profile}</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400">Profile</div>
+              <div className="text-sm font-medium text-slate-600 dark:text-slate-400">{profile}</div>
             </div>
           </div>
         </div>
 
         {/* Sliders + presets */}
-        <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-          <h3 className="text-lg font-semibold text-slate-700 mb-4">Dimensions</h3>
+        <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+          <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">Dimensions</h3>
 
           {/* Preset buttons */}
           <div className="flex gap-2 mb-6">
@@ -253,8 +253,8 @@ export const PreferenceRadar: React.FC = () => {
                 onClick={() => handlePreset(p)}
                 className={`px-3 py-1.5 text-sm rounded-lg border transition-colors capitalize ${
                   profile === p
-                    ? "border-blue-500 bg-blue-50 text-blue-700"
-                    : "border-slate-200 text-slate-600 hover:border-slate-300"
+                    ? "border-blue-500 dark:border-blue-400 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
+                    : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-600"
                 }`}
               >
                 {p}
@@ -267,10 +267,10 @@ export const PreferenceRadar: React.FC = () => {
             {DIMENSIONS.map((dim) => (
               <div key={dim.key}>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm text-slate-700">
+                  <span className="text-sm text-slate-700 dark:text-slate-200">
                     <Icon name={dim.icon} size={16} className="inline mr-1" /> {dim.label}
                   </span>
-                  <span className="text-sm font-mono text-slate-500">
+                  <span className="text-sm font-mono text-slate-500 dark:text-slate-400">
                     {vector[dim.key]?.toFixed(2) ?? "0.50"}
                   </span>
                 </div>
@@ -281,7 +281,7 @@ export const PreferenceRadar: React.FC = () => {
                   step="0.05"
                   value={vector[dim.key] ?? 0.5}
                   onChange={(e) => handleSlider(dim.key, parseFloat(e.target.value))}
-                  className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-600"
                 />
                 <div className="text-xs text-slate-400 mt-0.5">{dim.desc}</div>
               </div>

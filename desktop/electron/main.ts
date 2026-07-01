@@ -104,6 +104,14 @@ ipcMain.handle('unwatch-file', (_event, filePath: string) => {
   } catch { return { ok: false }; }
 });
 
+ipcMain.handle('window-minimize', () => { BrowserWindow.getFocusedWindow()?.minimize(); });
+ipcMain.handle('window-maximize', () => {
+  const win = BrowserWindow.getFocusedWindow();
+  if (win?.isMaximized()) win.unmaximize(); else win?.maximize();
+});
+ipcMain.handle('window-close', () => { BrowserWindow.getFocusedWindow()?.close(); });
+ipcMain.handle('window-is-maximized', () => BrowserWindow.getFocusedWindow()?.isMaximized() ?? false);
+
 ipcMain.handle('show-folder-dialog', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   return result.canceled ? null : result.filePaths[0];
@@ -113,6 +121,8 @@ function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
+    frame: false,
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

@@ -16,6 +16,7 @@ import {
   type SessionMessage,
 } from "../lib/session-reader";
 import { formatTokens, formatTs } from "../lib/format";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -25,7 +26,7 @@ function truncate(name: string, max: number): string {
   return name.length > max ? name.slice(0, max) + "…" : name;
 }
 
-/** Extract readable text from a message content array (type='text' blocks). */
+/** Extract readable text from a message content array (text / tool blocks). */
 function extractText(content: any[] | undefined): string {
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
@@ -33,9 +34,14 @@ function extractText(content: any[] | undefined): string {
     if (!item) continue;
     if (item.type === "text" && typeof item.text === "string") {
       parts.push(item.text);
+    } else if (item.type === "toolCall") {
+      parts.push(`**[tool: ${item.name ?? "unknown"}]**`);
+    } else if (item.type === "toolResult") {
+      const raw = typeof item.result === "string" ? item.result : JSON.stringify(item.result ?? "");
+      parts.push("```\n" + (raw.length > 200 ? raw.slice(0, 200) + "…" : raw) + "\n```");
     }
   }
-  return parts.join("\n");
+  return parts.join("\n\n");
 }
 
 /** Total turn count for a session metadata entry. */
@@ -120,9 +126,9 @@ function MessageItem({ msg }: { msg: SessionMessage }): React.ReactElement {
         ) : null}
       </div>
       {text ? (
-        <pre className="mt-2 whitespace-pre-wrap break-words font-sans text-sm text-slate-700 dark:text-slate-200">
-          {text}
-        </pre>
+        <div className="mt-2">
+          <MarkdownRenderer content={text} />
+        </div>
       ) : null}
       {usage ? (
         <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">

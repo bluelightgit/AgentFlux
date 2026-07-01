@@ -7,6 +7,7 @@ import { useCommandPalette } from '../hooks/useCommandPalette';
 import { CommandPalette } from './CommandPalette';
 import { RealTimeCostCounter } from './RealTimeCostCounter';
 import { GlobalSearchBar } from './GlobalSearchBar';
+import TitleBar from './TitleBar';
 
 // ---------------------------------------------------------------------------
 // Navigation items (per design spec §2.2 / §3)
@@ -75,9 +76,12 @@ const TopBar: React.FC = () => {
   const currentName = activeWorkspace?.name ?? 'Select Workspace';
 
   return (
-    <header className="h-14 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center px-4 gap-4">
+    <header
+      className="h-14 shrink-0 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center px-4 gap-4"
+      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+    >
       {/* Left: Workspace selector */}
-      <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="relative" onMouseDown={(e) => e.stopPropagation()} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <button
           type="button"
           onClick={() => setDropdownOpen((v) => !v)}
@@ -152,7 +156,7 @@ const TopBar: React.FC = () => {
       </div>
 
       {/* Right: Cost counter, Live indicator, Command palette, Theme toggle, Refresh */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <GlobalSearchBar />
 
         <RealTimeCostCounter />
@@ -189,11 +193,14 @@ const TopBar: React.FC = () => {
           aria-label="Refresh"
           title="Refresh"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+          style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <Icon name="RefreshCw" size={16} className="text-slate-500" />
           <span>Refresh</span>
         </button>
       </div>
+
+      <TitleBar />
     </header>
   );
 };
@@ -214,7 +221,7 @@ const Sidebar: React.FC = () => {
     : 0;
 
   return (
-    <aside className="w-60 bg-slate-900 dark:bg-black text-slate-200 dark:text-slate-300 min-h-screen flex flex-col">
+    <aside className="w-60 bg-slate-900 dark:bg-black text-slate-200 dark:text-slate-300 h-full overflow-y-auto shrink-0 flex flex-col">
       <nav className="flex-1 px-3 py-4 space-y-1">
         {NAV_ITEMS.map((item) => {
           const active = currentPage === item.id;
@@ -260,7 +267,7 @@ const Sidebar: React.FC = () => {
 // MainContent
 // ---------------------------------------------------------------------------
 const MainContent: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <main className="flex-1 p-8 overflow-auto bg-slate-100 dark:bg-slate-900">{children}</main>
+  <main className="flex-1 min-h-0 p-8 overflow-auto bg-slate-100 dark:bg-slate-900">{children}</main>
 );
 
 // ---------------------------------------------------------------------------
@@ -273,9 +280,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useKeyboardNav(currentPage, setPage);
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex flex-col h-screen overflow-hidden">
       <TopBar />
-      <div className="flex flex-1">
+      <div className="flex flex-1 overflow-hidden min-h-0">
         <Sidebar />
         <MainContent>{children}</MainContent>
       </div>

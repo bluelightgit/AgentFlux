@@ -21,8 +21,8 @@ export const CacheChart: React.FC = () => {
   }));
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-      <h3 className="text-lg font-semibold text-slate-700 mb-4">Cache Performance</h3>
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+      <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">Cache Performance</h3>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Hit Rate Line Chart */}
         <div className="lg:col-span-2">

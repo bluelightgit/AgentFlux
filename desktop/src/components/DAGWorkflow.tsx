@@ -73,8 +73,8 @@ export const DAGWorkflow: React.FC = () => {
 
   if (!dagState) {
     return (
-      <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
-        <h3 className="text-lg font-semibold text-slate-700 mb-2">DAG Workflow</h3>
+      <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-2">DAG Workflow</h3>
         <div className="h-32 flex items-center justify-center text-slate-400">
           No DAG execution in progress.
         </div>
@@ -88,22 +88,22 @@ export const DAGWorkflow: React.FC = () => {
   const progress = nodes.length > 0 ? ((completedCount + failedCount) / nodes.length) * 100 : 0;
 
   return (
-    <div className="bg-white rounded-lg shadow p-6 border border-slate-200">
+    <div className="bg-white dark:bg-slate-800 rounded-lg shadow p-6 border border-slate-200 dark:border-slate-700">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-slate-700">DAG Workflow</h3>
+        <h3 className="text-lg font-semibold text-slate-700 dark:text-slate-200">DAG Workflow</h3>
         <div className="flex gap-3 text-xs">
-          <span className="text-green-600">✓ {completedCount}</span>
-          <span className="text-blue-600">● {runningCount}</span>
-          <span className="text-red-600">✗ {failedCount}</span>
+          <span className="text-green-600 dark:text-green-400">✓ {completedCount}</span>
+          <span className="text-blue-600 dark:text-blue-400">● {runningCount}</span>
+          <span className="text-red-600 dark:text-red-400">✗ {failedCount}</span>
           <span className="text-slate-400">○ {nodes.length - completedCount - failedCount - runningCount}</span>
         </div>
       </div>
 
       {/* Description */}
-      <p className="text-sm text-slate-600 mb-3 truncate">{dagState.description}</p>
+      <p className="text-sm text-slate-600 dark:text-slate-400 mb-3 truncate">{dagState.description}</p>
 
       {/* Progress bar */}
-      <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-4">
+      <div className="h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mb-4">
         <div
           className="bg-green-500 h-full transition-all duration-500"
           style={{ width: `${progress}%` }}

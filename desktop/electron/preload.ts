@@ -33,4 +33,8 @@ contextBridge.exposeInMainWorld('api', {
   deleteFile: (filePath: string) => ipcRenderer.invoke('delete-file', filePath),
   getUserDataPath: () => ipcRenderer.invoke('get-user-data-path'),
   showFolderDialog: () => ipcRenderer.invoke('show-folder-dialog'),
+  minimizeWindow: () => ipcRenderer.invoke('window-minimize'),
+  maximizeWindow: () => ipcRenderer.invoke('window-maximize'),
+  closeWindow: () => ipcRenderer.invoke('window-close'),
+  isMaximized: () => ipcRenderer.invoke('window-is-maximized'),
 });
