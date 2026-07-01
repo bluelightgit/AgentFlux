@@ -7,6 +7,7 @@ import { CacheChart } from './CacheChart';
 import { EventStream } from './EventStream';
 import { CostTrendChart } from './CostTrendChart';
 import { AgentWorkflowTimeline } from './AgentWorkflowTimeline';
+import { CacheHitDistribution } from './CacheHitDistribution';
 
 const TIME_RANGES: { id: TimeRange; label: string }[] = [
   { id: '1h', label: '1 Hour' },
@@ -123,6 +124,10 @@ export const TelemetryPage: React.FC = () => {
       {/* Agent Workflow Timeline */}
       <div className='mt-4'>
         <AgentWorkflowTimeline />
+      </div>
+
+      <div className='mt-4'>
+        <CacheHitDistribution />
       </div>
     </div>
   );

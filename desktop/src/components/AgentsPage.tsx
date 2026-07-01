@@ -22,6 +22,7 @@ import {
   type AgentTelemetry,
 } from "../lib/agent-status-enhanced";
 import { AgentRegistryPanel } from "./AgentRegistryPanel";
+import { AgentPerformanceTable } from "./AgentPerformanceTable";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -362,6 +363,10 @@ export const AgentsPage: React.FC = () => {
           </div>
         )}
       </section>
+
+      <div className="mt-4">
+        <AgentPerformanceTable />
+      </div>
     </div>
   );
 };

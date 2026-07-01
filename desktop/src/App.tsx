@@ -7,6 +7,7 @@ import { OverviewPage } from "./components/OverviewPage";
 import { SessionsPage } from "./components/SessionsPage";
 import { AgentsPage } from "./components/AgentsPage";
 import { PreferenceRadar } from "./components/PreferenceRadar";
+import { RoutingHistoryChart } from "./components/RoutingHistoryChart";
 import { TelemetryPage } from "./components/TelemetryPage";
 import { DAGPage } from "./components/DAGPage";
 import { IssuesPage } from "./components/IssuesPage";
@@ -33,7 +34,12 @@ const App: React.FC = () => {
           {currentPage === "overview" && <OverviewPage />}
           {currentPage === "sessions" && <SessionsPage />}
           {currentPage === "agents" && <AgentsPage />}
-          {currentPage === "routing" && <PreferenceRadar />}
+          {currentPage === "routing" && (
+            <div className="space-y-4">
+              <PreferenceRadar />
+              <RoutingHistoryChart />
+            </div>
+          )}
           {currentPage === "telemetry" && <TelemetryPage />}
           {currentPage === "dag" && <DAGPage />}
           {currentPage === "issues" && <IssuesPage />}

@@ -47,6 +47,7 @@ import {
   Palette,
   Keyboard,
   GanttChart,
+  BarChart3,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -101,6 +102,7 @@ const ICONS: Record<string, LucideIcon> = {
   Palette,
   Keyboard,
   GanttChart,
+  BarChart3,
 };
 
 // ----------------------------------------------------------------------------
@@ -124,7 +126,7 @@ export function Card({ children, className }: CardProps): React.ReactElement {
 // ----------------------------------------------------------------------------
 // Badge
 // ----------------------------------------------------------------------------
-export type BadgeColor = 'blue' | 'green' | 'red' | 'amber' | 'slate' | 'purple';
+export type BadgeColor = 'blue' | 'green' | 'red' | 'amber' | 'slate' | 'purple' | 'pink';
 
 export interface BadgeProps {
   children: React.ReactNode;
@@ -138,6 +140,7 @@ const BADGE_CLASSES: Record<BadgeColor, string> = {
   amber: 'bg-amber-50 text-amber-600 border-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700',
   slate: 'bg-slate-50 text-slate-600 border-slate-200 dark:bg-slate-700/40 dark:text-slate-300 dark:border-slate-600',
   purple: 'bg-purple-50 text-purple-600 border-purple-200 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-700',
+  pink: 'bg-pink-50 text-pink-600 border-pink-200 dark:bg-pink-900/40 dark:text-pink-300 dark:border-pink-700',
 };
 
 export function Badge({ children, color = 'slate' }: BadgeProps): React.ReactElement {
