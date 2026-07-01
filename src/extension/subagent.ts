@@ -412,7 +412,7 @@ export async function runSubagent(opts: {
 
 	while (retryCount <= maxRetries) {
 		// 每次迭代重建 args (因为 tmpDir 路径会变)
-		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--approve"];
+		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--no-context-files", "--approve"];
 
 		// M2-2: 持久 session vs 一次性 ephemeral
 		if (opts.persistent) {

@@ -80,7 +80,7 @@ Respond in EXACTLY this JSON format:
 \`\`\`
 Respond with ONLY the JSON.`;
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--approve", "--no-skills", "--no-extensions"];
+	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--no-context-files", "--approve", "--no-skills", "--no-extensions"];
 	if (opts.provider) args.push("--provider", opts.provider);
 	if (opts.model) args.push("--model", opts.model);
 	args.push("--thinking", "off");

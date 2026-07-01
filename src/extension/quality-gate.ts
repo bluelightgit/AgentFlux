@@ -81,7 +81,7 @@ Check each criterion against the output. Respond in EXACTLY this JSON format:
 Respond with ONLY the JSON, no other text.`;
 
 	// 用 pi 子进程做一次轻量级 LLM 调用
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--approve", "--no-skills", "--no-extensions"];
+	const args: string[] = ["--mode", "json", "-p", "--no-session", "--no-prompt-templates", "--no-context-files", "--approve", "--no-skills", "--no-extensions"];
 	if (opts.provider) args.push("--provider", opts.provider);
 	if (opts.model) args.push("--model", opts.model);
 	args.push("--thinking", "off");
