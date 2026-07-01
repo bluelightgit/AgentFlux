@@ -57,6 +57,8 @@ import {
   Leaf,
   Scale,
   GitBranch,
+  Network,
+  Loader,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -121,6 +123,8 @@ const ICONS: Record<string, LucideIcon> = {
   Leaf,
   Scale,
   GitBranch,
+  Network,
+  Loader,
 };
 
 // ----------------------------------------------------------------------------

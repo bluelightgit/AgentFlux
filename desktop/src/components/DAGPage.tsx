@@ -38,6 +38,7 @@ import {
   type StatusKind,
 } from "./ui";
 import { DAGWorkflow } from "./DAGWorkflow";
+import { TaskDependencyGraph } from "./TaskDependencyGraph";
 import type { AnyEvent, SubagentRunEvent } from "../lib/events-parser";
 import type { DAGState } from "../lib/agent-status-enhanced";
 import { formatTs, formatCost, formatPct } from "../lib/format";
@@ -622,6 +623,10 @@ export const DAGPage: React.FC = () => {
       />
       <ExecutionLogsPanel events={events} isLive={isLive} />
       <Section2 events={events} />
+
+      <div className="mt-4">
+        <TaskDependencyGraph />
+      </div>
     </div>
   );
 };

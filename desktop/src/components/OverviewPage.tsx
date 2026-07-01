@@ -14,6 +14,7 @@ import { SubsystemHealthPanel } from './SubsystemHealthPanel';
 import { QuickActions } from './QuickActions';
 import { RecentFilesPanel } from './RecentFilesPanel';
 import { AgentDispatchForm } from './AgentDispatchForm';
+import { ErrorLogPanel } from './ErrorLogPanel';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -159,6 +160,10 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentDispatchForm />
+      </div>
+
+      <div className="mt-4">
+        <ErrorLogPanel />
       </div>
     </div>
   );
