@@ -10,6 +10,7 @@ import { PreferenceRadar } from "./components/PreferenceRadar";
 import { TelemetryPage } from "./components/TelemetryPage";
 import { DAGPage } from "./components/DAGPage";
 import { IssuesPage } from "./components/IssuesPage";
+import { GroupChatPage } from "./components/GroupChatPage";
 import { ConfigPage } from "./components/ConfigPage";
 import { Settings } from "./components/Settings";
 
@@ -33,6 +34,7 @@ const App: React.FC = () => {
           {currentPage === "telemetry" && <TelemetryPage />}
           {currentPage === "dag" && <DAGPage />}
           {currentPage === "issues" && <IssuesPage />}
+          {currentPage === "chat" && <GroupChatPage />}
           {currentPage === "config" && <ConfigPage />}
           {currentPage === "settings" && <Settings />}
         </AppShell>

@@ -21,6 +21,7 @@ import {
   formatCost,
   type AgentTelemetry,
 } from "../lib/agent-status-enhanced";
+import { AgentRegistryPanel } from "./AgentRegistryPanel";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -299,6 +300,8 @@ export const AgentsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <AgentRegistryPanel />
+
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>

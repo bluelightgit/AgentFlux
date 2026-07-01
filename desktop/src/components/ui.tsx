@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   Users,
+  User,
   Route,
   Activity,
   Workflow,
@@ -40,6 +41,7 @@ import {
   Moon,
   Bell,
   ClipboardList,
+  MessageCircle,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -51,6 +53,7 @@ const ICONS: Record<string, LucideIcon> = {
   LayoutDashboard,
   MessageSquare,
   Users,
+  User,
   Route,
   Activity,
   Workflow,
@@ -87,6 +90,7 @@ const ICONS: Record<string, LucideIcon> = {
   Moon,
   Bell,
   ClipboardList,
+  MessageCircle,
 };
 
 // ----------------------------------------------------------------------------
