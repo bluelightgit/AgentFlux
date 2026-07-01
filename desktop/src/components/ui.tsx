@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  File,
   LayoutDashboard,
   MessageSquare,
   Users,
@@ -46,6 +47,7 @@ export type { LucideIcon };
 
 // Icon name → Lucide component map
 const ICONS: Record<string, LucideIcon> = {
+  File,
   LayoutDashboard,
   MessageSquare,
   Users,
