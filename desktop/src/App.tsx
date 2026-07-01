@@ -13,6 +13,7 @@ import { IssuesPage } from "./components/IssuesPage";
 import { GroupChatPage } from "./components/GroupChatPage";
 import { ConfigPage } from "./components/ConfigPage";
 import { Settings } from "./components/Settings";
+import { useEventNotifications } from "./hooks/useEventNotifications";
 
 const App: React.FC = () => {
   const currentPage = useDashboardStore((s) => s.currentPage);
@@ -22,6 +23,8 @@ const App: React.FC = () => {
   useEffect(() => {
     init().then(() => loadWorkspaces());
   }, []); // eslint-disable-line
+
+  useEventNotifications();
 
   return (
     <ThemeProvider>

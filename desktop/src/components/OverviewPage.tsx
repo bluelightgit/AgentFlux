@@ -1,13 +1,14 @@
 /**
  * Overview Page — workspace-centric dashboard
  */
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useDashboardStore } from '../store/dashboard-store';
 import { Card, Icon, MetricCard, DataTable, Badge, EmptyState } from './ui';
 import { SummaryCards } from './SummaryCards';
 import { RouteMap } from './RouteMap';
 import { CostTrendChart } from './CostTrendChart';
-import { InsightsCard } from './InsightsCard';
+import { InsightsCard, type InsightItem } from './InsightsCard';
+import { generateInsights } from '../lib/insights-generator';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -37,6 +38,16 @@ export const OverviewPage: React.FC = () => {
   const events = useDashboardStore((s) => s.events);
   const activeWorkspace = useDashboardStore((s) => s.activeWorkspace);
   const agentStatus = useDashboardStore((s) => s.agentStatus);
+
+  const [insights, setInsights] = useState<InsightItem[]>([]);
+
+  useEffect(() => {
+    const fluxDir = useDashboardStore.getState().project?.fluxDir;
+    if (!fluxDir) return;
+    generateInsights(fluxDir).then(setInsights);
+    const interval = setInterval(() => generateInsights(fluxDir).then(setInsights), 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   // If no project loaded, show empty state for whole page
   if (!project) {
@@ -125,7 +136,7 @@ export const OverviewPage: React.FC = () => {
       {/* 6. Cost Trend & Insights */}
       <div className='mt-4 grid gap-6'>
         <CostTrendChart />
-        <InsightsCard insights={[]} />
+        <InsightsCard insights={insights} />
       </div>
     </div>
   );
