@@ -196,11 +196,15 @@ export interface DataTableColumn {
 export interface DataTableProps {
   columns: DataTableColumn[];
   rows: Record<string, any>[];
+  onRowClick?: (row: Record<string, any>) => void;
+  rowClassName?: string;
 }
 
 export function DataTable({
   columns,
   rows,
+  onRowClick,
+  rowClassName,
 }: DataTableProps): React.ReactElement {
   return (
     <table className="w-full text-sm text-slate-700 dark:text-slate-200">
@@ -219,7 +223,11 @@ export function DataTable({
       </thead>
       <tbody>
         {rows.map((row, i) => (
-          <tr key={i}>
+          <tr
+            key={i}
+            onClick={onRowClick ? () => onRowClick(row) : undefined}
+            className={rowClassName}
+          >
             {columns.map((col) => (
               <td key={col.key} className="px-3 py-2 border-t border-slate-100 dark:border-slate-700">
                 {row[col.key]}

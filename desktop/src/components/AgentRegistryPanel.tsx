@@ -9,6 +9,7 @@ import { Card, Badge, Icon, DataTable, EmptyState } from "./ui";
 import { formatTs } from "../lib/format";
 import { listAgents, type AgentInfo } from "../lib/group-reader";
 import { useDashboardStore } from "../store/dashboard-store";
+import { AgentDetailDrawer } from "./AgentDetailDrawer";
 
 // ─── Status helpers ────────────────────────────────────────────────────────
 
@@ -87,6 +88,7 @@ export function AgentRegistryPanel(): React.ReactElement {
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [selectedAgent, setSelectedAgent] = useState<AgentInfo | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,6 +142,7 @@ export function AgentRegistryPanel(): React.ReactElement {
   ];
 
   const rows = sorted.map((a) => ({
+    __agent: a,
     status: (
       <span className="inline-flex items-center gap-2">
         <StatusDot status={a.status} />
@@ -188,8 +191,16 @@ export function AgentRegistryPanel(): React.ReactElement {
           message="No registered agents. Dispatch agents to register."
         />
       ) : (
-        <DataTable columns={columns} rows={rows} />
+        <DataTable
+          columns={columns}
+          rows={rows}
+          onRowClick={(row) => setSelectedAgent(row.__agent as AgentInfo)}
+          rowClassName="cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700"
+        />
       )}
+      {selectedAgent ? (
+        <AgentDetailDrawer agent={selectedAgent} onClose={() => setSelectedAgent(null)} />
+      ) : null}
     </Card>
   );
 }

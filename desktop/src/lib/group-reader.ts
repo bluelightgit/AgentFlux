@@ -36,6 +36,22 @@ export interface GroupMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Direct (1-on-1) message types
+// ---------------------------------------------------------------------------
+
+export type DirectMessageType = "text" | "notice" | "system";
+
+export interface DirectMessage {
+  id: string;
+  from: string;
+  to: string;
+  type: DirectMessageType;
+  content: string;
+  timestamp: number;
+  read: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Agent registry types
 // ---------------------------------------------------------------------------
 
@@ -127,6 +143,64 @@ export async function getGroupMessages(
       from: String(entry.from ?? ""),
       content: String(entry.content ?? ""),
       timestamp: Number(entry.timestamp) || 0,
+    });
+  }
+  return messages.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+// ---------------------------------------------------------------------------
+// Direct (1-on-1) messages
+// ---------------------------------------------------------------------------
+
+/** Direct messages stream path: <fluxDir>/shared/direct/messages.jsonl */
+function directMessagesPath(fluxDir: string): string {
+  return `${fluxDir}/shared/direct/messages.jsonl`;
+}
+
+/** Coerce a raw direct-message entry's type into a known DirectMessageType. */
+function toDirectMessageType(raw: unknown): DirectMessageType {
+  switch (raw) {
+    case "text":
+    case "notice":
+    case "system":
+      return raw;
+    default:
+      return "text";
+  }
+}
+
+/**
+ * Read the shared direct-message stream.
+ *
+ * Reads `<fluxDir>/shared/direct/messages.jsonl` (one JSON object per line,
+ * each carrying `from`, `to`, `type`, `content`, `timestamp`, and `read`
+ * fields) through the Electron preload bridge and gracefully returns an
+ * empty array when the file is missing or malformed.
+ */
+export async function getDirectMessages(
+  fluxDir: string,
+): Promise<DirectMessage[]> {
+  const content = await readFileContent(directMessagesPath(fluxDir));
+  if (!content) return [];
+
+  const messages: DirectMessage[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const entry = safeParse(trimmed);
+    if (!entry || typeof entry !== "object") continue;
+    const id = String(entry.id ?? "");
+    const from = String(entry.from ?? "");
+    const to = String(entry.to ?? "");
+    if (!from || !to) continue;
+    messages.push({
+      id,
+      from,
+      to,
+      type: toDirectMessageType(entry.type),
+      content: String(entry.content ?? ""),
+      timestamp: Number(entry.timestamp) || 0,
+      read: Boolean(entry.read),
     });
   }
   return messages.sort((a, b) => a.timestamp - b.timestamp);

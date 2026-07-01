@@ -21,6 +21,8 @@ import {
   type GroupType,
 } from "../lib/group-reader";
 import { useLiveUpdate } from "../hooks/useLiveUpdate";
+import { DirectMessagePanel } from "./DirectMessagePanel";
+import { AgentCommGraph } from "./AgentCommGraph";
 
 // ---------------------------------------------------------------------------
 // Type → icon name (Lucide) for group list badges
@@ -212,7 +214,9 @@ export const GroupChatPage: React.FC = () => {
   const selectedGroup = groups.find((g) => g.id === selectedGroupId) ?? null;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col gap-4">
+      <AgentCommGraph />
+      <div className="flex min-h-0 flex-1">
       {/* Left panel — group list */}
       <div className="flex w-64 flex-col border-r border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between px-3 py-2">
@@ -305,6 +309,8 @@ export const GroupChatPage: React.FC = () => {
           </div>
         )}
       </div>
+      </div>
+      <DirectMessagePanel />
     </div>
   );
 };
