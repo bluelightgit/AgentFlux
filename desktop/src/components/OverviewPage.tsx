@@ -13,6 +13,7 @@ import { CostBudgetPanel } from './CostBudgetPanel';
 import { SubsystemHealthPanel } from './SubsystemHealthPanel';
 import { QuickActions } from './QuickActions';
 import { RecentFilesPanel } from './RecentFilesPanel';
+import { AgentDispatchForm } from './AgentDispatchForm';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -154,6 +155,10 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <RecentFilesPanel />
+      </div>
+
+      <div className="mt-4">
+        <AgentDispatchForm />
       </div>
     </div>
   );

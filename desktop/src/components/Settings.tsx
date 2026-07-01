@@ -7,6 +7,7 @@ import { useTheme } from "./ThemeProvider";
 import { Card, Icon, Badge, EmptyState } from "./ui";
 import { formatCost } from "../lib/format";
 import { readFileContent } from "../lib/file-access";
+import { VersionInfo } from "./VersionInfo";
 
 // ---------------------------------------------------------------------------
 // Types for models.json
@@ -378,6 +379,10 @@ export const Settings: React.FC = () => {
           Data is read from events.jsonl; control is via override.json.
           pi TUI remains the execution layer.
         </p>
+      </div>
+
+      <div className="mt-4">
+        <VersionInfo />
       </div>
     </div>
   );

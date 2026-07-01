@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { useDashboardStore } from "./store/dashboard-store";
 import { AppShell } from "./components/AppShell";
 import { ThemeProvider } from "./components/ThemeProvider";
@@ -15,6 +15,7 @@ import { IssuesPage } from "./components/IssuesPage";
 import { GroupChatPage } from "./components/GroupChatPage";
 import { ConfigPage } from "./components/ConfigPage";
 import { Settings } from "./components/Settings";
+import { HelpOverlay } from "./components/HelpOverlay";
 import { useEventNotifications } from "./hooks/useEventNotifications";
 
 const App: React.FC = () => {
@@ -22,11 +23,24 @@ const App: React.FC = () => {
   const init = useDashboardStore((s) => s.init);
   const loadWorkspaces = useDashboardStore((s) => s.loadWorkspaces);
 
+  const [showHelp, setShowHelp] = useState(false);
+
   useEffect(() => {
     init().then(() => loadWorkspaces());
   }, []); // eslint-disable-line
 
   useEventNotifications();
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === '?' && !['INPUT','TEXTAREA','SELECT'].includes((e.target as HTMLElement)?.tagName)) {
+        setShowHelp(true);
+      }
+      if (e.key === 'Escape') setShowHelp(false);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   return (
     <ThemeProvider>
@@ -49,6 +63,7 @@ const App: React.FC = () => {
           {currentPage === "config" && <ConfigPage />}
           {currentPage === "settings" && <Settings />}
         </AppShell>
+        {showHelp && <HelpOverlay isOpen={showHelp} onClose={() => setShowHelp(false)} />}
       </NotificationProvider>
     </ThemeProvider>
   );

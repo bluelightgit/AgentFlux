@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   Send,
   Terminal,
+  Rocket,
   HeartPulse,
   File,
   FileClock,
@@ -55,6 +56,7 @@ import {
   Shrink,
   Leaf,
   Scale,
+  GitBranch,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -64,6 +66,7 @@ export type { LucideIcon };
 const ICONS: Record<string, LucideIcon> = {
   Send,
   Terminal,
+  Rocket,
   HeartPulse,
   File,
   FileClock,
@@ -117,6 +120,7 @@ const ICONS: Record<string, LucideIcon> = {
   Shrink,
   Leaf,
   Scale,
+  GitBranch,
 };
 
 // ----------------------------------------------------------------------------
