@@ -5,6 +5,7 @@ import { CacheEfficiency } from './CacheEfficiency';
 import { CostBreakdown } from './CostBreakdown';
 import { CacheChart } from './CacheChart';
 import { EventStream } from './EventStream';
+import { CostTrendChart } from './CostTrendChart';
 
 const TIME_RANGES: { id: TimeRange; label: string }[] = [
   { id: '1h', label: '1 Hour' },
@@ -112,6 +113,11 @@ export const TelemetryPage: React.FC = () => {
         <h2 className="text-lg font-bold text-slate-800 mb-4">Event Stream</h2>
         <EventStream />
       </Card>
+
+      {/* Cost Trend */}
+      <div className='mt-4'>
+        <CostTrendChart />
+      </div>
     </div>
   );
 };

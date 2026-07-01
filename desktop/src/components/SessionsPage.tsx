@@ -8,6 +8,7 @@ import { useDashboardStore } from "../store/dashboard-store";
 import { readSessionMessages, type SessionMessage, type SessionMetadata } from "../lib/session-reader";
 import { formatPct, formatCost } from "../lib/format";
 import { useLiveUpdate } from "../hooks/useLiveUpdate";
+import { AgentSessionViewer } from "./AgentSessionViewer";
 
 // Cache hit rate → StatusDot status
 function cacheStatus(rate: number): "done" | "pending" | "failed" {
@@ -520,6 +521,14 @@ export const SessionsPage: React.FC = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Agent Session Viewer section */}
+      <div className="border-t border-slate-200">
+        <div className="px-4 py-3">
+          <h2 className="text-lg font-bold text-slate-800">Agent Session Viewer</h2>
+        </div>
+        <AgentSessionViewer />
       </div>
     </div>
   );

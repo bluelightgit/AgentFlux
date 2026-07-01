@@ -276,7 +276,7 @@ export function AgentCommGraph(): React.ReactElement {
           {agents.map((a, i) => {
             const pos = positions.get(a.name)!;
             const fill =
-              ROLE_FILL[a.role.toLowerCase()] ?? ROLE_FILL_UNKNOWN;
+              ROLE_FILL[a.role?.toLowerCase()] ?? ROLE_FILL_UNKNOWN;
             const stroke =
               STATUS_STROKE[a.status] ?? STATUS_STROKE_DEFAULT;
             return (

@@ -6,6 +6,8 @@ import { useDashboardStore } from '../store/dashboard-store';
 import { Card, Icon, MetricCard, DataTable, Badge, EmptyState } from './ui';
 import { SummaryCards } from './SummaryCards';
 import { RouteMap } from './RouteMap';
+import { CostTrendChart } from './CostTrendChart';
+import { InsightsCard } from './InsightsCard';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -119,6 +121,12 @@ export const OverviewPage: React.FC = () => {
 
       {/* 5. Route Map */}
       <RouteMap />
+
+      {/* 6. Cost Trend & Insights */}
+      <div className='mt-4 grid gap-6'>
+        <CostTrendChart />
+        <InsightsCard insights={[]} />
+      </div>
     </div>
   );
 };

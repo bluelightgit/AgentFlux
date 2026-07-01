@@ -42,6 +42,7 @@ import {
   Bell,
   ClipboardList,
   MessageCircle,
+  Lightbulb,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -91,6 +92,7 @@ const ICONS: Record<string, LucideIcon> = {
   Bell,
   ClipboardList,
   MessageCircle,
+  Lightbulb,
 };
 
 // ----------------------------------------------------------------------------
