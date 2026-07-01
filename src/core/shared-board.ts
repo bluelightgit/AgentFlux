@@ -12,7 +12,7 @@
  * 设计: 文件-based, 不做 IPC, 可审计, git 友好
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
@@ -463,6 +463,91 @@ export class SharedBoard {
 	/** 获取单个 agent 信息 */
 	getAgent(name: string): AgentInfo | null {
 		return this.listAgents().find(a => a.name === name) ?? null;
+	}
+
+	// ── 文件锁 (防并行 agent 编辑冲突) ──
+
+	private lockDir(): string {
+		const dir = join(this.sharedDir, "locks");
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		return dir;
+	}
+
+	private lockPath(filePath: string): string {
+		// 将路径转为安全的文件名: desktop/src/App.tsx → desktop-src-App.tsx.lock
+		const safe = filePath.replace(/[/:\\]/g, "-").replace(/^-+|-+$/g, "");
+		return join(this.lockDir(), `${safe}.lock`);
+	}
+
+	/** 获取文件锁. 返回 true=成功, false=已被其他 agent 锁定 */
+	acquireFileLock(agentName: string, filePath: string, ttlMs = 300000): boolean {
+		const lp = this.lockPath(filePath);
+		const now = Date.now();
+
+		// 检查现有锁
+		if (existsSync(lp)) {
+			try {
+				const lock = JSON.parse(readFileSync(lp, "utf-8"));
+				// 锁未过期 且 不是自己的
+				if (now - lock.timestamp < ttlMs && lock.agent !== agentName) {
+					return false;  // 被其他 agent 锁定
+				}
+			} catch { /* 锁文件损坏, 覆盖 */ }
+		}
+
+		// 创建/更新锁
+		writeFileSync(lp, JSON.stringify({
+			agent: agentName,
+			filePath,
+			timestamp: now,
+			expiresAt: now + ttlMs,
+		}, null, 2));
+		return true;
+	}
+
+	/** 释放文件锁 */
+	releaseFileLock(filePath: string): void {
+		const lp = this.lockPath(filePath);
+		try { if (existsSync(lp)) unlinkSync(lp); } catch { /* */ }
+	}
+
+	/** 释放 agent 持有的所有锁 */
+	releaseAllLocks(agentName: string): string[] {
+		const released: string[] = [];
+		try {
+			const files = readdirSync(this.lockDir());
+			for (const f of files) {
+				if (!f.endsWith(".lock")) continue;
+				const lp = join(this.lockDir(), f);
+				try {
+					const lock = JSON.parse(readFileSync(lp, "utf-8"));
+					if (lock.agent === agentName) {
+						unlinkSync(lp);
+					released.push(lock.filePath ?? f);
+				}
+				} catch { /* */ }
+			}
+		} catch { /* */ }
+		return released;
+	}
+
+	/** 查看所有活跃锁 */
+	getFileLocks(): { agent: string; filePath: string; timestamp: number; expiresAt: number }[] {
+		const locks: { agent: string; filePath: string; timestamp: number; expiresAt: number }[] = [];
+		try {
+			const files = readdirSync(this.lockDir());
+			const now = Date.now();
+			for (const f of files) {
+				if (!f.endsWith(".lock")) continue;
+				try {
+					const lock = JSON.parse(readFileSync(join(this.lockDir(), f), "utf-8"));
+					if (now < lock.expiresAt) {  // 只返回未过期的
+						locks.push(lock);
+					}
+				} catch { /* */ }
+			}
+		} catch { /* */ }
+		return locks;
 	}
 
 	// ── 路径 ──

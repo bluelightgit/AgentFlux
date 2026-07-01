@@ -409,6 +409,7 @@ export default function (pi: ExtensionAPI) {
 			task: Type.String({ description: "任务描述" }),
 			persistent: Type.Optional(Type.Boolean({ description: "M2-2: 持久 session, 可跨调用续接 (默认 false)" })),
 			thinking: Type.Optional(Type.String({ description: "M2-4: reasoning effort (off/minimal/low/medium/high/xhigh), 默认跟随 agent 定义" })),
+			lockFiles: Type.Optional(Type.Array(Type.String(), { description: "该 agent 将编辑的文件路径列表, 用于文件锁防并行冲突" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
 			const agent = loadSubagent(ctx.cwd, params.agent);
@@ -429,7 +430,8 @@ export default function (pi: ExtensionAPI) {
 				persistent: params.persistent ?? false,
 				thinking: validThinking,
 				timeoutMs: 180000,   // 3min
-				maxRetries: 1,       // 自动重试 1 次
+				maxRetries: 2,       // 自动重试 2 次 (502/timeout 等)
+				lockFiles: params.lockFiles,
 			});
 			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
 		},
@@ -446,6 +448,7 @@ export default function (pi: ExtensionAPI) {
 				agent: Type.String({ description: "subagent 名称, 如 reviewer" }),
 				task: Type.String({ description: "该 agent 的任务描述" }),
 				label: Type.Optional(Type.String({ description: "可选标签用于区分结果" })),
+				lockFiles: Type.Optional(Type.Array(Type.String(), { description: "该 agent 将编辑的文件路径列表, 用于文件锁防冲突" })),
 			})),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
@@ -459,6 +462,8 @@ export default function (pi: ExtensionAPI) {
 			const config = loadConfig(ctx.cwd);
 			const tasks: ParallelSubagentTask[] = [];
 			const loadErrors: string[] = [];
+			const lockFilesMap: Record<string, string[]> = {};
+			const fileOwner: Record<string, string> = {};  // file→label, 冲突检测
 
 			for (const a of params.agents) {
 				const agent = loadSubagent(ctx.cwd, a.agent);
@@ -470,7 +475,19 @@ export default function (pi: ExtensionAPI) {
 				if (!agent.provider && agent.model) {
 					agent.provider = config.models?.models?.[agent.model]?.provider;
 				}
-				tasks.push({ agent, task: a.task, label: a.label });
+				const label = a.label ?? a.agent;
+				tasks.push({ agent, task: a.task, label });
+				// 文件锁: 显式指定 + 自动检测冲突
+				if (a.lockFiles && a.lockFiles.length > 0) {
+					lockFilesMap[label] = a.lockFiles;
+					for (const fp of a.lockFiles) {
+						if (fileOwner[fp] && fileOwner[fp] !== label) {
+							console.error(`[flux] WARNING: file conflict — ${fp} wanted by both ${fileOwner[fp]} and ${label}`);
+						} else {
+							fileOwner[fp] = label;
+						}
+					}
+				}
 			}
 
 			if (tasks.length === 0) {
@@ -483,7 +500,8 @@ export default function (pi: ExtensionAPI) {
 				prefixLayout: config.cache.prefix_layout === "static_first",
 				pricing: pricingTable ?? undefined,
 				timeoutMs: 180000,
-				maxRetries: 1,
+				maxRetries: 2,   // 502/timeout 自动重试
+				lockFiles: Object.keys(lockFilesMap).length > 0 ? lockFilesMap : undefined,
 			});
 			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
 			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };
@@ -829,13 +847,24 @@ export default function (pi: ExtensionAPI) {
 				} catch {}
 
 				const issues = telemetry ? scanRecentIssues(telemetry.path, 20) : [];
+
+				// Read file locks
+				let lockInfo = "";
+				try {
+					const board = new SharedBoard(fluxDir);
+					const locks = board.getFileLocks();
+					if (locks.length > 0) {
+						lockInfo = "\n\nFile Locks:" + locks.map(l => `\n  ${l.agent} → ${l.filePath}`).join("");
+					}
+				} catch {}
+
 				const text = formatStatusReport(vInfo, {
 					mode: state.mode, preset: state.preset, stage: state.stage, role: state.role,
 					turnIndex: state.turnIndex, cacheHitRate: state.cache.cacheHitRate,
 					costUsd: state.cache.costUsd, branch: state.branch,
 				}, subsystems, activeAgents, issues, {
 					fluxDir, eventsPath: telemetry?.path ?? "", configPath: join(fluxDir, "agentflux.json"),
-				}, dagInfo);
+				}, dagInfo) + lockInfo;
 				if (ctx.hasUI) ctx.ui.notify(text, "info"); else console.log(text);
 				return;
 			}

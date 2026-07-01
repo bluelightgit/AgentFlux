@@ -53,6 +53,34 @@ export interface TeamWorkflowResult {
 
 // ── 核心函数 ──
 
+// ── 文件路径自动提取 (用于文件锁) ──
+
+/** 从 task 文本中提取文件路径 */
+function extractFilePaths(task: string): string[] {
+	const matches = task.match(/[\w/.-]+\.(?:tsx?|jsx?|json|md|css|html)/g) ?? [];
+	return [...new Set(matches.filter(p => p.includes('/')))];
+}
+
+/** 为并行任务分配文件锁, 检测冲突 */
+function buildLockAssignments(tasks: { task: string; label: string }[]): Record<string, string[]> {
+	const fileOwner: Record<string, string> = {};
+	const lockMap: Record<string, string[]> = {};
+	for (const t of tasks) {
+		const files = extractFilePaths(t.task);
+		const owned: string[] = [];
+		for (const fp of files) {
+			if (!fileOwner[fp]) {
+				fileOwner[fp] = t.label;
+				owned.push(fp);
+			} else if (fileOwner[fp] !== t.label) {
+				console.error(`[team-workflow] file conflict: ${fp} wanted by ${t.label}, already owned by ${fileOwner[fp]}`);
+			}
+		}
+		if (owned.length > 0) lockMap[t.label] = owned;
+	}
+	return lockMap;
+}
+
 /**
  * 运行带 review-feedback 循环的多 agent 团队
  *
@@ -118,7 +146,8 @@ export async function runTeamWithReview(
 				currentTasks.map(t => [t.label, sessionIds.get(t.label)!])
 			),
 			timeoutMs,
-			maxRetries: 1,
+			maxRetries: 2,   // 502/timeout 自动重试
+			lockFiles: buildLockAssignments(currentTasks.map(t => ({ task: t.task, label: t.label }))),
 		});
 
 		totalCost += implResult.totalCost;

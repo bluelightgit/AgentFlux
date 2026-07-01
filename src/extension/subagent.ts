@@ -68,6 +68,7 @@ export async function runSubagentsParallel(
 		sessionDir?: string;                // 自定义 session 目录
 		timeoutMs?: number;                 // 超时 (默认 120000)
 		maxRetries?: number;                // 重试次数 (默认 1)
+		lockFiles?: Record<string, string[]>;  // per-label 文件锁: {label: [file paths]}
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
@@ -93,6 +94,7 @@ export async function runSubagentsParallel(
 				sessionDir: common.sessionDir,
 				timeoutMs: common.timeoutMs,
 				maxRetries: common.maxRetries ?? 1,
+				lockFiles: t.label ? common.lockFiles?.[t.label] : undefined,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -317,6 +319,19 @@ function prependInboxMessages(task: string, agentName: string, cwd: string): str
 	}
 }
 
+// ── 错误检测: 模型错误 (可降级) vs 瞬时错误 (可重试) vs 进程错误 ──
+
+/** 模型解析错误 — 可触发模型降级 */
+function isModelError(msg?: string): boolean {
+	return !!msg && /model not found|404|not found|no api key|opencode/i.test(msg);
+}
+
+/** 瞬时错误 — 502/503/500/overloaded/gateway 等, 重试同一模型 */
+function isTransientError(msg?: string, output?: string): boolean {
+	const text = `${msg ?? ""} ${output ?? ""}`;
+	return /502|503|500|overloaded|service unavailable|gateway|bad gateway|rate limit|429|timeout|connection (refused|reset|closed)|ECONNREFUSED|ETIMEDY|负载.*上限|过载|服务不可用|超时|请求失败|繁忙/i.test(text);
+}
+
 /** 注册 agent 到 SharedBoard agent 注册表 */
 function registerAgentInBoard(agent: SubagentDef, task: string, cwd: string, model?: string, provider?: string): void {
 	try {
@@ -364,6 +379,7 @@ export async function runSubagent(opts: {
 	modelsForFallback?: Record<string, ModelEntry>;  // 降级可选模型表
 	roleRequirementForFallback?: RoleRequirement;     // 降级排序用的角色需求
 	fallbackHistory?: string[];                        // 已尝试过的模型 (避免循环)
+	lockFiles?: string[];                              // 文件锁: 防并行编辑冲突
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
 	const timeoutMs = opts.timeoutMs ?? 120000;
@@ -375,6 +391,21 @@ export async function runSubagent(opts: {
 	// SharedBoard 集成: 读 inbox + 注册 agent
 	const taskWithInbox = prependInboxMessages(opts.task, agent.name, cwd);
 	registerAgentInBoard(agent, opts.task, cwd, opts.model ?? agent.model, opts.provider ?? agent.provider);
+
+	// 文件锁: 获取要编辑的文件的锁
+	const lockedFiles: string[] = [];
+	if (opts.lockFiles && opts.lockFiles.length > 0) {
+		try {
+			const board = new SharedBoard(join(cwd, ".agentflux"));
+			for (const fp of opts.lockFiles) {
+				if (board.acquireFileLock(agent.name, fp)) {
+					lockedFiles.push(fp);
+				} else {
+					console.error(`[flux subagent] ${agent.name} WARNING: file lock failed for ${fp}, proceeding anyway`);
+				}
+			}
+		} catch { /* */ }
+	}
 
 	let retryCount = 0;
 	let lastResult: SubagentRunResult | null = null;
@@ -496,10 +527,11 @@ export async function runSubagent(opts: {
 		// 失败 → 判断是否应该重试
 		const isTimeout = result.exitCode === 124;
 		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
-		const isModelError = result.errorMessage && /model not found|404|not found/i.test(result.errorMessage);
+		const modelErr = isModelError(result.errorMessage);
+		const transientErr = isTransientError(result.errorMessage, result.output);
 
 		// 模型降级: 模型不可用时, 尝试切换到低一档模型 (opt-in)
-		if (isModelError && opts.enableModelFallback && opts.modelsForFallback && opts.roleRequirementForFallback) {
+		if (modelErr && opts.enableModelFallback && opts.modelsForFallback && opts.roleRequirementForFallback) {
 			const currentModel = opts.model ?? agent.model ?? "";
 			const tried = opts.fallbackHistory ?? [currentModel];
 			// 过滤已尝试的模型
@@ -523,9 +555,10 @@ export async function runSubagent(opts: {
 			}
 		}
 
-		if (retryCount < maxRetries && (isTimeout || isProcessError || isModelError)) {
-			const delay = retryDelayMs * Math.pow(2, retryCount);  // 指数退避
-			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : isModelError ? `model error: ${result.errorMessage.slice(0, 60)}` : `exit code ${result.exitCode}`;
+		if (retryCount < maxRetries && (isTimeout || isProcessError || modelErr || transientErr)) {
+			const baseDelay = transientErr ? 5000 : retryDelayMs;  // 502/503 退避更久
+			const delay = baseDelay * Math.pow(2, retryCount);  // 指数退避
+			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
 			console.error(`[flux subagent] ${agent.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries} in ${delay}ms...`);
 			await new Promise(r => setTimeout(r, delay));
 			retryCount++;
@@ -551,6 +584,14 @@ export async function runSubagent(opts: {
 
 	// SharedBoard: 更新 agent 状态
 	updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
+
+	// 文件锁: 释放所有锁
+	if (lockedFiles.length > 0) {
+		try {
+			const board = new SharedBoard(join(cwd, ".agentflux"));
+			board.releaseAllLocks(agent.name);
+		} catch { /* */ }
+	}
 
 	return finalResult;
 }
