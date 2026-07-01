@@ -8,6 +8,7 @@ import { SessionsPage } from "./components/SessionsPage";
 import { AgentsPage } from "./components/AgentsPage";
 import { PreferenceRadar } from "./components/PreferenceRadar";
 import { RoutingHistoryChart } from "./components/RoutingHistoryChart";
+import { RoutingFlowDiagram } from "./components/RoutingFlowDiagram";
 import { TelemetryPage } from "./components/TelemetryPage";
 import { DAGPage } from "./components/DAGPage";
 import { IssuesPage } from "./components/IssuesPage";
@@ -38,6 +39,7 @@ const App: React.FC = () => {
             <div className="space-y-4">
               <PreferenceRadar />
               <RoutingHistoryChart />
+              <RoutingFlowDiagram />
             </div>
           )}
           {currentPage === "telemetry" && <TelemetryPage />}

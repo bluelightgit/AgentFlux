@@ -10,6 +10,7 @@ import { CostTrendChart } from './CostTrendChart';
 import { InsightsCard, type InsightItem } from './InsightsCard';
 import { generateInsights } from '../lib/insights-generator';
 import { CostBudgetPanel } from './CostBudgetPanel';
+import { SubsystemHealthPanel } from './SubsystemHealthPanel';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -139,6 +140,10 @@ export const OverviewPage: React.FC = () => {
         <CostTrendChart />
         <InsightsCard insights={insights} />
         <CostBudgetPanel />
+      </div>
+
+      <div className="mt-4">
+        <SubsystemHealthPanel />
       </div>
     </div>
   );

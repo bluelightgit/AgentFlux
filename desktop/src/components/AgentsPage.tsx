@@ -23,6 +23,7 @@ import {
 } from "../lib/agent-status-enhanced";
 import { AgentRegistryPanel } from "./AgentRegistryPanel";
 import { AgentPerformanceTable } from "./AgentPerformanceTable";
+import { AgentOutputViewer } from "./AgentOutputViewer";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -366,6 +367,10 @@ export const AgentsPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentPerformanceTable />
+      </div>
+
+      <div className="mt-4">
+        <AgentOutputViewer />
       </div>
     </div>
   );
