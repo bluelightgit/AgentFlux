@@ -8,6 +8,7 @@ import { Card, Icon, Badge, EmptyState } from "./ui";
 import { formatCost } from "../lib/format";
 import { readFileContent } from "../lib/file-access";
 import { VersionInfo } from "./VersionInfo";
+import { DataExportPanel } from "./DataExportPanel";
 
 // ---------------------------------------------------------------------------
 // Types for models.json
@@ -383,6 +384,10 @@ export const Settings: React.FC = () => {
 
       <div className="mt-4">
         <VersionInfo />
+      </div>
+
+      <div className="mt-4">
+        <DataExportPanel />
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { useKeyboardNav } from '../hooks/useKeyboardNav';
 import { useCommandPalette } from '../hooks/useCommandPalette';
 import { CommandPalette } from './CommandPalette';
 import { RealTimeCostCounter } from './RealTimeCostCounter';
+import { GlobalSearchBar } from './GlobalSearchBar';
 
 // ---------------------------------------------------------------------------
 // Navigation items (per design spec §2.2 / §3)
@@ -152,6 +153,8 @@ const TopBar: React.FC = () => {
 
       {/* Right: Cost counter, Live indicator, Command palette, Theme toggle, Refresh */}
       <div className="flex items-center gap-3">
+        <GlobalSearchBar />
+
         <RealTimeCostCounter />
 
         <div className="flex items-center gap-1.5" title="Live updates active">

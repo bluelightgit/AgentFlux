@@ -27,6 +27,7 @@ import { AgentOutputViewer } from "./AgentOutputViewer";
 import { AgentRetryHistory } from "./AgentRetryHistory";
 import { AgentToolMatrix } from "./AgentToolMatrix";
 import { AgentCapabilityRadar } from "./AgentCapabilityRadar";
+import { AgentComparisonTable } from "./AgentComparisonTable";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -386,6 +387,10 @@ export const AgentsPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentCapabilityRadar />
+      </div>
+
+      <div className="mt-4">
+        <AgentComparisonTable />
       </div>
     </div>
   );

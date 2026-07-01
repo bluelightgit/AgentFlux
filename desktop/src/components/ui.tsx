@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Send,
+  Download,
   Stethoscope,
   Terminal,
   Rocket,
@@ -66,6 +67,7 @@ import {
   Radar,
   CalendarClock,
   TrendingUp,
+  GitCompare,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -74,6 +76,7 @@ export type { LucideIcon };
 // Icon name → Lucide component map
 const ICONS: Record<string, LucideIcon> = {
   Send,
+  Download,
   Stethoscope,
   Terminal,
   Rocket,
@@ -139,6 +142,7 @@ const ICONS: Record<string, LucideIcon> = {
   Radar,
   CalendarClock,
   TrendingUp,
+  GitCompare,
   ArrowRightLeft: ArrowLeftRight,
 };
 
