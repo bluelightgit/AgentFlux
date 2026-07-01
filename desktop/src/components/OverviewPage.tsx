@@ -11,6 +11,8 @@ import { InsightsCard, type InsightItem } from './InsightsCard';
 import { generateInsights } from '../lib/insights-generator';
 import { CostBudgetPanel } from './CostBudgetPanel';
 import { SubsystemHealthPanel } from './SubsystemHealthPanel';
+import { QuickActions } from './QuickActions';
+import { RecentFilesPanel } from './RecentFilesPanel';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -144,6 +146,14 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <SubsystemHealthPanel />
+      </div>
+
+      <div className="mt-4">
+        <QuickActions />
+      </div>
+
+      <div className="mt-4">
+        <RecentFilesPanel />
       </div>
     </div>
   );

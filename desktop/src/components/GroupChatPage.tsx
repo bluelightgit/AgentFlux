@@ -23,6 +23,7 @@ import {
 import { useLiveUpdate } from "../hooks/useLiveUpdate";
 import { DirectMessagePanel } from "./DirectMessagePanel";
 import { AgentCommGraph } from "./AgentCommGraph";
+import { MessageComposer } from "./MessageComposer";
 
 // ---------------------------------------------------------------------------
 // Type → icon name (Lucide) for group list badges
@@ -311,6 +312,9 @@ export const GroupChatPage: React.FC = () => {
       </div>
       </div>
       <DirectMessagePanel />
+      <div className="mt-4">
+        <MessageComposer />
+      </div>
     </div>
   );
 };

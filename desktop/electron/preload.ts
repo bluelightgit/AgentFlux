@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('api', {
   },
   listDirectory: (dirPath: string) => ipcRenderer.invoke('list-directory', dirPath),
   readDirectoryFiles: (dirPath: string) => ipcRenderer.invoke('read-directory-files', dirPath),
+  // Delete a file via IPC (no-op if file missing)
+  deleteFile: (filePath: string) => ipcRenderer.invoke('delete-file', filePath),
   getUserDataPath: () => ipcRenderer.invoke('get-user-data-path'),
   showFolderDialog: () => ipcRenderer.invoke('show-folder-dialog'),
 });

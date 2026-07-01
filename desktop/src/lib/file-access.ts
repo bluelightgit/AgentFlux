@@ -43,3 +43,23 @@ export async function pathExists(filePath: string): Promise<boolean> {
   }
   return false;
 }
+
+/** 写入文件内容 (通过 Electron preload bridge 的 write-file IPC 通道) */
+export async function writeFileContent(
+  filePath: string,
+  content: string,
+): Promise<boolean> {
+  if (typeof window !== "undefined" && window.api?.ipcRenderer) {
+    await window.api.ipcRenderer.invoke("write-file", filePath, content);
+    return true;
+  }
+  return false;
+}
+
+/** 删除文件 (通过 Electron preload bridge 的 deleteFile 方法) */
+export async function deleteFile(filePath: string): Promise<boolean> {
+  if (typeof window !== "undefined" && window.api?.deleteFile) {
+    return window.api.deleteFile(filePath);
+  }
+  return false;
+}
