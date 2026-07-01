@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 import {
-  parseEventsFile,
+  parseEventsFileAsync,
   filterByType,
   type SubagentRunEvent,
 } from "../lib/events-parser";
@@ -84,7 +84,7 @@ export function TokenFlowDiagram(): React.ReactElement {
       return;
     }
     try {
-      const parsed = await parseEventsFile(`${fluxDir}/events.jsonl`);
+      const parsed = await parseEventsFileAsync(`${fluxDir}/events.jsonl`);
       const runs = filterByType(parsed, "subagent.run") as SubagentRunEvent[];
 
       const order: string[] = [];

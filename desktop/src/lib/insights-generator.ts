@@ -5,8 +5,8 @@
  * events, and derives actionable insights (cache hit, failures, cost,
  * staleness, etc). The returned list is capped at 8 items.
  */
-import { join } from "node:path";
-import { parseEventsFile, filterByType, type SubagentRunEvent } from "./events-parser";
+
+import { parseEventsFileAsync, filterByType, type SubagentRunEvent } from "./events-parser";
 import type { InsightItem } from "../components/InsightsCard";
 
 /** Aggregate metrics for a single agent across all its runs. */
@@ -42,7 +42,7 @@ function fmtDuration(ms: number): string {
  */
 export async function generateInsights(fluxDir: string): Promise<InsightItem[]> {
   try {
-    const allEvents = await parseEventsFile(join(fluxDir, "events.jsonl"));
+    const allEvents = await parseEventsFileAsync(`${fluxDir}/events.jsonl`);
     const runs = filterByType<SubagentRunEvent>(allEvents, "subagent.run");
 
     // Empty data — guide the user to dispatch agents.

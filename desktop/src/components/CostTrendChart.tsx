@@ -15,7 +15,7 @@ import {
 } from "recharts";
 import { useDashboardStore } from "../store/dashboard-store";
 import {
-  parseEventsFile,
+  parseEventsFileAsync,
   filterByType,
   type SubagentRunEvent,
 } from "../lib/events-parser";
@@ -90,7 +90,7 @@ export function CostTrendChart(): React.ReactElement {
     }
     try {
       const filePath = `${project.fluxDir}/events.jsonl`;
-      const events = await parseEventsFile(filePath);
+      const events = await parseEventsFileAsync(filePath);
       const runs = filterByType(events, "subagent.run") as SubagentRunEvent[];
       runs.sort((a, b) => a.ts - b.ts);
 

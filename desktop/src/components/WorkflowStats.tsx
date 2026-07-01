@@ -9,7 +9,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 import {
-  parseEventsFile,
+  parseEventsFileAsync,
   filterByType,
   type AnyEvent,
   type SubagentRunEvent,
@@ -142,7 +142,7 @@ export function WorkflowStats(): React.ReactElement {
     }
     try {
       const filePath = `${fluxDir}/events.jsonl`;
-      const parsed = await parseEventsFile(filePath);
+      const parsed = await parseEventsFileAsync(filePath);
       setEvents(parsed);
     } catch {
       setEvents([]);
