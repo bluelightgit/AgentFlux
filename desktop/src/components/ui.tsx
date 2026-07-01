@@ -63,6 +63,9 @@ import {
   GitBranch,
   Network,
   Loader,
+  Radar,
+  CalendarClock,
+  TrendingUp,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -133,6 +136,9 @@ const ICONS: Record<string, LucideIcon> = {
   GitBranch,
   Network,
   Loader,
+  Radar,
+  CalendarClock,
+  TrendingUp,
   ArrowRightLeft: ArrowLeftRight,
 };
 

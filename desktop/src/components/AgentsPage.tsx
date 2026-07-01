@@ -26,6 +26,7 @@ import { AgentPerformanceTable } from "./AgentPerformanceTable";
 import { AgentOutputViewer } from "./AgentOutputViewer";
 import { AgentRetryHistory } from "./AgentRetryHistory";
 import { AgentToolMatrix } from "./AgentToolMatrix";
+import { AgentCapabilityRadar } from "./AgentCapabilityRadar";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -381,6 +382,10 @@ export const AgentsPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentToolMatrix />
+      </div>
+
+      <div className="mt-4">
+        <AgentCapabilityRadar />
       </div>
     </div>
   );

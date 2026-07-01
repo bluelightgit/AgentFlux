@@ -17,6 +17,8 @@ import { AgentDispatchForm } from './AgentDispatchForm';
 import { ErrorLogPanel } from './ErrorLogPanel';
 import { WorkflowStats } from './WorkflowStats';
 import { ModelHealthDashboard } from './ModelHealthDashboard';
+import { AgentActivityHeatmap } from './AgentActivityHeatmap';
+import { CostForecastChart } from './CostForecastChart';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -174,6 +176,14 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <ModelHealthDashboard />
+      </div>
+
+      <div className="mt-4">
+        <AgentActivityHeatmap />
+      </div>
+
+      <div className="mt-4">
+        <CostForecastChart />
       </div>
     </div>
   );
