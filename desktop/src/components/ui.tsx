@@ -68,6 +68,11 @@ import {
   CalendarClock,
   TrendingUp,
   GitCompare,
+  PlayCircle,
+  Play,
+  Pause,
+  ChevronLeft,
+  RotateCcw,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -144,6 +149,11 @@ const ICONS: Record<string, LucideIcon> = {
   TrendingUp,
   GitCompare,
   ArrowRightLeft: ArrowLeftRight,
+  PlayCircle,
+  Play,
+  Pause,
+  ChevronLeft,
+  RotateCcw,
 };
 
 // ----------------------------------------------------------------------------

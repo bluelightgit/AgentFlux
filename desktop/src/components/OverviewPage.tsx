@@ -19,6 +19,7 @@ import { WorkflowStats } from './WorkflowStats';
 import { ModelHealthDashboard } from './ModelHealthDashboard';
 import { AgentActivityHeatmap } from './AgentActivityHeatmap';
 import { CostForecastChart } from './CostForecastChart';
+import { BudgetTrendChart } from './BudgetTrendChart';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -184,6 +185,10 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <CostForecastChart />
+      </div>
+
+      <div className="mt-4">
+        <BudgetTrendChart />
       </div>
     </div>
   );

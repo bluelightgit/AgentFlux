@@ -39,6 +39,7 @@ import {
 } from "./ui";
 import { DAGWorkflow } from "./DAGWorkflow";
 import { TaskDependencyGraph } from "./TaskDependencyGraph";
+import { DAGExecutionReplay } from "./DAGExecutionReplay";
 import type { AnyEvent, SubagentRunEvent } from "../lib/events-parser";
 import type { DAGState } from "../lib/agent-status-enhanced";
 import { formatTs, formatCost, formatPct } from "../lib/format";
@@ -626,6 +627,10 @@ export const DAGPage: React.FC = () => {
 
       <div className="mt-4">
         <TaskDependencyGraph />
+      </div>
+
+      <div className="mt-4">
+        <DAGExecutionReplay />
       </div>
     </div>
   );
