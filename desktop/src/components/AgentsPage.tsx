@@ -25,6 +25,7 @@ import { AgentRegistryPanel } from "./AgentRegistryPanel";
 import { AgentPerformanceTable } from "./AgentPerformanceTable";
 import { AgentOutputViewer } from "./AgentOutputViewer";
 import { AgentRetryHistory } from "./AgentRetryHistory";
+import { AgentToolMatrix } from "./AgentToolMatrix";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -376,6 +377,10 @@ export const AgentsPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentRetryHistory />
+      </div>
+
+      <div className="mt-4">
+        <AgentToolMatrix />
       </div>
     </div>
   );

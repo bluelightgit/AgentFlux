@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   Send,
+  Stethoscope,
   Terminal,
   Rocket,
   HeartPulse,
@@ -53,6 +54,8 @@ import {
   Keyboard,
   GanttChart,
   BarChart3,
+  Grid3x3,
+  Check,
   History,
   Shrink,
   Leaf,
@@ -68,6 +71,7 @@ export type { LucideIcon };
 // Icon name → Lucide component map
 const ICONS: Record<string, LucideIcon> = {
   Send,
+  Stethoscope,
   Terminal,
   Rocket,
   HeartPulse,
@@ -120,6 +124,8 @@ const ICONS: Record<string, LucideIcon> = {
   Keyboard,
   GanttChart,
   BarChart3,
+  Grid3x3,
+  Check,
   History,
   Shrink,
   Leaf,

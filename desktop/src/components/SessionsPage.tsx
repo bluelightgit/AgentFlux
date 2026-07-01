@@ -9,6 +9,7 @@ import { readSessionMessages, type SessionMessage, type SessionMetadata } from "
 import { formatPct, formatCost } from "../lib/format";
 import { useLiveUpdate } from "../hooks/useLiveUpdate";
 import { AgentSessionViewer } from "./AgentSessionViewer";
+import { SessionMessageFlow } from "./SessionMessageFlow";
 
 // Cache hit rate → StatusDot status
 function cacheStatus(rate: number): "done" | "pending" | "failed" {
@@ -529,6 +530,9 @@ export const SessionsPage: React.FC = () => {
           <h2 className="text-lg font-bold text-slate-800">Agent Session Viewer</h2>
         </div>
         <AgentSessionViewer />
+        <div className="mt-4">
+          <SessionMessageFlow />
+        </div>
       </div>
     </div>
   );

@@ -16,6 +16,7 @@ import { RecentFilesPanel } from './RecentFilesPanel';
 import { AgentDispatchForm } from './AgentDispatchForm';
 import { ErrorLogPanel } from './ErrorLogPanel';
 import { WorkflowStats } from './WorkflowStats';
+import { ModelHealthDashboard } from './ModelHealthDashboard';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -169,6 +170,10 @@ export const OverviewPage: React.FC = () => {
 
       <div className="mt-4">
         <WorkflowStats />
+      </div>
+
+      <div className="mt-4">
+        <ModelHealthDashboard />
       </div>
     </div>
   );
