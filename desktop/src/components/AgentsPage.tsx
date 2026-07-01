@@ -24,6 +24,7 @@ import {
 import { AgentRegistryPanel } from "./AgentRegistryPanel";
 import { AgentPerformanceTable } from "./AgentPerformanceTable";
 import { AgentOutputViewer } from "./AgentOutputViewer";
+import { AgentRetryHistory } from "./AgentRetryHistory";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -371,6 +372,10 @@ export const AgentsPage: React.FC = () => {
 
       <div className="mt-4">
         <AgentOutputViewer />
+      </div>
+
+      <div className="mt-4">
+        <AgentRetryHistory />
       </div>
     </div>
   );

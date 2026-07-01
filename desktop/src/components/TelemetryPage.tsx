@@ -10,6 +10,7 @@ import { AgentWorkflowTimeline } from './AgentWorkflowTimeline';
 import { CacheHitDistribution } from './CacheHitDistribution';
 import { ModelUsageStats } from './ModelUsageStats';
 import { AgentTimelineGantt } from './AgentTimelineGantt';
+import { TokenFlowDiagram } from './TokenFlowDiagram';
 
 const TIME_RANGES: { id: TimeRange; label: string }[] = [
   { id: '1h', label: '1 Hour' },
@@ -139,6 +140,10 @@ export const TelemetryPage: React.FC = () => {
       {/* Execution Timeline (Gantt) */}
       <div className='mt-4'>
         <AgentTimelineGantt />
+      </div>
+
+      <div className='mt-4'>
+        <TokenFlowDiagram />
       </div>
     </div>
   );

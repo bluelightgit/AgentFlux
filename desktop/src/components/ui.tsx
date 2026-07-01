@@ -53,6 +53,7 @@ import {
   Keyboard,
   GanttChart,
   BarChart3,
+  History,
   Shrink,
   Leaf,
   Scale,
@@ -119,12 +120,14 @@ const ICONS: Record<string, LucideIcon> = {
   Keyboard,
   GanttChart,
   BarChart3,
+  History,
   Shrink,
   Leaf,
   Scale,
   GitBranch,
   Network,
   Loader,
+  ArrowRightLeft: ArrowLeftRight,
 };
 
 // ----------------------------------------------------------------------------
