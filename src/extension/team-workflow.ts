@@ -144,18 +144,29 @@ export async function runTeamWithReview(
 		// ── Phase 3: 解析 reviewer 反馈 ──
 		const review = parseReviewOutput(reviewResult.output, currentTasks);
 
-		// ── Phase 4: 将反馈写入 SharedBoard messages ──
+		// ── Phase 4: 将反馈写入群组 + DM ──
+		// 创建团队群组 (如果不存在)
+		const teamGroupId = `team-${Date.now().toString(36)}`;
+		const allMembers = [...currentTasks.map(t => t.label), "reviewer"];
+		try {
+			board.createGroup(`Team Round ${round + 1}`, allMembers, "team", "reviewer", "实现→审查反馈循环");
+			// reviewer 发送总体反馈到群组 (所有 agent 可见)
+			board.sendGroupMessage("reviewer", teamGroupId, `Round ${round + 1} review: ${review.passedCount}/${review.totalCount} passed. ${review.overall}`);
+		} catch { /* 群组可能已存在 */ }
+
 		for (const [label, agentReview] of Object.entries(review.agents)) {
 			if (!agentReview.passed) {
+				// 群组消息: 具体反馈 (所有 agent 可见, 透明)
+				try {
+					board.sendGroupMessage("reviewer", teamGroupId,
+						`@${label}: ${agentReview.issues.length} issues found. ${agentReview.suggestions.slice(0, 2).join(" ")}`);
+				} catch {}
+				// DM: 完整反馈 (只有该 agent 看)
 				board.sendMessage(
 					"reviewer",
 					label,
 					"review_feedback",
-					JSON.stringify({
-						round: round + 1,
-						issues: agentReview.issues,
-						suggestions: agentReview.suggestions,
-					}, null, 2),
+					JSON.stringify({ round: round + 1, issues: agentReview.issues, suggestions: agentReview.suggestions }, null, 2),
 				);
 			}
 		}

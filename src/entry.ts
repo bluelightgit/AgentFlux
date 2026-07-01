@@ -37,6 +37,7 @@ import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
 import { loadSubagent, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, type ParallelSubagentTask } from "./extension/subagent";
 import { runTeamWithReview, formatTeamWorkflowResult, type TeamTask } from "./extension/team-workflow";
+import { SharedBoard, formatGroups, formatGroupMessages, formatAgents } from "./core/shared-board";
 import { registerForkMode, handleForkCommand, getForkCandidates } from "./extension/fork-mode";
 import { handleForkExploreCommand, handleForkCompareCommand, handleForkPruneCommand } from "./extension/fork-workflow";
 import { registerCompactionAdvisor, analyzeCompaction, formatCompactionAdvice } from "./extension/compaction-advisor";
@@ -535,7 +536,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | agents | status | health | restart | upgrade [pull]",
+		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | agents | chat | groups | status | health | restart | upgrade [pull]",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -666,8 +667,21 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "agents") {
 				const lines: string[] = ["AgentFlux Active Agents", "═".repeat(60)];
-				// Persistent agents
 				let count = 0;
+				// Agent registry (new: from SharedBoard agents/)
+				try {
+					const board = new SharedBoard(fluxDir);
+					const agents = board.listAgents();
+					if (agents.length > 0) {
+						lines.push("Registered Agents:");
+						for (const a of agents) {
+							const statusIcon = a.status === "running" ? "●" : a.status === "done" ? "✓" : a.status === "failed" ? "✗" : a.status === "blocked" ? "⚠" : "○";
+							lines.push(`  ${statusIcon} ${a.name.padEnd(20)} ${a.role} | ${a.status} | ${a.model ?? "?"} | ${a.currentTask?.slice(0, 40) ?? ""}`);
+							count++;
+						}
+					}
+				} catch {}
+				// Persistent agents (M4)
 				try {
 					const regPath = join(fluxDir, "runtime", "persistent-agents.json");
 					if (existsSync(regPath)) {
@@ -712,6 +726,53 @@ export default function (pi: ExtensionAPI) {
 					}
 				} catch {}
 				if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info"); else console.log(lines.join("\n"));
+				return;
+			}
+
+			// ─── 群组/聊天子命令 ───
+
+			if (sub === "chat") {
+				// /flux chat [groupId] — 查看群组消息
+				try {
+					const board = new SharedBoard(fluxDir);
+					const groups = board.listGroups();
+					if (groups.length === 0) {
+						if (ctx.hasUI) ctx.ui.notify("No groups. Use /flux groups to create.", "info"); else console.log("No groups.");
+						return;
+					}
+					const targetGroup = parts[1] ? groups.find(g => g.id === parts[1] || g.name === parts.slice(1).join(" ")) : groups[0];
+					if (!targetGroup) {
+						if (ctx.hasUI) ctx.ui.notify(`Group '${parts[1]}' not found. Available: ${groups.map(g => g.id).join(", ")}`, "warn"); else console.log(`Group not found. Available: ${groups.map(g => g.id).join(", ")}`);
+						return;
+					}
+					const msgs = board.getGroupMessages(targetGroup.id);
+					const lines: string[] = [
+						`Group: ${targetGroup.name} (${targetGroup.id}) [${targetGroup.type}]`,
+						`Members: ${targetGroup.members.join(", ")}`,
+						"".repeat(1),
+						formatGroupMessages(msgs),
+					];
+					if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info"); else console.log(lines.join("\n"));
+				} catch (e: any) {
+					if (ctx.hasUI) ctx.ui.notify(`Error reading chat: ${e.message}`, "error"); else console.error(e);
+				}
+				return;
+			}
+
+			if (sub === "groups") {
+				// /flux groups — 列出所有群组 + agent 注册表
+				try {
+					const board = new SharedBoard(fluxDir);
+					const groups = board.listGroups();
+					const agents = board.listAgents();
+					const lines: string[] = ["AgentFlux Groups & Agents", "═".repeat(60)];
+					lines.push(formatGroups(groups));
+					lines.push("");
+					lines.push(formatAgents(agents));
+					if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info"); else console.log(lines.join("\n"));
+				} catch (e: any) {
+					if (ctx.hasUI) ctx.ui.notify(`Error: ${e.message}`, "error"); else console.error(e);
+				}
 				return;
 			}
 

@@ -25,6 +25,7 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { ModelEntry, RoleRequirement } from "../core/model-capability";
 import { findFallbackModel } from "../core/model-capability";
+import { SharedBoard } from "../core/shared-board";
 
 // ──────────────────────────────── M2-1: 并行 subagent ────────────────────────────────
 
@@ -280,6 +281,68 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * @param sessionDir M2-2: 持久 session 存储目录, 默认 .agentflux/runtime/sessions/
  * @param thinking M2-4: 覆盖 agent.thinking 的 reasoning effort 级别
  */
+// ── SharedBoard 集成: agent 启动前读 inbox + 注册 ──
+
+/**
+ * 读取 agent 的 inbox + 群组消息, 拼接到 task 前面
+ * 让 agent 能看到其他 agent 的反馈, 不需要主 agent 桥接
+ */
+function prependInboxMessages(task: string, agentName: string, cwd: string): string {
+	try {
+		const board = new SharedBoard(join(cwd, ".agentflux"));
+		const unread = board.getUnreadMessages(agentName);
+		const groupInbox = board.getGroupInbox(agentName);
+
+		// 收集所有群组中的最新消息 (只取最后 5 条 per group)
+		const groupMsgs: string[] = [];
+		for (const { group, messages } of groupInbox) {
+			const recent = messages.slice(-5);
+			for (const m of recent) {
+				if (m.from === agentName) continue;  // 跳过自己发的
+				groupMsgs.push(`[${group.name}] ${m.from}: ${m.content.slice(0, 200)}`);
+			}
+		}
+
+		const dmMsgs = unread.map(m => `[DM from ${m.from}] ${m.content.slice(0, 200)}`);
+
+		const allMsgs = [...dmMsgs, ...groupMsgs];
+		if (allMsgs.length === 0) return task;
+
+		// 标记消息为已读
+		for (const m of unread) board.markMessageRead(m.id);
+
+		return `=== Messages from other agents ===\n${allMsgs.join("\n")}\n=== End messages ===\n\n${task}`;
+	} catch {
+		return task;  // SharedBoard 不存在时静默跳过
+	}
+}
+
+/** 注册 agent 到 SharedBoard agent 注册表 */
+function registerAgentInBoard(agent: SubagentDef, task: string, cwd: string, model?: string, provider?: string): void {
+	try {
+		const board = new SharedBoard(join(cwd, ".agentflux"));
+		board.registerAgent({
+			name: agent.name,
+			role: agent.name,  // agent name IS the role (planner/implementer/reviewer/tester/designer)
+			status: "running",
+			currentTask: task.slice(0, 200),
+			model,
+			provider,
+			thinking: agent.thinking,
+		});
+		// 确保 "all" 大群包含此 agent
+		board.ensureAllGroup([agent.name]);
+	} catch { /* 静默 */ }
+}
+
+/** 更新 agent 状态 */
+function updateAgentStatusInBoard(agentName: string, status: "done" | "failed", cwd: string): void {
+	try {
+		const board = new SharedBoard(join(cwd, ".agentflux"));
+		board.updateAgentPresence(agentName, { status });
+	} catch { /* 静默 */ }
+}
+
 export async function runSubagent(opts: {
 	cwd: string;
 	agent: SubagentDef;
@@ -302,12 +365,16 @@ export async function runSubagent(opts: {
 	roleRequirementForFallback?: RoleRequirement;     // 降级排序用的角色需求
 	fallbackHistory?: string[];                        // 已尝试过的模型 (避免循环)
 }): Promise<SubagentRunResult> {
-	const { cwd, agent, task, sessionId, telemetry, prefixLayout } = opts;
-	const timeoutMs = opts.timeoutMs ?? 120000;  // 默认 2min (之前 60s 太短)
+	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
+	const timeoutMs = opts.timeoutMs ?? 120000;
 	const maxRetries = opts.maxRetries ?? 0;
 	const retryDelayMs = opts.retryDelayMs ?? 2000;
 
 	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
+
+	// SharedBoard 集成: 读 inbox + 注册 agent
+	const taskWithInbox = prependInboxMessages(opts.task, agent.name, cwd);
+	registerAgentInBoard(agent, opts.task, cwd, opts.model ?? agent.model, opts.provider ?? agent.provider);
 
 	let retryCount = 0;
 	let lastResult: SubagentRunResult | null = null;
@@ -350,7 +417,7 @@ export async function runSubagent(opts: {
 			writeFileSync(tmpPrompt, agent.systemPrompt, "utf-8");
 			attemptArgs.push("--append-system-prompt", tmpPrompt);
 		}
-		attemptArgs.push(`Task: ${task}`);
+		attemptArgs.push(`Task: ${taskWithInbox}`);
 
 		const result: SubagentRunResult = {
 			agent: agent.name, exitCode: 0, output: "",
@@ -473,7 +540,7 @@ export async function runSubagent(opts: {
 
 	const hitRate = finalResult.usage.cacheRead / (finalResult.usage.cacheRead + finalResult.usage.input + 1e-9);
 	telemetry?.writeSubagentRun({
-		sessionId, agent: agent.name, task: task.slice(0, 200), model: finalResult.model,
+		sessionId, agent: agent.name, task: opts.task.slice(0, 200), model: finalResult.model,
 		turns: finalResult.usage.turns, input: finalResult.usage.input, output: finalResult.usage.output,
 		cacheRead: finalResult.usage.cacheRead, cacheWrite: finalResult.usage.cacheWrite,
 		costUsd: Number(finalResult.usage.cost.toFixed(6)), contextTokens: finalResult.usage.contextTokens,
@@ -481,6 +548,9 @@ export async function runSubagent(opts: {
 		persistent: opts.persistent ?? false, thinking: thinkingLevel,
 		retryCount: finalResult.retryCount,
 	});
+
+	// SharedBoard: 更新 agent 状态
+	updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
 
 	return finalResult;
 }

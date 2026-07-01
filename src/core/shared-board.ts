@@ -12,7 +12,7 @@
  * 设计: 文件-based, 不做 IPC, 可审计, git 友好
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
@@ -69,6 +69,43 @@ export interface AgentMessage {
 	read: boolean;                // 接收者是否已读
 }
 
+// ── 群组/频道系统 ──
+
+export type GroupType = "all" | "team" | "direct";
+
+export interface AgentGroup {
+	id: string;                  // 群组 ID (如 "all", "team-impl", "direct-planner-reviewer")
+	name: string;                // 显示名
+	type: GroupType;             // all=大群, team=小群, direct=私聊
+	members: string[];           // agent 名称列表
+	created: string;
+	createdBy: string;
+	description?: string;
+}
+
+export interface GroupMessage {
+	id: string;
+	groupId: string;
+	from: string;
+	content: string;
+	timestamp: string;
+}
+
+// ── Agent 注册表 ──
+
+export interface AgentInfo {
+	name: string;
+	role: string;                // planner/implementer/reviewer/tester/designer
+	status: "idle" | "running" | "blocked" | "done" | "failed";
+	currentTask?: string;
+	model?: string;
+	provider?: string;
+	sessionFile?: string;
+	thinking?: string;
+	lastSeen: string;
+	registeredAt: string;
+}
+
 // ──────────────────────────────── 黑板 ────────────────────────────────
 
 export class SharedBoard {
@@ -80,7 +117,7 @@ export class SharedBoard {
 	}
 
 	private ensureDirs(): void {
-		for (const sub of ["", "tasks", "handoffs", "decisions", "messages"]) {
+		for (const sub of ["", "tasks", "handoffs", "decisions", "messages", "groups", "agents"]) {
 			const dir = join(this.sharedDir, sub);
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		}
@@ -297,6 +334,137 @@ export class SharedBoard {
 			.sort((a: Decision, b: Decision) => a.timestamp.localeCompare(b.timestamp));
 	}
 
+	// ── 群组/频道系统 ──
+
+	/** 创建群组 */
+	createGroup(name: string, members: string[], type: GroupType, createdBy: string, description?: string): AgentGroup {
+		const registry = this.listGroups();
+		const num = registry.length + 1;
+		const id = type === "all" ? "all" : `${type}-${String(num).padStart(2, "0")}`;
+		const group: AgentGroup = {
+			id, name, type, members, description,
+			created: new Date().toISOString(),
+			createdBy,
+		};
+		writeFileSync(join(this.sharedDir, "groups", "_registry.json"), JSON.stringify([...registry, group], null, 2));
+		// 创建群组消息目录
+		mkdirSync(join(this.sharedDir, "groups", id), { recursive: true });
+		return group;
+	}
+
+	/** 列出所有群组 */
+	listGroups(): AgentGroup[] {
+		const path = join(this.sharedDir, "groups", "_registry.json");
+		if (!existsSync(path)) return [];
+		return JSON.parse(readFileSync(path, "utf-8"));
+	}
+
+	/** 获取 agent 所在的群组 */
+	getGroupsForAgent(agentName: string): AgentGroup[] {
+		return this.listGroups().filter(g => g.members.includes(agentName) || g.type === "all");
+	}
+
+	/** 向群组发送消息 */
+	sendGroupMessage(from: string, groupId: string, content: string): GroupMessage {
+		const groups = this.listGroups();
+		const group = groups.find(g => g.id === groupId);
+		if (!group) throw new Error(`Group ${groupId} not found`);
+		if (!group.members.includes(from) && group.type !== "all") {
+			throw new Error(`${from} is not a member of group ${groupId}`);
+		}
+
+		const groupDir = join(this.sharedDir, "groups", groupId);
+		if (!existsSync(groupDir)) mkdirSync(groupDir, { recursive: true });
+
+		const msgFile = join(groupDir, "messages.jsonl");
+		const existing = existsSync(msgFile) ? readFileSync(msgFile, "utf-8").trim().split("\n").filter(Boolean) : [];
+		const num = existing.length + 1;
+		const msg: GroupMessage = {
+			id: `gm-${groupId}-${String(num).padStart(3, "0")}`,
+			groupId, from, content,
+			timestamp: new Date().toISOString(),
+		};
+		appendFileSync(msgFile, JSON.stringify(msg) + "\n");
+		return msg;
+	}
+
+	/** 获取群组消息 (支持 sinceTs 增量读取) */
+	getGroupMessages(groupId: string, sinceTs?: string): GroupMessage[] {
+		const msgFile = join(this.sharedDir, "groups", groupId, "messages.jsonl");
+		if (!existsSync(msgFile)) return [];
+		const lines = readFileSync(msgFile, "utf-8").trim().split("\n").filter(Boolean);
+		const msgs = lines.map(l => JSON.parse(l) as GroupMessage);
+		if (sinceTs) return msgs.filter(m => m.timestamp > sinceTs);
+		return msgs;
+	}
+
+	/** 获取 agent 在所有群组中的未读消息 */
+	getGroupInbox(agentName: string): Array<{ group: AgentGroup; messages: GroupMessage[] }> {
+		const groups = this.getGroupsForAgent(agentName);
+		return groups.map(group => ({
+			group,
+			messages: this.getGroupMessages(group.id),
+		}));
+	}
+
+	/** 确保 "all" 大群存在 (包含指定 agents) */
+	ensureAllGroup(agentNames: string[], createdBy = "system"): AgentGroup {
+		const groups = this.listGroups();
+		let allGroup = groups.find(g => g.id === "all");
+		if (!allGroup) {
+			allGroup = this.createGroup("All Agents", [...new Set(agentNames)], "all", createdBy, "全 agent 公开沟通频道");
+		} else {
+			// 合并新成员
+			const merged = [...new Set([...allGroup.members, ...agentNames])];
+			if (merged.length !== allGroup.members.length) {
+				allGroup.members = merged;
+				const updated = groups.map(g => g.id === "all" ? allGroup! : g);
+				writeFileSync(join(this.sharedDir, "groups", "_registry.json"), JSON.stringify(updated, null, 2));
+			}
+		}
+		return allGroup;
+	}
+
+	// ── Agent 注册表 ──
+
+	/** 注册或更新 agent 信息 */
+	registerAgent(info: Omit<AgentInfo, "registeredAt" | "lastSeen"> & { registeredAt?: string; lastSeen?: string }): AgentInfo {
+		const registry = this.listAgents();
+		const existing = registry.find(a => a.name === info.name);
+		const now = new Date().toISOString();
+		const full: AgentInfo = {
+			...existing,
+			...info,
+			registeredAt: existing?.registeredAt ?? info.registeredAt ?? now,
+			lastSeen: now,
+		};
+		const updated = registry.filter(a => a.name !== info.name);
+		updated.push(full);
+		writeFileSync(join(this.sharedDir, "agents", "_registry.json"), JSON.stringify(updated, null, 2));
+		return full;
+	}
+
+	/** 列出所有注册的 agent */
+	listAgents(): AgentInfo[] {
+		const path = join(this.sharedDir, "agents", "_registry.json");
+		if (!existsSync(path)) return [];
+		return JSON.parse(readFileSync(path, "utf-8"));
+	}
+
+	/** 更新 agent 状态/在线信息 */
+	updateAgentPresence(name: string, updates: Partial<AgentInfo>): void {
+		const registry = this.listAgents();
+		const agent = registry.find(a => a.name === name);
+		if (!agent) return;
+		Object.assign(agent, updates, { lastSeen: new Date().toISOString() });
+		writeFileSync(join(this.sharedDir, "agents", "_registry.json"), JSON.stringify(registry, null, 2));
+	}
+
+	/** 获取单个 agent 信息 */
+	getAgent(name: string): AgentInfo | null {
+		return this.listAgents().find(a => a.name === name) ?? null;
+	}
+
 	// ── 路径 ──
 
 	get path(): string {
@@ -382,6 +550,39 @@ export function formatTaskList(tasks: Task[]): string {
 		lines.push(`  ${icon} ${t.id}: ${t.title}`);
 		if (t.assignedTo) lines.push(`    assigned: ${t.assignedTo}`);
 		if (t.dependsOn.length > 0) lines.push(`    depends: ${t.dependsOn.join(", ")}`);
+	}
+	return lines.join("\n");
+}
+
+// ── 群组格式化 ──
+
+export function formatGroups(groups: AgentGroup[]): string {
+	if (groups.length === 0) return "No groups.";
+	const lines = ["Groups:", ""];
+	for (const g of groups) {
+		const typeIcon = { all: "📢", team: "👥", direct: "💬" }[g.type];
+		lines.push(`  ${typeIcon} ${g.id}: ${g.name} [${g.type}] (${g.members.length} members: ${g.members.join(", ")})`);
+	}
+	return lines.join("\n");
+}
+
+export function formatGroupMessages(msgs: GroupMessage[]): string {
+	if (msgs.length === 0) return "No group messages.";
+	const lines = ["Group Messages:", ""];
+	for (const m of msgs) {
+		lines.push(`  ${m.timestamp.slice(11, 19)} ${m.from}: ${m.content.slice(0, 120)}`);
+	}
+	return lines.join("\n");
+}
+
+export function formatAgents(agents: AgentInfo[]): string {
+	if (agents.length === 0) return "No registered agents.";
+	const lines = ["Agents:", ""];
+	for (const a of agents) {
+		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗" }[a.status] ?? "?";
+		lines.push(`  ${icon} ${a.name} (${a.role}) — ${a.status}`);
+		if (a.currentTask) lines.push(`    task: ${a.currentTask.slice(0, 80)}`);
+		if (a.model) lines.push(`    model: ${a.model}${a.thinking ? ` [${a.thinking}]` : ""}`);
 	}
 	return lines.join("\n");
 }
