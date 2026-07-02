@@ -46,6 +46,7 @@ import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySig
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { discoverPiModels, mergeModels } from "./core/model-capability";
 import { showFluxMenu, type FluxMenuState, type FluxMenuCallbacks } from "./extension/flux-menu";
+import { handleFluxAgentsCommand, handleFluxBackCommand, getAgentSystemPromptOverride } from "./extension/agent-switcher";
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
@@ -393,6 +394,18 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
+	// ---------- before_agent_start: agent role prompt injection ----------
+
+	pi.on("before_agent_start", async (event: any, ctx: any) => {
+		const rolePrompt = getAgentSystemPromptOverride(ctx.cwd);
+		if (rolePrompt) {
+			return {
+				systemPrompt: event.systemPrompt + "\n\n" + rolePrompt,
+			};
+		}
+		return undefined;
+	});
+
 	// ---------- M3 fork 事件 (Phase 2) ----------
 
 	registerForkMode(pi, () => ({ sessionId, telemetry }));
@@ -551,6 +564,18 @@ export default function (pi: ExtensionAPI) {
 
 			return { content: [{ type: "text", text: formatTeamWorkflowResult(result) }], details: {} };
 		},
+	});
+
+	// ---------- /flux-agents & /flux-back: direct agent communication ----------
+
+	pi.registerCommand("flux-agents", {
+		description: "List registered agents, select one to enter its session directly. Press d to delete (y/n confirm).",
+		handler: async (_args: string, ctx: any) => handleFluxAgentsCommand(_args, ctx),
+	});
+
+	pi.registerCommand("flux-back", {
+		description: "Return to the main agent session from an agent session.",
+		handler: async (_args: string, ctx: any) => handleFluxBackCommand(_args, ctx),
 	});
 
 	pi.registerCommand("flux", {
