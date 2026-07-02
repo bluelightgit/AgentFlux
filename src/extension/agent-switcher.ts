@@ -40,19 +40,19 @@ export function getActiveAgent(cwd: string): string | null {
 }
 
 /** Set the active agent (null = main agent). */
-function setActiveAgent(cwd: string, name: string | null): void {
+export function setActiveAgent(cwd: string, name: string | null): void {
 	const p = join(runtimeDir(cwd), ACTIVE_AGENT_FILE);
 	writeFileSync(p, JSON.stringify({ agentName: name, setAt: new Date().toISOString() }));
 }
 
 /** Save the main session file path for /flux-back. */
-function saveMainSession(cwd: string, sessionFile: string): void {
+export function saveMainSession(cwd: string, sessionFile: string): void {
 	const p = join(runtimeDir(cwd), MAIN_BACKUP_FILE);
 	writeFileSync(p, JSON.stringify({ sessionFile, savedAt: new Date().toISOString() }));
 }
 
 /** Read the saved main session file path. */
-function readMainSession(cwd: string): string | null {
+export function readMainSession(cwd: string): string | null {
 	const p = join(runtimeDir(cwd), MAIN_BACKUP_FILE);
 	if (!existsSync(p)) return null;
 	try {
@@ -64,7 +64,7 @@ function readMainSession(cwd: string): string | null {
 // ─── Agent session file discovery ──────────────────────────────────────────
 
 /** Find the most recent session file for an agent. */
-function findAgentSessionFile(cwd: string, agentName: string): string | null {
+export function findAgentSessionFile(cwd: string, agentName: string): string | null {
 	// 1. Check registry sessionFile field
 	const board = new SharedBoard(join(cwd, ".agentflux"));
 	const agent = board.getAgent(agentName);

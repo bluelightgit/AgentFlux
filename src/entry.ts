@@ -46,7 +46,7 @@ import { collectComplexitySignal, formatComplexitySignal, type TaskComplexitySig
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { discoverPiModels, mergeModels } from "./core/model-capability";
 import { showFluxMenu, type FluxMenuState, type FluxMenuCallbacks } from "./extension/flux-menu";
-import { handleFluxAgentsCommand, handleFluxBackCommand, getAgentSystemPromptOverride } from "./extension/agent-switcher";
+import { handleFluxAgentsCommand, handleFluxBackCommand, getAgentSystemPromptOverride, getActiveAgent, setActiveAgent, saveMainSession, readMainSession, findAgentSessionFile } from "./extension/agent-switcher";
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
@@ -311,6 +311,34 @@ export default function (pi: ExtensionAPI) {
 				// 一次性覆盖: 读后删除
 				if (ov.ephemeral !== false) {
 					try { unlinkSync(overridePath); } catch {}
+				}
+			}
+		} catch {}
+
+		// agent-switch-request.json: Desktop 可请求切换到指定 agent session
+		try {
+			const switchReqPath = join(fluxDir, "runtime", "agent-switch-request.json");
+			if (existsSync(switchReqPath)) {
+				const req = JSON.parse(readFileSync(switchReqPath, "utf-8"));
+				try { unlinkSync(switchReqPath); } catch {}
+				if (req.target === "main") {
+					const mainSession = readMainSession(ctx.cwd);
+					if (mainSession && existsSync(mainSession)) {
+						setActiveAgent(ctx.cwd, null);
+						await ctx.switchSession(mainSession, {
+							withSession: async (c: any) => { if (c.hasUI) c.ui.notify("Returned to main agent", "info"); },
+						});
+					}
+				} else if (req.target) {
+					const sessionFile = findAgentSessionFile(ctx.cwd, req.target);
+					if (sessionFile) {
+						const currentSession = ctx.sessionManager?.getSessionFile?.();
+						if (currentSession && !getActiveAgent(ctx.cwd)) saveMainSession(ctx.cwd, currentSession);
+						setActiveAgent(ctx.cwd, req.target);
+						await ctx.switchSession(sessionFile, {
+							withSession: async (c: any) => { if (c.hasUI) c.ui.notify(`Switched to agent "${req.target}". Type /flux-back to return.`, "info"); },
+						});
+					}
 				}
 			}
 		} catch {}
