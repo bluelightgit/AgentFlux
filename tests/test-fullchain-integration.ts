@@ -30,10 +30,13 @@ import { SharedBoard } from "../src/core/shared-board";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { DEFAULT_PREFERENCE, type ProjectStage, type Preset, type Mode } from "../src/core/types";
 import { join } from "node:path";
-import { readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, readdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const CWD = process.cwd();
-const FLUX_DIR = join(CWD, ".agentflux");
+const PROJECT_FLUX_DIR = join(CWD, ".agentflux");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "agentflux-fullchain-"));
+const FLUX_DIR = join(TEST_ROOT, ".agentflux");
 
 interface TestResult { name: string; passed: boolean; detail: string; category: string; }
 const results: TestResult[] = [];
@@ -75,7 +78,7 @@ async function main() {
 	// 1.3 Models config
 	let modelsConfig: any = null;
 	try {
-		modelsConfig = JSON.parse(readFileSync(join(FLUX_DIR, "models.json"), "utf-8"));
+		modelsConfig = JSON.parse(readFileSync(join(PROJECT_FLUX_DIR, "models.json"), "utf-8"));
 	} catch {}
 	record("config", "models.json loaded with models",
 		!!modelsConfig && Object.keys(modelsConfig.models ?? {}).length > 0,
@@ -134,7 +137,6 @@ async function main() {
 		`mode=${taskSignal.recommendedMode}, conf=${taskSignal.confidence.toFixed(2)}`);
 
 	// 2.3 Layer 3: Experience store
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
 	const expStore = new ExperienceStore(FLUX_DIR);
 	record("routing", "Layer 3: ExperienceStore initialized empty",
 		expStore.loadAll().length === 0,
@@ -546,7 +548,7 @@ async function main() {
 	// 清理
 	// ═══════════════════════════════════════════════════════
 
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
+	try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {}
 
 	// ═══════════════════════════════════════════════════════
 	// 汇总

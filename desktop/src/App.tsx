@@ -18,6 +18,7 @@ import { ConfigPage } from "./components/ConfigPage";
 import { Settings } from "./components/Settings";
 import { HelpOverlay } from "./components/HelpOverlay";
 import { useEventNotifications } from "./hooks/useEventNotifications";
+import { WorkbenchPage } from "./components/WorkbenchPage";
 
 const AppInner: React.FC = () => {
   const currentPage = useDashboardStore((s) => s.currentPage);
@@ -46,6 +47,7 @@ const AppInner: React.FC = () => {
   return (
     <>
       <AppShell>
+        {currentPage === "workbench" && <WorkbenchPage />}
         {currentPage === "overview" && <OverviewPage />}
         {currentPage === "sessions" && <SessionsPage />}
         {currentPage === "agents" && <AgentsPage />}
@@ -59,8 +61,8 @@ const AppInner: React.FC = () => {
         )}
         {currentPage === "telemetry" && <TelemetryPage />}
         {currentPage === "dag" && <DAGPage />}
-        {currentPage === "issues" && <IssuesPage />}
-        {currentPage === "chat" && <GroupChatPage />}
+        {currentPage === "issues" && <div className="space-y-3"><div role="status" className="border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"><strong>DRAFT SURFACE</strong> — issue actions are not connected to the task runtime dispatcher and must not be treated as dispatched work.</div><IssuesPage /></div>}
+        {currentPage === "chat" && <div className="space-y-3"><div role="status" className="border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-600"><strong>READ-ONLY / EXPERIMENTAL</strong> — this view does not provide task-scoped multi-agent message mutation.</div><GroupChatPage /></div>}
         {currentPage === "config" && <ConfigPage />}
         {currentPage === "settings" && <Settings />}
       </AppShell>

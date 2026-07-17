@@ -65,6 +65,15 @@ L2 是持久 session 比 subagent 多省的部分,但被 compaction 限制(见�
 | **历史消息未打 cache_control** | **L2 靠隐式缓存, 短历史(<1024)不命中** | **AgentFlux 主动注入 cache_control 断点(before_provider_request)** |
 | 频繁 compaction | 摧毁 prefix,全 miss | 见下 |
 
+## 运行时变更提示
+
+AgentFlux 会对 tools schema（包含身份消息工具及其角色通信策略）、Skill 集合、MCP 集合、system prompt、模型分配和 session generation 的变化做统一 cache-impact 评估。这些变化会使可复用静态前缀失效或要求新 session；通过 `/flux restart` 重载角色配置时，评估结果会进入命令输出。
+
+- `cost_sensitivity > 0.01`：对真实的前缀失效显示警告，包含变更类型、是否需要新 session 和当前成本偏好。
+- `cost_sensitivity <= 0.01`：保留评估结果，但不向用户弹出成本型提示。
+- 消息注入位于动态后缀，只增加当轮 context token，不重排静态前缀，因此不会被误报为 cache miss。
+- 仅在宿主侧收紧 runtime policy guard、不改变模型可见工具 schema 时，也不会触发 cache miss 警告。
+
 ## Compaction 与 Cache
 
 **每次 compaction 摧毁整个 cached prefix,触发全价重读。** 这是持久 session L2 收益的侵蚀源:

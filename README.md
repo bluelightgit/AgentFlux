@@ -38,6 +38,10 @@ After installation, AgentFlux loads automatically in any pi session.
 | Command | Description |
 |---------|-------------|
 | `/flux` | Open control panel menu (mode/preference/team/info) |
+| `/flux work [--mode M1\|M2\|M5] <task>` | Execute with a user/main-Agent-selected mode, or omit `--mode` to use the configured route decision |
+| `/flux cancel [runId\|all]` | Cancel active AgentFlux DAG runs and their child processes |
+| `/flux gc dry-run` | Preview terminal agent/message/session retention cleanup |
+| `/flux gc` | Archive eligible terminal state; refuses while subagents are active |
 | `/flux why` | Route inspector — why this mode was chosen |
 | `/flux mode <preset>` | Switch mode preset (eco/fast/balanced/accurate/custom) |
 | `/flux preference` | 5-dimension routing preference tuner |
@@ -54,6 +58,13 @@ After installation, AgentFlux loads automatically in any pi session.
 | `/flux team roles` | List role definitions |
 | `/flux team models` | List models + capability vectors |
 | `/flux team affinity` | Per-role model affinity ranking |
+| `/flux agents` | Show active runs, persistent agents, and DAG state |
+| `/flux chat [group]` | Read SharedBoard group messages |
+| `/flux groups` | List SharedBoard groups and registered agents |
+| `/flux status` | Full runtime/cost/agent/issue status |
+| `/flux health` | Deterministic subsystem health checks |
+| `/flux restart` | Reload config, models, pricing, and router state |
+| `/flux upgrade` | Check for repository updates |
 
 ## Configuration
 
@@ -70,7 +81,14 @@ After installation, AgentFlux loads automatically in any pi session.
 
 ## Documentation
 
-See `docs/` for 21 design documents covering trilemma formalization, six work modes, routing layers, cache strategy, multi-agent architecture, and empirical findings.
+See `docs/` for 27 design/status documents. Start with [`docs/26-implementation-status.md`](docs/26-implementation-status.md): it distinguishes designed, implemented, wired, verified, and released capabilities so roadmap intent is not confused with production behavior.
+
+## Verification
+
+```bash
+npm run verify       # offline typecheck + deterministic regression suite
+npm run test:live    # opt-in live-model tests; may incur cost
+```
 
 ## Update
 

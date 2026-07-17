@@ -73,6 +73,33 @@ export interface SubagentRunEvent {
   retryCount?: number;
   persistent?: boolean;
   thinking?: string;
+  runId?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  communication?: {
+    passed: boolean;
+    missingSendTo: string[];
+    unacknowledgedInbox: string[];
+  };
+  outcome?: {
+    status: "success" | "cancelled" | "timeout" | "failure";
+    success: boolean;
+    exitCode: number;
+    retryCount?: number;
+    error?: string;
+  };
+}
+
+export interface MessageProtocolEvent {
+  ts: number;
+  type: "message.protocol";
+  agent: string;
+  instanceId: string;
+  action: "send" | "poll" | "ack" | "status";
+  result: "success" | "denied" | "failure";
+  messageId?: string;
+  target?: string;
+  detail?: string;
 }
 
 export interface ContextEvent {
@@ -86,7 +113,7 @@ export interface ContextEvent {
   contextPercentAfter: number | null;
 }
 
-export type AnyEvent = RoutingDecisionEvent | CacheSampleEvent | SubagentRunEvent | ContextEvent;
+export type AnyEvent = RoutingDecisionEvent | CacheSampleEvent | SubagentRunEvent | ContextEvent | MessageProtocolEvent;
 
 function parseJsonl(content: string): AnyEvent[] {
   const events: AnyEvent[] = [];

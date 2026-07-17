@@ -8,12 +8,12 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { ProjectProfile, ProjectStage, ProjectRole, Mode } from "../core/types";
 
 function git(cwd: string, args: string): string {
 	try {
-		return execSync(`git ${args}`, { cwd, encoding: "utf-8", timeout: 5000, shell: true }).trim();
+		return execFileSync("git", args.split(/\s+/).filter(Boolean), { cwd, encoding: "utf-8", timeout: 5000 }).trim();
 	} catch { return ""; }
 }
 

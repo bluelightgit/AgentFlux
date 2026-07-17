@@ -14,7 +14,7 @@ import { loadRegistry, addWorkspace, removeWorkspace, setActive, type WorkspaceE
 import { listSessions, type SessionMetadata } from "../lib/session-reader";
 
 export type TimeRange = "1h" | "24h" | "7d" | "30d" | "all";
-export type PageName = 'overview' | 'sessions' | 'agents' | 'routing' | 'telemetry' | 'dag' | 'issues' | 'chat' | 'config' | 'settings';
+export type PageName = 'overview' | 'sessions' | 'agents' | 'routing' | 'telemetry' | 'dag' | 'issues' | 'chat' | 'config' | 'settings' | 'workbench';
 
 interface DashboardState {
   // 导航
@@ -73,7 +73,7 @@ interface DashboardState {
 }
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
-  currentPage: "overview",
+  currentPage: "workbench",
   setPage: (page) => set({ currentPage: page }),
 
   project: null,
@@ -123,7 +123,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       // 启动实时监听
       if (get().autoRefresh) {
         startWatcher(set, get, project.eventsPath);
-        startStatusPolling(set, get, project.fluxDir);
+        startStatusPolling(set, project.fluxDir);
       }
 
       // 加载工作区列表与会话列表
@@ -157,7 +157,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     const state = get();
     if (enabled && !state.watcher && state.project) {
       startWatcher(set, get, state.project.eventsPath);
-      startStatusPolling(set, get, state.project.fluxDir);
+      startStatusPolling(set, state.project.fluxDir);
     } else if (!enabled) {
       state.watcher?.stop();
       if (state.statusTimer) clearInterval(state.statusTimer);
@@ -279,7 +279,6 @@ function startWatcher(
 
 function startStatusPolling(
   set: (partial: Partial<DashboardState>) => void,
-  get: () => DashboardState,
   fluxDir: string,
 ) {
   const timer = setInterval(async () => {

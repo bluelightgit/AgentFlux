@@ -11,15 +11,19 @@
  */
 
 import { SharedBoard } from "../src/core/shared-board";
-import { runPersistentAgent, consumeNextTask, formatPersistentRegistry, loadAllRoles } from "../src/extension/persistent-agent";
+import { runPersistentAgent, consumeNextTask } from "../src/extension/persistent-agent";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { loadConfig } from "../src/core/config";
 import { loadPricing } from "../src/core/pricing";
 import { join } from "node:path";
-import { readFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, rmSync, readdirSync, mkdtempSync, cpSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const CWD = process.cwd();
-const FLUX_DIR = join(CWD, ".agentflux");
+const SOURCE_FLUX_DIR = join(CWD, ".agentflux");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "agentflux-m4-integration-"));
+const PROJECT_CWD = join(TEST_ROOT, "project");
+const FLUX_DIR = join(PROJECT_CWD, ".agentflux");
 const TEST_SHARED_DIR = join(FLUX_DIR, "shared-test-m4");
 
 interface TestResult { name: string; passed: boolean; detail: string; }
@@ -38,6 +42,7 @@ async function main() {
 
 	// 清理测试目录
 	try { rmSync(TEST_SHARED_DIR, { recursive: true, force: true }); } catch {}
+	cpSync(join(CWD, "src"), join(PROJECT_CWD, "src"), { recursive: true });
 
 	const config = loadConfig(CWD);
 	let pricingTable: any = null;
@@ -49,12 +54,13 @@ async function main() {
 
 	const telemetry = new TelemetryWriter(FLUX_DIR, true);
 	const sessionId = `test-m4-${Date.now()}`;
-	const prefixLayout = config.cache.prefix_layout === "static_first";
+	// 临时项目不加载被测扩展，避免 subagent 反向写入真实工作区状态。
+	const prefixLayout = false;
 	const MODEL = "deepseek-v4-flash";
 
 	let modelsConfig: any = null;
 	try {
-		modelsConfig = JSON.parse(readFileSync(join(FLUX_DIR, "models.json"), "utf-8"));
+		modelsConfig = JSON.parse(readFileSync(join(SOURCE_FLUX_DIR, "models.json"), "utf-8"));
 	} catch {}
 
 	// ─── M4-2: Agent 间消息传递 ───
@@ -166,7 +172,7 @@ async function main() {
 	try { rmSync(regPath, { force: true }); } catch {}
 
 	const persistOpts = {
-		cwd: CWD, fluxDir: FLUX_DIR, modelsConfig, telemetry, prefixLayout,
+		cwd: PROJECT_CWD, fluxDir: FLUX_DIR, modelsConfig, telemetry, prefixLayout,
 		pricing: pricingTable ?? undefined, sessionId,
 		sharedSkills: modelsConfig?.sharedSkills ?? [],
 	};
@@ -239,7 +245,7 @@ async function main() {
 		`task status=${defaultBoard.getTask(consumeResult?.task.id ?? "")?.status}`);
 
 	// ─── 清理 ───
-	try { rmSync(TEST_SHARED_DIR, { recursive: true, force: true }); } catch {}
+	try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {}
 
 	// ─── 汇总 ───
 	console.log("\n" + "=".repeat(70));
@@ -253,7 +259,7 @@ async function main() {
 	}
 	console.log(`\n  Total: ${passed + failed} tests, ${passed} passed, ${failed} failed`);
 
-	if (failed > 0) process.exit(1);
+	if (failed > 0) throw new Error(`${failed} M4 integration tests failed`);
 }
 
 // ─── 测试用 SharedBoard 子类 (使用独立目录) ───
@@ -267,4 +273,6 @@ class TestSharedBoard extends SharedBoard {
 	}
 }
 
-main().catch(e => { console.error("Test error:", e); process.exit(1); });
+main()
+	.catch(e => { console.error("Test error:", e); process.exitCode = 1; })
+	.finally(() => { try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {} });

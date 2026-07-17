@@ -134,9 +134,7 @@ export function AgentToolMatrix(): React.ReactElement {
       try {
         const dir = `${project.fluxDir}/agents`;
         const entries = await listAgentFiles(dir);
-        const mdFiles = entries
-          .map((e) => (typeof e === "string" ? e : e?.name ?? ""))
-          .filter((name) => name.endsWith(".md"));
+        const mdFiles = entries.filter((name) => name.endsWith(".md"));
 
         const rows: AgentRow[] = [];
         for (const name of mdFiles) {

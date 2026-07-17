@@ -12,16 +12,23 @@
  * 设计: 文件-based, 不做 IPC, 可审计, git 友好
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import {
+	readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync,
+	unlinkSync, openSync, closeSync, realpathSync, renameSync,
+} from "node:fs";
+import { join, dirname, isAbsolute, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+
+const PROCESS_OWNER_ID = `${process.pid}-${randomUUID()}`;
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
 export interface AgentStatus {
-	status: "idle" | "running" | "blocked" | "done" | "failed";
+	status: "idle" | "running" | "blocked" | "done" | "failed" | "cancelled" | "retry_wait";
 	workingOn?: string;          // task ID
 	waitingFor?: string;         // 实例名
 	output?: string;             // 产出物路径
+	updatedAt?: string;          // 终态 GC 依据；旧记录缺失时保守保留
 }
 
 export interface Blackboard {
@@ -40,11 +47,17 @@ export interface Task {
 	id: string;
 	title: string;
 	assignedTo?: string;         // 实例名
-	status: "pending" | "in_progress" | "done" | "blocked";
+	status: "pending" | "in_progress" | "done" | "blocked" | "failed" | "cancelled" | "retry_wait";
 	dependsOn: string[];         // task IDs
 	createdAt: string;
 	inputHandoff?: string;       // handoff 文件路径
 	acceptanceCriteria: string[];
+	attempts?: number;
+	claimedAt?: string;
+	completedAt?: string;
+	retryAt?: string;
+	error?: string;
+	cancelReason?: string;
 }
 
 export interface Decision {
@@ -96,12 +109,17 @@ export interface GroupMessage {
 export interface AgentInfo {
 	name: string;
 	role: string;                // planner/implementer/reviewer/tester/designer
-	status: "idle" | "running" | "blocked" | "done" | "failed";
+	status: "idle" | "running" | "blocked" | "done" | "failed" | "cancelled";
 	currentTask?: string;
 	model?: string;
 	provider?: string;
 	sessionFile?: string;
 	thinking?: string;
+	/** Stable identity of a concrete long-lived runtime process. */
+	instanceId?: string;
+	/** PID is observational only; instanceId remains the ownership boundary. */
+	runtimePid?: number;
+	heartbeatAt?: string;
 	lastSeen: string;
 	registeredAt: string;
 }
@@ -110,10 +128,12 @@ export interface AgentInfo {
 
 export class SharedBoard {
 	private readonly sharedDir: string;
+	private readonly projectRoot: string;
 
-	constructor(fluxDir: string) {
+	constructor(fluxDir: string, options: { ensureDirs?: boolean } = {}) {
 		this.sharedDir = join(fluxDir, "shared");
-		this.ensureDirs();
+		this.projectRoot = dirname(resolve(fluxDir));
+		if (options.ensureDirs !== false) this.ensureDirs();
 	}
 
 	private ensureDirs(): void {
@@ -121,6 +141,35 @@ export class SharedBoard {
 			const dir = join(this.sharedDir, sub);
 			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		}
+	}
+
+	/** 同目录临时文件 + rename，避免读者观察到半截 JSON。 */
+	private writeJsonAtomic(path: string, value: unknown): void {
+		const tempPath = `${path}.${PROCESS_OWNER_ID}.${randomUUID()}.tmp`;
+		try {
+			writeFileSync(tempPath, JSON.stringify(value, null, 2), "utf-8");
+			renameSync(tempPath, path);
+		} finally {
+			try { if (existsSync(tempPath)) unlinkSync(tempPath); } catch {}
+		}
+	}
+
+	/**
+	 * 注册表/blackboard 的短临界区。竞争时有限重试，超时后 fail-closed，
+	 * 不能继续用旧快照覆盖其他进程刚写入的数据。
+	 */
+	private withMutex<T>(name: string, operation: () => T, timeoutMs = 2_000): T {
+		const deadline = Date.now() + timeoutMs;
+		const waiter = new Int32Array(new SharedArrayBuffer(4));
+		do {
+			const release = this.tryAcquireMutex(name, Math.max(30_000, timeoutMs * 2));
+			if (release) {
+				try { return operation(); }
+				finally { release(); }
+			}
+			Atomics.wait(waiter, 0, 0, 10);
+		} while (Date.now() < deadline);
+		throw new Error(`SharedBoard mutex timeout: ${name}`);
 	}
 
 	// ── Blackboard ──
@@ -141,29 +190,47 @@ export class SharedBoard {
 
 	saveBlackboard(bb: Blackboard): void {
 		bb.updatedAt = new Date().toISOString();
-		writeFileSync(join(this.sharedDir, "blackboard.json"), JSON.stringify(bb, null, 2));
+		this.writeJsonAtomic(join(this.sharedDir, "blackboard.json"), bb);
 	}
 
 	updateAgentStatus(name: string, status: AgentStatus): void {
-		const bb = this.getBlackboard();
-		bb.agentStatuses[name] = status;
-		this.saveBlackboard(bb);
+		this.withMutex("blackboard", () => {
+			const bb = this.getBlackboard();
+			bb.agentStatuses[name] = { ...status, updatedAt: new Date().toISOString() };
+			this.saveBlackboard(bb);
+		});
+	}
+
+	/** 只移除调用方指定且仍处于终态的黑板状态，避免 GC 快照竞争误删活跃 agent。 */
+	pruneTerminalBlackboardStatuses(names: string[], dryRun = false): string[] {
+		const requested = new Set(names);
+		return this.withMutex("blackboard", () => {
+			const bb = this.getBlackboard();
+			const removed = Object.entries(bb.agentStatuses)
+				.filter(([name, status]) => requested.has(name) && ["done", "failed", "cancelled"].includes(status.status))
+				.map(([name]) => name);
+			if (!dryRun && removed.length > 0) {
+				for (const name of removed) delete bb.agentStatuses[name];
+				this.saveBlackboard(bb);
+			}
+			return removed;
+		});
 	}
 
 	setSharedContext(ctx: Partial<Blackboard["sharedContext"]>): void {
-		const bb = this.getBlackboard();
-		bb.sharedContext = { ...bb.sharedContext, ...ctx };
-		this.saveBlackboard(bb);
+		this.withMutex("blackboard", () => {
+			const bb = this.getBlackboard();
+			bb.sharedContext = { ...bb.sharedContext, ...ctx };
+			this.saveBlackboard(bb);
+		});
 	}
 
 	// ── Tasks ──
 
 	createTask(task: Omit<Task, "id" | "createdAt">): Task {
-		const existing = this.listTasks();
-		const num = existing.length + 1;
-		const id = `task-${String(num).padStart(3, "0")}`;
+		const id = `task-${randomUUID()}`;
 		const full: Task = { ...task, id, createdAt: new Date().toISOString() };
-		writeFileSync(join(this.sharedDir, "tasks", `${id}.json`), JSON.stringify(full, null, 2));
+		this.writeJsonAtomic(join(this.sharedDir, "tasks", `${id}.json`), full);
 		return full;
 	}
 
@@ -186,7 +253,7 @@ export class SharedBoard {
 	updateTask(id: string, updates: Partial<Task>): void {
 		const task = this.getTask(id);
 		if (!task) return;
-		writeFileSync(join(this.sharedDir, "tasks", `${id}.json`), JSON.stringify({ ...task, ...updates }, null, 2));
+		this.writeJsonAtomic(join(this.sharedDir, "tasks", `${id}.json`), { ...task, ...updates });
 	}
 
 	// ── Handoffs ──
@@ -213,9 +280,7 @@ export class SharedBoard {
 	// ── M4-2: Messages (agent 间消息传递) ──
 
 	sendMessage(from: string, to: string, type: string, content: string): AgentMessage {
-		const existing = this.listMessages();
-		const num = existing.length + 1;
-		const id = `msg-${String(num).padStart(3, "0")}`;
+		const id = `msg-${randomUUID()}`;
 		const msg: AgentMessage = {
 			id, from, to, type, content,
 			timestamp: new Date().toISOString(),
@@ -248,14 +313,17 @@ export class SharedBoard {
 	markMessageRead(msgId: string): void {
 		const dir = join(this.sharedDir, "messages");
 		if (!existsSync(dir)) return;
-		for (const file of readdirSync(dir)) {
-			if (!file.endsWith(".json") || !file.startsWith(msgId)) continue;
-			const path = join(dir, file);
-			const msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
-			msg.read = true;
-			writeFileSync(path, JSON.stringify(msg, null, 2));
-			break;
-		}
+		this.withMutex("messages", () => {
+			for (const file of readdirSync(dir)) {
+				if (!file.endsWith(".json") || !file.startsWith(msgId)) continue;
+				const path = join(dir, file);
+				if (!existsSync(path)) continue;
+				const msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
+				msg.read = true;
+				this.writeJsonAtomic(path, msg);
+				break;
+			}
+		});
 	}
 
 	/** 列出所有消息 */
@@ -268,40 +336,140 @@ export class SharedBoard {
 			.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
 	}
 
+	/**
+	 * 将已读的点对点消息移出活跃 inbox。广播和未读消息永不由该入口处理。
+	 * 返回实际归档的消息，调用方可写入审计清单。
+	 */
+	archiveReadDirectMessages(messageIds: string[], archiveDir: string, dryRun = false): AgentMessage[] {
+		const requested = new Set(messageIds);
+		const dir = join(this.sharedDir, "messages");
+		if (!existsSync(dir) || requested.size === 0) return [];
+		return this.withMutex("messages", () => {
+			const matched: Array<{ file: string; message: AgentMessage }> = [];
+			for (const file of readdirSync(dir)) {
+				if (!file.endsWith(".json")) continue;
+				const path = join(dir, file);
+				if (!existsSync(path)) continue;
+				let message: AgentMessage;
+				try { message = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage; }
+				catch { continue; }
+				if (requested.has(message.id) && message.read === true && message.to !== "broadcast") {
+					matched.push({ file, message });
+				}
+			}
+			if (!dryRun && matched.length > 0) {
+				mkdirSync(archiveDir, { recursive: true });
+				for (const item of matched) renameSync(join(dir, item.file), join(archiveDir, item.file));
+			}
+			return matched.map(item => item.message);
+		});
+	}
+
 	// ── M4-3: Task Queue (任务队列消费) ──
+
+	private tryAcquireMutex(name: string, ttlMs = 30_000): (() => void) | null {
+		const path = join(this.lockDir(), `.mutex-${name}.lock`);
+		const token = randomUUID();
+		const now = Date.now();
+		const create = (): boolean => {
+			let fd: number | null = null;
+			try {
+				fd = openSync(path, "wx");
+				writeFileSync(fd, JSON.stringify({ token, ownerId: PROCESS_OWNER_ID, timestamp: now }));
+				return true;
+			} catch (error: any) {
+				// Windows may report EPERM/EACCES/EBUSY instead of EEXIST while another
+				// process is creating, closing, or deleting the same wx lock file. Treat
+				// those transient sharing violations as contention and let withMutex retry;
+				// persistent directory permission failures still surface as a bounded
+				// mutex timeout rather than crashing one registry writer mid-update.
+				const transientWindowsContention = process.platform === "win32"
+					&& ["EPERM", "EACCES", "EBUSY"].includes(error?.code);
+				if (error?.code !== "EEXIST" && !transientWindowsContention) throw error;
+				return false;
+			} finally {
+				if (fd !== null) closeSync(fd);
+			}
+		};
+
+		if (!create()) {
+			try {
+				const existing = JSON.parse(readFileSync(path, "utf-8"));
+				if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
+				unlinkSync(path);
+			} catch {
+				// 锁内容未知时 fail-closed，不能覆盖一个可能仍在工作的 owner。
+				return null;
+			}
+			if (!create()) return null;
+		}
+
+		return () => {
+			try {
+				const existing = JSON.parse(readFileSync(path, "utf-8"));
+				if (existing.token === token) unlinkSync(path);
+			} catch { /* 已释放或不再属于当前 owner */ }
+		};
+	}
 
 	/** 认领一个就绪任务 (依赖已完成, 状态为 pending) */
 	claimNextTask(agentName: string): Task | null {
 		const tasks = this.listTasks();
 		for (const task of tasks) {
-			if (task.status !== "pending") continue;
-			// 检查依赖是否都完成
-			const depsDone = task.dependsOn.every(depId => {
-				const dep = this.getTask(depId);
-				return dep?.status === "done";
-			});
-			if (!depsDone) continue;
-			// 认领任务
-			this.updateTask(task.id, { status: "in_progress", assignedTo: agentName });
-			return this.getTask(task.id);
+			const release = this.tryAcquireMutex(`task-claim-${task.id}`);
+			if (!release) continue;
+			try {
+				// 必须在锁内重新读取，避免两个进程基于同一份 listTasks 快照重复认领。
+				const current = this.getTask(task.id);
+				if (!current) continue;
+				const retryReady = current.status === "retry_wait"
+					&& !!current.retryAt && Date.parse(current.retryAt) <= Date.now();
+				if (current.status !== "pending" && !retryReady) continue;
+				const depsDone = current.dependsOn.every(depId => this.getTask(depId)?.status === "done");
+				if (!depsDone) continue;
+				this.updateTask(current.id, {
+					status: "in_progress",
+					assignedTo: agentName,
+					claimedAt: new Date().toISOString(),
+					attempts: (current.attempts ?? 0) + 1,
+					retryAt: undefined,
+					error: undefined,
+				});
+				return this.getTask(current.id);
+			} finally {
+				release();
+			}
 		}
 		return null;
 	}
 
 	/** 完成任务并通知依赖者 (M4-4: 状态同步) */
-	completeTask(taskId: string, result: { output?: string; verdict?: string }): void {
-		this.updateTask(taskId, { status: "done" });
-		const task = this.getTask(taskId);
-		if (!task) return;
+	completeTask(taskId: string, result: { output?: string; verdict?: string }): boolean {
+		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
+		if (!release) return false;
+		let task: Task;
+		try {
+			const current = this.getTask(taskId);
+			if (!current || current.status !== "in_progress") return false;
+			task = current;
+			this.updateTask(taskId, { status: "done", completedAt: new Date().toISOString(), error: undefined });
+		} finally {
+			release();
+		}
 
 		// M4-4: 通知依赖此任务的其他 agent
 		const allTasks = this.listTasks();
 		for (const dependent of allTasks) {
 			if (dependent.dependsOn.includes(taskId) && dependent.status === "blocked") {
-				// 检查是否所有依赖都完成了
-				const allDepsDone = dependent.dependsOn.every(d => this.getTask(d)?.status === "done");
-				if (allDepsDone) {
-					this.updateTask(dependent.id, { status: "pending" }); // 解锁
+				const releaseDependent = this.tryAcquireMutex(`task-claim-${dependent.id}`);
+				if (!releaseDependent) continue;
+				try {
+					const current = this.getTask(dependent.id);
+					if (!current || current.status !== "blocked") continue;
+					const allDepsDone = current.dependsOn.every(d => this.getTask(d)?.status === "done");
+					if (allDepsDone) this.updateTask(current.id, { status: "pending" });
+				} finally {
+					releaseDependent();
 				}
 			}
 		}
@@ -311,14 +479,66 @@ export class SharedBoard {
 			this.sendMessage(task.assignedTo, "broadcast", "task_complete",
 				`Task ${taskId} completed. ${result.verdict ? `Verdict: ${result.verdict}.` : ""} ${result.output ? `Output: ${result.output.slice(0, 200)}` : ""}`);
 		}
+		return true;
+	}
+
+	/** 执行失败是终态，不会把依赖者解锁。 */
+	failTask(taskId: string, error: string): boolean {
+		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
+		if (!release) return false;
+		let task: Task;
+		try {
+			const current = this.getTask(taskId);
+			if (!current || ["done", "cancelled"].includes(current.status)) return false;
+			task = current;
+			this.updateTask(taskId, { status: "failed", error, completedAt: new Date().toISOString() });
+		} finally {
+			release();
+		}
+		if (task.assignedTo) {
+			this.sendMessage(task.assignedTo, "broadcast", "task_failed", `Task ${taskId} failed: ${error.slice(0, 200)}`);
+		}
+		return true;
+	}
+
+	/** 将失败任务安排到未来重试；到 retryAt 前不可认领。 */
+	scheduleTaskRetry(taskId: string, error: string, retryAt: string): boolean {
+		const timestamp = Date.parse(retryAt);
+		if (!Number.isFinite(timestamp)) return false;
+		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
+		if (!release) return false;
+		try {
+			const task = this.getTask(taskId);
+			if (!task || ["done", "cancelled"].includes(task.status)) return false;
+			this.updateTask(taskId, { status: "retry_wait", error, retryAt: new Date(timestamp).toISOString() });
+			return true;
+		} finally {
+			release();
+		}
+	}
+
+	/** 取消是终态；后续迟到的执行结果不能再把任务标记为 done。 */
+	cancelTask(taskId: string, reason = "cancelled by user"): boolean {
+		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
+		if (!release) return false;
+		try {
+			const task = this.getTask(taskId);
+			if (!task || task.status === "done" || task.status === "cancelled") return false;
+			this.updateTask(taskId, {
+				status: "cancelled",
+				cancelReason: reason,
+				completedAt: new Date().toISOString(),
+			});
+			return true;
+		} finally {
+			release();
+		}
 	}
 
 	// ── Decisions ──
 
 	writeDecision(decision: Omit<Decision, "id" | "timestamp">): Decision {
-		const existing = this.listDecisions();
-		const num = existing.length + 1;
-		const id = `decision-${String(num).padStart(3, "0")}`;
+		const id = `decision-${randomUUID()}`;
 		const full: Decision = { ...decision, id, timestamp: new Date().toISOString() };
 		writeFileSync(join(this.sharedDir, "decisions", `${id}.json`), JSON.stringify(full, null, 2));
 		return full;
@@ -338,18 +558,22 @@ export class SharedBoard {
 
 	/** 创建群组 */
 	createGroup(name: string, members: string[], type: GroupType, createdBy: string, description?: string): AgentGroup {
-		const registry = this.listGroups();
-		const num = registry.length + 1;
-		const id = type === "all" ? "all" : `${type}-${String(num).padStart(2, "0")}`;
-		const group: AgentGroup = {
-			id, name, type, members, description,
-			created: new Date().toISOString(),
-			createdBy,
-		};
-		writeFileSync(join(this.sharedDir, "groups", "_registry.json"), JSON.stringify([...registry, group], null, 2));
-		// 创建群组消息目录
-		mkdirSync(join(this.sharedDir, "groups", id), { recursive: true });
-		return group;
+		return this.withMutex("registry-groups", () => {
+			const registry = this.listGroups();
+			if (type === "all") {
+				const existing = registry.find(group => group.id === "all");
+				if (existing) return existing;
+			}
+			const id = type === "all" ? "all" : `${type}-${randomUUID()}`;
+			const group: AgentGroup = {
+				id, name, type, members: [...new Set(members)], description,
+				created: new Date().toISOString(),
+				createdBy,
+			};
+			this.writeJsonAtomic(join(this.sharedDir, "groups", "_registry.json"), [...registry, group]);
+			mkdirSync(join(this.sharedDir, "groups", id), { recursive: true });
+			return group;
+		});
 	}
 
 	/** 列出所有群组 */
@@ -377,10 +601,8 @@ export class SharedBoard {
 		if (!existsSync(groupDir)) mkdirSync(groupDir, { recursive: true });
 
 		const msgFile = join(groupDir, "messages.jsonl");
-		const existing = existsSync(msgFile) ? readFileSync(msgFile, "utf-8").trim().split("\n").filter(Boolean) : [];
-		const num = existing.length + 1;
 		const msg: GroupMessage = {
-			id: `gm-${groupId}-${String(num).padStart(3, "0")}`,
+			id: `gm-${randomUUID()}`,
 			groupId, from, content,
 			timestamp: new Date().toISOString(),
 		};
@@ -409,39 +631,54 @@ export class SharedBoard {
 
 	/** 确保 "all" 大群存在 (包含指定 agents) */
 	ensureAllGroup(agentNames: string[], createdBy = "system"): AgentGroup {
-		const groups = this.listGroups();
-		let allGroup = groups.find(g => g.id === "all");
-		if (!allGroup) {
-			allGroup = this.createGroup("All Agents", [...new Set(agentNames)], "all", createdBy, "全 agent 公开沟通频道");
-		} else {
-			// 合并新成员
+		return this.withMutex("registry-groups", () => {
+			const groups = this.listGroups();
+			let allGroup = groups.find(g => g.id === "all");
+			if (!allGroup) {
+				allGroup = {
+					id: "all",
+					name: "All Agents",
+					type: "all",
+					members: [...new Set(agentNames)],
+					created: new Date().toISOString(),
+					createdBy,
+					description: "全 agent 公开沟通频道",
+				};
+				this.writeJsonAtomic(join(this.sharedDir, "groups", "_registry.json"), [...groups, allGroup]);
+				mkdirSync(join(this.sharedDir, "groups", "all"), { recursive: true });
+				return allGroup;
+			}
 			const merged = [...new Set([...allGroup.members, ...agentNames])];
 			if (merged.length !== allGroup.members.length) {
-				allGroup.members = merged;
-				const updated = groups.map(g => g.id === "all" ? allGroup! : g);
-				writeFileSync(join(this.sharedDir, "groups", "_registry.json"), JSON.stringify(updated, null, 2));
+				allGroup = { ...allGroup, members: merged };
+				this.writeJsonAtomic(
+					join(this.sharedDir, "groups", "_registry.json"),
+					groups.map(group => group.id === "all" ? allGroup! : group),
+				);
 			}
-		}
-		return allGroup;
+			return allGroup;
+		});
 	}
 
 	// ── Agent 注册表 ──
 
 	/** 注册或更新 agent 信息 */
 	registerAgent(info: Omit<AgentInfo, "registeredAt" | "lastSeen"> & { registeredAt?: string; lastSeen?: string }): AgentInfo {
-		const registry = this.listAgents();
-		const existing = registry.find(a => a.name === info.name);
-		const now = new Date().toISOString();
-		const full: AgentInfo = {
-			...existing,
-			...info,
-			registeredAt: existing?.registeredAt ?? info.registeredAt ?? now,
-			lastSeen: now,
-		};
-		const updated = registry.filter(a => a.name !== info.name);
-		updated.push(full);
-		writeFileSync(join(this.sharedDir, "agents", "_registry.json"), JSON.stringify(updated, null, 2));
-		return full;
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const existing = registry.find(a => a.name === info.name);
+			const now = new Date().toISOString();
+			const full: AgentInfo = {
+				...existing,
+				...info,
+				registeredAt: existing?.registeredAt ?? info.registeredAt ?? now,
+				lastSeen: now,
+			};
+			const updated = registry.filter(a => a.name !== info.name);
+			updated.push(full);
+			this.writeJsonAtomic(join(this.sharedDir, "agents", "_registry.json"), updated);
+			return full;
+		});
 	}
 
 	/** 列出所有注册的 agent */
@@ -451,13 +688,71 @@ export class SharedBoard {
 		return JSON.parse(readFileSync(path, "utf-8"));
 	}
 
+	/**
+	 * Register a persistent/RPC runtime with an instance lease. A second live
+	 * process cannot silently take over the same routable agent name.
+	 */
+	registerRuntimeAgent(
+		info: Omit<AgentInfo, "registeredAt" | "lastSeen" | "heartbeatAt"> & { instanceId: string },
+		options: { now?: Date; leaseMs?: number } = {},
+	): AgentInfo {
+		if (!info.instanceId.trim()) throw new Error("runtime instanceId is required");
+		const now = options.now ?? new Date();
+		const leaseMs = Math.max(5_000, options.leaseMs ?? 30_000);
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const existing = registry.find(agent => agent.name === info.name);
+			const active = existing && ["idle", "running", "blocked"].includes(existing.status);
+			const lastSeenMs = existing ? Date.parse(existing.heartbeatAt ?? existing.lastSeen) : 0;
+			const leaseFresh = Number.isFinite(lastSeenMs) && now.getTime() - lastSeenMs < leaseMs;
+			if (active && existing?.instanceId !== info.instanceId && leaseFresh) {
+				throw new Error(`runtime name already leased: ${info.name} by ${existing?.instanceId ?? "legacy-instance"}`);
+			}
+			const timestamp = now.toISOString();
+			const sameInstance = existing?.instanceId === info.instanceId;
+			const full: AgentInfo = {
+				...(sameInstance ? existing : undefined),
+				...info,
+				registeredAt: sameInstance ? existing!.registeredAt : timestamp,
+				lastSeen: timestamp,
+				heartbeatAt: timestamp,
+			};
+			this.writeJsonAtomic(
+				join(this.sharedDir, "agents", "_registry.json"),
+				[...registry.filter(agent => agent.name !== info.name), full],
+			);
+			return full;
+		});
+	}
+
+	/** 只移除调用方指定且仍处于终态的 registry 记录。 */
+	pruneTerminalAgents(names: string[], dryRun = false): AgentInfo[] {
+		const requested = new Set(names);
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const removed = registry.filter(agent => requested.has(agent.name) && ["done", "failed", "cancelled"].includes(agent.status));
+			if (!dryRun && removed.length > 0) {
+				const removedNames = new Set(removed.map(agent => agent.name));
+				this.writeJsonAtomic(
+					join(this.sharedDir, "agents", "_registry.json"),
+					registry.filter(agent => !removedNames.has(agent.name)),
+				);
+			}
+			return removed;
+		});
+	}
+
 	/** 更新 agent 状态/在线信息 */
-	updateAgentPresence(name: string, updates: Partial<AgentInfo>): void {
-		const registry = this.listAgents();
-		const agent = registry.find(a => a.name === name);
-		if (!agent) return;
-		Object.assign(agent, updates, { lastSeen: new Date().toISOString() });
-		writeFileSync(join(this.sharedDir, "agents", "_registry.json"), JSON.stringify(registry, null, 2));
+	updateAgentPresence(name: string, updates: Partial<AgentInfo>, expectedInstanceId?: string): boolean {
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const agent = registry.find(a => a.name === name);
+			if (!agent) return false;
+			if (expectedInstanceId && agent.instanceId !== expectedInstanceId) return false;
+			Object.assign(agent, updates, { lastSeen: new Date().toISOString() });
+			this.writeJsonAtomic(join(this.sharedDir, "agents", "_registry.json"), registry);
+			return true;
+		});
 	}
 
 	/** 获取单个 agent 信息 */
@@ -473,42 +768,79 @@ export class SharedBoard {
 		return dir;
 	}
 
+	private canonicalFilePath(filePath: string): string {
+		const absolute = resolve(isAbsolute(filePath) ? filePath : join(this.projectRoot, filePath));
+		let canonical = absolute;
+		try { canonical = realpathSync.native(absolute); } catch { /* 新文件尚不存在时使用规范化绝对路径 */ }
+		canonical = canonical.replace(/\\/g, "/");
+		return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+	}
+
 	private lockPath(filePath: string): string {
-		// 将路径转为安全的文件名: desktop/src/App.tsx → desktop-src-App.tsx.lock
-		const safe = filePath.replace(/[/:\\]/g, "-").replace(/^-+|-+$/g, "");
-		return join(this.lockDir(), `${safe}.lock`);
+		const canonical = this.canonicalFilePath(filePath);
+		const hash = createHash("sha256").update(canonical).digest("hex");
+		return join(this.lockDir(), `${hash}.lock`);
+	}
+
+	private lockOwner(agentName: string): string {
+		return `${agentName}:${PROCESS_OWNER_ID}`;
 	}
 
 	/** 获取文件锁. 返回 true=成功, false=已被其他 agent 锁定 */
 	acquireFileLock(agentName: string, filePath: string, ttlMs = 300000): boolean {
 		const lp = this.lockPath(filePath);
+		const canonicalPath = this.canonicalFilePath(filePath);
+		const ownerId = this.lockOwner(agentName);
 		const now = Date.now();
-
-		// 检查现有锁
-		if (existsSync(lp)) {
-			try {
-				const lock = JSON.parse(readFileSync(lp, "utf-8"));
-				// 锁未过期 且 不是自己的
-				if (now - lock.timestamp < ttlMs && lock.agent !== agentName) {
-					return false;  // 被其他 agent 锁定
-				}
-			} catch { /* 锁文件损坏, 覆盖 */ }
-		}
-
-		// 创建/更新锁
-		writeFileSync(lp, JSON.stringify({
+		const payload = {
 			agent: agentName,
+			ownerId,
 			filePath,
+			canonicalPath,
 			timestamp: now,
 			expiresAt: now + ttlMs,
-		}, null, 2));
-		return true;
+		};
+
+		const create = (): boolean => {
+			let fd: number | null = null;
+			try {
+				fd = openSync(lp, "wx");
+				writeFileSync(fd, JSON.stringify(payload, null, 2));
+				return true;
+			} catch (error: any) {
+				if (error?.code !== "EEXIST") throw error;
+				return false;
+			} finally {
+				if (fd !== null) closeSync(fd);
+			}
+		};
+
+		if (create()) return true;
+		try {
+			const lock = JSON.parse(readFileSync(lp, "utf-8"));
+			if (lock.ownerId === ownerId) {
+				writeFileSync(lp, JSON.stringify(payload, null, 2));
+				return true;
+			}
+			if (typeof lock.expiresAt !== "number" || now < lock.expiresAt) return false;
+			unlinkSync(lp);
+		} catch {
+			// 损坏或读取竞争时 fail-closed，不能把潜在活锁当成成功。
+			return false;
+		}
+		return create();
 	}
 
-	/** 释放文件锁 */
-	releaseFileLock(filePath: string): void {
+	/** 只释放当前进程 owner 持有的文件锁。 */
+	releaseFileLock(filePath: string, agentName?: string): boolean {
 		const lp = this.lockPath(filePath);
-		try { if (existsSync(lp)) unlinkSync(lp); } catch { /* */ }
+		try {
+			const lock = JSON.parse(readFileSync(lp, "utf-8"));
+			const ownedByProcess = typeof lock.ownerId === "string" && lock.ownerId.endsWith(`:${PROCESS_OWNER_ID}`);
+			if (!ownedByProcess || (agentName && lock.ownerId !== this.lockOwner(agentName))) return false;
+			unlinkSync(lp);
+			return true;
+		} catch { return false; }
 	}
 
 	/** 释放 agent 持有的所有锁 */
@@ -521,10 +853,10 @@ export class SharedBoard {
 				const lp = join(this.lockDir(), f);
 				try {
 					const lock = JSON.parse(readFileSync(lp, "utf-8"));
-					if (lock.agent === agentName) {
+					if (lock.ownerId === this.lockOwner(agentName)) {
 						unlinkSync(lp);
-					released.push(lock.filePath ?? f);
-				}
+						released.push(lock.filePath ?? f);
+					}
 				} catch { /* */ }
 			}
 		} catch { /* */ }
@@ -532,8 +864,8 @@ export class SharedBoard {
 	}
 
 	/** 查看所有活跃锁 */
-	getFileLocks(): { agent: string; filePath: string; timestamp: number; expiresAt: number }[] {
-		const locks: { agent: string; filePath: string; timestamp: number; expiresAt: number }[] = [];
+	getFileLocks(): { agent: string; ownerId: string; filePath: string; canonicalPath: string; timestamp: number; expiresAt: number }[] {
+		const locks: { agent: string; ownerId: string; filePath: string; canonicalPath: string; timestamp: number; expiresAt: number }[] = [];
 		try {
 			const files = readdirSync(this.lockDir());
 			const now = Date.now();
@@ -611,7 +943,7 @@ export function formatBlackboard(bb: Blackboard): string {
 	lines.push("");
 	lines.push("  Agents:");
 	for (const [name, status] of Object.entries(bb.agentStatuses)) {
-		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗" }[status.status] ?? "?";
+		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘", retry_wait: "↻" }[status.status] ?? "?";
 		lines.push(`    ${icon} ${name}: ${status.status}${status.workingOn ? ` (${status.workingOn})` : ""}`);
 	}
 	return lines.join("\n");
@@ -631,7 +963,7 @@ export function formatTaskList(tasks: Task[]): string {
 	if (tasks.length === 0) return "No tasks.";
 	const lines = ["Tasks:", ""];
 	for (const t of tasks) {
-		const icon = { pending: "○", in_progress: "●", done: "✓", blocked: "⚠" }[t.status] ?? "?";
+		const icon = { pending: "○", in_progress: "●", done: "✓", blocked: "⚠", failed: "✗", cancelled: "⊘", retry_wait: "↻" }[t.status] ?? "?";
 		lines.push(`  ${icon} ${t.id}: ${t.title}`);
 		if (t.assignedTo) lines.push(`    assigned: ${t.assignedTo}`);
 		if (t.dependsOn.length > 0) lines.push(`    depends: ${t.dependsOn.join(", ")}`);
@@ -664,7 +996,7 @@ export function formatAgents(agents: AgentInfo[]): string {
 	if (agents.length === 0) return "No registered agents.";
 	const lines = ["Agents:", ""];
 	for (const a of agents) {
-		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗" }[a.status] ?? "?";
+		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘" }[a.status] ?? "?";
 		lines.push(`  ${icon} ${a.name} (${a.role}) — ${a.status}`);
 		if (a.currentTask) lines.push(`    task: ${a.currentTask.slice(0, 80)}`);
 		if (a.model) lines.push(`    model: ${a.model}${a.thinking ? ` [${a.thinking}]` : ""}`);

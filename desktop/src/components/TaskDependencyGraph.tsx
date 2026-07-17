@@ -196,14 +196,24 @@ export function TaskDependencyGraph(): React.ReactElement {
           return;
         }
         const data = JSON.parse(content) as DAGState & { timestamp?: number };
+        const nodeIds = Array.isArray(data.nodeIds) ? data.nodeIds : [];
+        const timestamp = data.timestamp ?? data.startTime ?? 0;
         setDagState({
+          executionId: data.executionId ?? "",
+          status: data.status ?? "unknown",
           description: data.description ?? "",
-          startTime: data.startTime ?? data.timestamp ?? 0,
+          startTime: timestamp,
+          timestamp,
+          nodeIds,
           completed: data.completed ?? [],
           failed: data.failed ?? [],
           totalNodes:
             data.totalNodes ??
-            (data.completed?.length ?? 0) + (data.failed?.length ?? 0),
+            (nodeIds.length > 0 ? nodeIds.length : (data.completed?.length ?? 0) + (data.failed?.length ?? 0)),
+          totalCost: data.totalCost ?? 0,
+          iterationCount: data.iterationCount ?? 0,
+          taskResults: Array.isArray(data.taskResults) ? data.taskResults : [],
+          artifactPaths: data.artifactPaths ?? {},
           nodes: Array.isArray(data.nodes) ? data.nodes : undefined,
         });
       } catch {

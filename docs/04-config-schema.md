@@ -46,16 +46,34 @@ context:
   mask_keep_last_n: 3             # 保留最近 N 个 tool result
 
 budget:
-  max_cost_per_task: 2.00         # 美元,触发 ILP 路由
+  max_cost_per_task: 2.00         # 美元,当前作为任务硬停止边界
   max_iterations: 5               # 迭代轮数上限
   max_wall_clock_seconds: 600
 
 routing:
   static_signals: true            # 启用任务结构信号路由
-  budget_aware: true              # 启用预算 ILP 路由
+  budget_aware: true              # 当前启用成本/次数/墙钟限制；模型/拓扑优化器待接入
   experience_aware: false         # 启用历史经验 RL 路由(Phase 3)
   override_mode: auto             # auto | manual | suggest
+
+communication:
+  rpc_inbox_pump: false           # Persistent/RPC runtime 自动消费 Message V2；目前为实验性 opt-in
+  poll_interval_ms: 1000          # 轮询间隔，100..60000
+  batch_size: 5                   # 单批注入数，1..20
+  heartbeat_interval_ms: 10000    # 实例 heartbeat，1..60 秒
+  runtime_lease_ms: 30000         # 同名实例租约，5..300 秒，建议至少 2× heartbeat
+  redelivery_after_ms: 30000      # 未 ACK delivery 重投等待，5 秒..1 小时
+
+retention:
+  enabled: true                   # session_start 自动清理；也可用 /flux gc
+  terminal_agent_ttl_hours: 168   # 终态 Agent 活跃记录保留 7 天
+  max_terminal_agents: 100        # 每类 registry 最多保留的终态记录
+  read_message_ttl_hours: 72      # 已读点对点消息活跃保留时间
+  max_read_messages: 500          # 活跃目录最多保留的 V1 已读点对点 / 全接收者终态 V2 消息
+  orphan_session_ttl_hours: 168   # 无活跃 Agent 引用的 session 保留时间
 ```
+
+当前实现状态（2026-07-15）：`static_signals` 已接入统一 RoutePlan，关闭后任务分类/复杂度信号不会参与模式决策；`budget_aware` 只代表生产执行器执行任务成本、迭代次数和墙钟硬边界，并会在 RoutePlan 中显示为 `limits_only`。预算约束下的模型/拓扑联合优化（设计中的 ILP/近似优化器）尚未接入生产入口，不能把该开关理解为已实现最优成本路由。
 
 ## 完整 Schema 示例
 
@@ -86,7 +104,29 @@ routing:
   budget_aware: true
   experience_aware: false
   override_mode: suggest   # 路由器建议,用户确认
+
+communication:
+  rpc_inbox_pump: false
+  poll_interval_ms: 1000
+  batch_size: 5
+  heartbeat_interval_ms: 10000
+  runtime_lease_ms: 30000
+  redelivery_after_ms: 30000
+
+retention:
+  enabled: true
+  terminal_agent_ttl_hours: 168
+  max_terminal_agents: 100
+  read_message_ttl_hours: 72
+  max_read_messages: 500
+  orphan_session_ttl_hours: 168
 ```
+
+生命周期清理只处理 `done`、`failed`、`cancelled` 等终态。未读消息、广播消息、群组历史、运行中/阻塞/等待重试的 Agent 和被活跃 Agent 引用的 session 不会自动清理。被处理的消息、session 与终态元数据会写入 `.agentflux/archive/lifecycle/<run-id>/` 的审计 manifest；`/flux gc dry-run` 不创建目录、不修改文件。
+
+`communication.rpc_inbox_pump` 默认关闭，避免普通 TUI 会话在未声明稳定身份时意外消费信箱。Desktop/Persistent RPC runtime 可通过配置开启，或由受控启动器设置 `AGENTFLUX_RPC_INBOX_PUMP=1`、`AGENTFLUX_AGENT_NAME` 与 `AGENTFLUX_RUNTIME_INSTANCE_ID`。首轮 poll 会等待 `session_start` 返回，避免初始化重入。空闲消息转换为 `prompt`；忙碌时 high/critical 或 `steer` 消息转换为 `steer`，普通消息转换为 `follow_up`。Delivery 只有在对应注入轮次产生成功 assistant 结果后才 ACK；pi 会在同一 lifecycle 内 drain follow-up，因此 ACK 绑定下一次 assistant 结果而不等待第二个 `agent_start`。
+
+每个 runtime 用 `instanceId` 注册并续 heartbeat；租约有效时，同名第二实例 fail-closed，所有 presence 更新也按实例 fencing，避免旧进程覆盖接管者。崩溃后 Delivery 保持 delivered，待 runtime lease 和 redelivery lease 到期后可由同名新实例重投；默认均为 30 秒。Abort 在 SharedBoard 中记录为 `cancelled`，graceful shutdown 最终记录为 `done`。
 
 ## 配置优先级
 

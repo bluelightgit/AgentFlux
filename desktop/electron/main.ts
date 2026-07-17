@@ -1,6 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { agentRuntime, AgentRuntime } from './agent-runtime';
+import { readCapabilityPolicyBundle } from './capability-policy-reader';
+import { validateStartOptions } from './runtime-start-contract';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -43,14 +46,14 @@ ipcMain.handle('write-file', (_event, filePath: string, content: string) => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
     return true;
-  } catch (err: any) { throw new Error(`write-file failed: ${err.message}`); }
+  } catch { return false; }
 });
 
 ipcMain.handle('delete-file', (_event, filePath: string) => {
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     return true;
-  } catch (err: any) { throw new Error(`delete-file failed: ${err.message}`); }
+  } catch { return false; }
 });
 
 ipcMain.handle('list-directory', (_event, dirPath: string) => {
@@ -117,6 +120,112 @@ ipcMain.handle('show-folder-dialog', async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
+// ─── Agent Runtime IPC 处理器 ─────────────────────────────────────────────
+
+// ── Snapshot 推送 ──
+// EVENT_RECORD_UPDATE → push {kind:'snapshot', snapshot} 到渲染进程
+agentRuntime.on(AgentRuntime.EVENT_RECORD_UPDATE, (snapshot: unknown) => {
+  const wins = BrowserWindow.getAllWindows();
+  for (const win of wins) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('agent-runtime-event', { kind: 'snapshot', snapshot });
+    }
+  }
+});
+
+// ── 真实 RPC 事件推送 ──
+// EVENT_RUNTIME_EVENT → push {kind:'event', runId, event} 到渲染进程
+agentRuntime.on(AgentRuntime.EVENT_RUNTIME_EVENT, (payload: { runId: string; event: unknown }) => {
+  const wins = BrowserWindow.getAllWindows();
+  for (const win of wins) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('agent-runtime-event', {
+        kind: 'event',
+        runId: payload.runId,
+        event: payload.event,
+      });
+    }
+  }
+});
+
+agentRuntime.on(AgentRuntime.EVENT_RECORD_REMOVED, (runId: unknown) => {
+  const wins = BrowserWindow.getAllWindows();
+  for (const win of wins) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('agent-runtime-event', { kind: 'record_removed', runId });
+    }
+  }
+});
+
+ipcMain.handle('agent-runtime:start', async (_event, rawOptions: unknown) => {
+  const options = validateStartOptions(rawOptions);
+  const runId = await agentRuntime.start(options);
+  await agentRuntime.waitUntilReady(runId);
+  const snapshot = agentRuntime.list().find((item) => item.runId === runId);
+  if (!snapshot) throw new Error('Runtime 启动后未生成快照');
+  return { runId, taskId: snapshot.taskId, executionId: snapshot.executionId };
+});
+
+ipcMain.handle('agent-runtime:retry', async (_event, runId: unknown) => {
+  if (typeof runId !== 'string' || !/^[a-zA-Z0-9:-]{1,160}$/.test(runId)) throw new Error('Invalid retry runId');
+  const nextRunId = await agentRuntime.retry(runId);
+  await agentRuntime.waitUntilReady(nextRunId);
+  const snapshot = agentRuntime.list().find((item) => item.runId === nextRunId);
+  if (!snapshot) throw new Error('Retry did not create a snapshot');
+  return { runId: nextRunId, taskId: snapshot.taskId, executionId: snapshot.executionId };
+});
+
+ipcMain.handle('agent-runtime:prompt', async (_event, runId: string, prompt: string) => {
+  await agentRuntime.prompt(runId, prompt);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:steer', async (_event, runId: string, prompt: string) => {
+  await agentRuntime.steer(runId, prompt);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:followUp', async (_event, runId: string, prompt: string) => {
+  await agentRuntime.followUp(runId, prompt);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:abort', async (_event, runId: string) => {
+  await agentRuntime.abort(runId);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:stop', async (_event, runId: string) => {
+  await agentRuntime.stop(runId);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:extensionUiResponse', async (
+  _event,
+  runId: string,
+  response: { id: string; value?: string; confirmed?: boolean; cancelled?: true },
+) => {
+  await agentRuntime.respondToExtensionUI(runId, response as Parameters<AgentRuntime['respondToExtensionUI']>[1]);
+  return { ok: true };
+});
+
+ipcMain.handle('agent-runtime:list', async () => {
+  return agentRuntime.list();
+});
+
+ipcMain.handle('agent-runtime:diagnostics', async () => {
+  return agentRuntime.getDiagnostics();
+});
+
+ipcMain.handle('agent-runtime:capabilityPolicies', async (_event, projectRoot: string) => {
+  return readCapabilityPolicyBundle(projectRoot);
+});
+
+ipcMain.handle('agent-runtime:shutdownAll', async () => {
+  await agentRuntime.shutdownAll();
+  return { ok: true };
+});
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1200,
@@ -152,6 +261,7 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  agentRuntime.configurePersistence(path.join(app.getPath('userData'), 'runtime-history.v1.json'));
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -160,4 +270,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+// ─── 应用退出时清理 agent runtime ───────────────────────────────────────────
+app.on('will-quit', async () => {
+  await agentRuntime.shutdownAll();
+});
+
+app.on('before-quit', async () => {
+  await agentRuntime.shutdownAll();
 });

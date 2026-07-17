@@ -68,10 +68,58 @@ import { useDashboardStore } from "../../src/store/dashboard-store";
 import { SummaryCards } from "../../src/components/SummaryCards";
 import { RouteMap } from "../../src/components/RouteMap";
 import { CacheChart } from "../../src/components/CacheChart";
+import { AppShell } from "../../src/components/AppShell";
+import { RealTimeCostCounter } from "../../src/components/RealTimeCostCounter";
+import { AgentAffinityPanel } from "../../src/components/AgentAffinityPanel";
+import { PreferenceRadar } from "../../src/components/PreferenceRadar";
+
+// Mock hooks used by AppShell / TopBar / PreferenceRadar
+vi.mock("../../src/hooks/useKeyboardNav", () => ({
+  useKeyboardNav: vi.fn(),
+}));
+vi.mock("../../src/hooks/useCommandPalette", () => ({
+  useCommandPalette: vi.fn(() => ({ open: false, close: vi.fn(), toggle: vi.fn() })),
+}));
+vi.mock("../../src/components/ThemeProvider", () => ({
+  useTheme: vi.fn(() => ({ theme: "light", toggleTheme: vi.fn() })),
+}));
+vi.mock("../../src/components/TitleBar", () => ({
+  __esModule: true,
+  default: () => null,
+}));
+vi.mock("../../src/components/GlobalSearchBar", () => ({
+  GlobalSearchBar: () => null,
+}));
+vi.mock("../../src/components/CommandPalette", () => ({
+  CommandPalette: () => null,
+}));
+vi.mock("../../src/lib/format", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    // Use real implementations for formatTime, formatNum, formatTokens, formatBytes, formatTs, formatPct
+    // Only override formatCost for deterministic test output
+    formatCost: vi.fn((c: number) => `$${c.toFixed(2)}`),
+  };
+});
 
 function setStoreState(partial: any) {
   useDashboardStore.setState(partial);
 }
+
+// Reset store between tests
+beforeEach(() => {
+  useDashboardStore.setState({
+    currentPage: "overview",
+    project: null,
+    workspaces: [],
+    activeWorkspace: null,
+    events: [],
+    autoRefresh: true,
+    loading: false,
+    error: null,
+  });
+});
 
 describe("IT-5: RouteMap renders with routing data", () => {
   beforeEach(() => setStoreState({
@@ -135,5 +183,144 @@ describe("IT-7: SummaryCards renders metric cards", () => {
     setStoreState({ summary: null });
     const { container } = render(React.createElement(SummaryCards));
     expect(container.firstChild).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IT-8: AppShell — Live indicator states
+// ---------------------------------------------------------------------------
+describe("IT-8: AppShell renders with correct Live indicator states", () => {
+  it("shows amber dot + 'Local data' when events exist", () => {
+    setStoreState({
+      project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" },
+      events: [{ type: "test" }],
+    });
+    render(React.createElement(AppShell, null, React.createElement("div", null, "child")));
+    expect(screen.getByText("Local data")).toBeInTheDocument();
+    expect(screen.getByLabelText("Local data available")).toBeInTheDocument();
+  });
+
+  it("shows amber dot + 'Local data' when isLive is false but events exist (backend unavailable scenario)", () => {
+    setStoreState({
+      project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" },
+      events: [{ type: "test" }],
+    });
+    render(React.createElement(AppShell, null, React.createElement("div", null, "child")));
+    expect(screen.getByText("Local data")).toBeInTheDocument();
+  });
+
+  it("shows grey dot + 'Offline snapshot' when no project is loaded", () => {
+    setStoreState({
+      project: null,
+      events: [],
+    });
+    render(React.createElement(AppShell, null, React.createElement("div", null, "child")));
+    expect(screen.getByText("Offline snapshot")).toBeInTheDocument();
+    expect(screen.getByLabelText("No live data source")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IT-9: RealTimeCostCounter — data source status
+// ---------------------------------------------------------------------------
+describe("IT-9: RealTimeCostCounter status indicators", () => {
+  beforeEach(() => {
+    (window as any).api = {
+      ipcRenderer: { invoke: vi.fn(async () => "[]") } as any,
+      readFile: vi.fn(async () => "[]"),
+    };
+  });
+
+  it("shows loading state initially", () => {
+    setStoreState({ project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" } });
+    render(React.createElement(RealTimeCostCounter));
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("Tracked subagent cost")).toBeInTheDocument();
+  });
+
+  it("shows cost when events are parsed successfully", async () => {
+    const { parseEventsFileAsync } = await import("../../src/lib/events-parser");
+    (parseEventsFileAsync as any).mockResolvedValue([
+      { type: "subagent.run", costUsd: 1.5 },
+      { type: "subagent.run", costUsd: 2.3 },
+    ]);
+    setStoreState({ project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" } });
+    render(React.createElement(RealTimeCostCounter));
+    // After the async load completes, the component should show cost
+    await vi.waitFor(() => {
+      expect(screen.getByText("$3.80")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Tracked subagent cost")).toBeInTheDocument();
+  });
+
+  it("shows muted $0 (0 runs) when parseEventsFileAsync throws (file missing)", async () => {
+    const { parseEventsFileAsync } = await import("../../src/lib/events-parser");
+    (parseEventsFileAsync as any).mockRejectedValue(new Error("File not found"));
+    setStoreState({ project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" } });
+    render(React.createElement(RealTimeCostCounter));
+    await vi.waitFor(() => {
+      expect(screen.getByText("$0.00")).toBeInTheDocument();
+      expect(screen.getByText("(0 runs)")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Tracked subagent cost")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IT-10: AgentAffinityPanel — static sample data badge
+// ---------------------------------------------------------------------------
+describe("IT-10: AgentAffinityPanel static data badge", () => {
+  it("renders the 🧪 Sample Data badge", () => {
+    render(React.createElement(AgentAffinityPanel));
+    expect(screen.getByText("🧪 Sample Data")).toBeInTheDocument();
+  });
+
+  it("renders all 5 roles and 5 models", () => {
+    render(React.createElement(AgentAffinityPanel));
+    ["planner", "implementer", "reviewer", "tester", "designer"].forEach((role) => {
+      expect(screen.getByText(role)).toBeInTheDocument();
+    });
+    ["gpt-5.5", "oa/glm-5.2", "deepseek-v4-flash", "deepseek-v4-pro", "qwen3.7-max"].forEach((model) => {
+      const titles = screen.getAllByTitle(model);
+      expect(titles.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it("indicates static example data in the legend", () => {
+    render(React.createElement(AgentAffinityPanel));
+    expect(screen.getByText(/static example data/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IT-11: PreferenceRadar — IPC connection indicator
+// ---------------------------------------------------------------------------
+describe("IT-11: PreferenceRadar IPC connection indicator", () => {
+  it("shows '✅ Connected' when IPC is available and project is configured", () => {
+    (window as any).api = { ipcRenderer: { invoke: vi.fn(async () => "{}") } as any };
+    setStoreState({
+      project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" },
+    });
+    render(React.createElement(PreferenceRadar));
+    expect(screen.getByText("✅ Connected")).toBeInTheDocument();
+    expect(screen.getByText("Simulation estimate")).toBeInTheDocument();
+  });
+
+  it("shows '⚠️ Read-Only' when IPC is unavailable", () => {
+    (window as any).api = undefined;
+    setStoreState({
+      project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" },
+    });
+    render(React.createElement(PreferenceRadar));
+    expect(screen.getByText("⚠️ Read-Only")).toBeInTheDocument();
+    expect(screen.getByText("Simulation estimate")).toBeInTheDocument();
+  });
+
+  it("shows '🚫 No Project' when project is null", () => {
+    (window as any).api = { ipcRenderer: { invoke: vi.fn() } as any };
+    setStoreState({ project: null });
+    render(React.createElement(PreferenceRadar));
+    expect(screen.getByText("🚫 No Project")).toBeInTheDocument();
+    expect(screen.getByText("Simulation estimate")).toBeInTheDocument();
   });
 });

@@ -78,7 +78,7 @@ export async function showFluxMenu(
 	}));
 
 	// Show main menu, get selected item id
-	const selected = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: () => void) => {
+	const selected = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("AgentFlux")), 0, 0));
@@ -193,7 +193,7 @@ async function showModeMenu(
 		description: p.description,
 	}));
 
-	const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: () => void) => {
+	const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("Select Mode Preset")), 0, 0));
@@ -354,7 +354,7 @@ async function showTeamMenu(
 		description: o.description,
 	}));
 
-	const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: () => void) => {
+	const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("Team Operations")), 0, 0));

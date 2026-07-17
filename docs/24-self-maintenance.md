@@ -60,16 +60,16 @@ Recent Issues (last 20 events):
 ```
 AgentFlux Health Check
 ═══════════════════════════════════════════════════
-[1/8] Config loading...           ✅ OK
-[2/8] Pricing table...            ✅ OK (341 entries, remote)
-[3/8] models.json parse...        ✅ OK (2 models)
-[4/8] Role definitions...         ✅ OK (4 roles)
-[5/8] Telemetry writer...         ✅ OK (writable)
-[6/8] SharedBoard dirs...         ✅ OK (all dirs exist)
-[7/8] ExperienceStore...          ⚠️ empty (cold start, not an error)
-[8/8] Subagent spawn...           ✅ OK (pi CLI found)
-
-Result: 7/8 OK, 1 warning
+[1/10] Config...                  ✅ agentflux.json parsed
+[2/10] models.json...             ✅ models/roles parsed
+[3/10] Pricing...                 ✅ cache current
+[4/10] Telemetry...               ✅ writable
+[5/10] SharedBoard...             ✅ all dirs exist
+[6/10] ExperienceStore...         ⚠️ empty (cold start, not an error)
+[7/10] Runtime...                 ✅ runtime files readable
+[8/10] Git...                     ⚠️ working tree dirty
+[9/10] Models...                  ✅ telemetry models known
+[10/10] Retention...              ✅ auto GC enabled; terminal=3, read-direct=2, v2-terminal=4, v2-outstanding=1, v2-bytes=8192, active-sessions=1, archives=4
 ```
 
 ### 2.3 `/flux restart` — 自重启 (重新初始化)
@@ -146,9 +146,11 @@ To upgrade now:
 
 ### 3.2 entry.ts 集成
 
-在 `/flux` 命令中新增 4 个子命令:
+在 `/flux` 命令中提供以下自维护子命令:
 - `status` → getFullStatus()
 - `health` → checkHealth()
+- `gc dry-run` → 预览终态 registry、V1 已读点对点消息、全接收者终态的 V2 消息和孤儿 session 的归档
+- `gc` → 执行安全 GC；有活跃子进程时拒绝执行
 - `restart` → performRestart()
 - `upgrade` → checkUpgrade()
 

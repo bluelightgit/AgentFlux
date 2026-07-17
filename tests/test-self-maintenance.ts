@@ -4,10 +4,18 @@
 
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "../src/extension/health-monitor";
 import { join } from "node:path";
-import { writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, rmSync, existsSync, copyFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const CWD = process.cwd();
-const FLUX_DIR = join(CWD, ".agentflux");
+const SOURCE_FLUX_DIR = join(CWD, ".agentflux");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "agentflux-self-maintenance-"));
+const FLUX_DIR = join(TEST_ROOT, ".agentflux");
+mkdirSync(FLUX_DIR, { recursive: true });
+for (const name of ["agentflux.json", "models.json", "pricing-cache.json"]) {
+	const source = join(SOURCE_FLUX_DIR, name);
+	if (existsSync(source)) copyFileSync(source, join(FLUX_DIR, name));
+}
 const EVENTS_PATH = join(FLUX_DIR, "events.jsonl");
 
 interface TestResult { name: string; passed: boolean; detail: string; }
@@ -59,8 +67,8 @@ async function main() {
 	const health = checkHealth(CWD, FLUX_DIR);
 	console.log(`  ${formatHealthReport(health)}`.split("\n").join("\n  "));
 
-	record("checkHealth: returns 9 checks",
-		health.checks.length === 9,
+	record("checkHealth: returns 10 checks",
+		health.checks.length === 10,
 		`checks=${health.checks.length}`);
 	record("checkHealth: Config check passes",
 		health.checks[0].status === "ok",
@@ -77,12 +85,15 @@ async function main() {
 	record("checkHealth: Models check returns status",
 		health.checks[8].status === "ok" || health.checks[8].status === "warn",
 		`status=${health.checks[8].status}, detail=${health.checks[8].detail}`);
+	record("checkHealth: Retention check is observable",
+		health.checks.some(check => check.name === "Retention" && check.detail.includes("terminal=")),
+		health.checks.find(check => check.name === "Retention")?.detail ?? "missing");
 	record("checkHealth: okCount + warnCount + errorCount = total",
-		health.okCount + health.warnCount + health.errorCount === 9,
+		health.okCount + health.warnCount + health.errorCount === 10,
 		`ok=${health.okCount}, warn=${health.warnCount}, error=${health.errorCount}`);
 
 	// Test with bad config
-	const badFluxDir = join(CWD, ".agentflux-test-bad");
+	const badFluxDir = join(TEST_ROOT, ".agentflux-test-bad");
 	try { rmSync(badFluxDir, { recursive: true }); } catch {}
 	mkdirSync(badFluxDir, { recursive: true });
 	writeFileSync(join(badFluxDir, "agentflux.json"), "{ invalid json }");
@@ -111,7 +122,7 @@ async function main() {
 		`issues=${realIssues.length}`);
 
 	// Test with synthetic error data
-	const testEventsPath = join(CWD, ".agentflux", "test-events-tmp.jsonl");
+	const testEventsPath = join(FLUX_DIR, "test-events-tmp.jsonl");
 	const syntheticEvents: any[] = [];
 
 	// Add 5 subagent failures
@@ -184,7 +195,7 @@ async function main() {
 	// ═══════════════════════════════════════════
 	console.log("\n🔄 4. Upgrade Check\n");
 
-	const upgrade = checkUpgrade(CWD);
+	const upgrade = checkUpgrade(CWD, { fetchRemote: false });
 	console.log(`  ${formatUpgradeInfo(upgrade)}`.split("\n").join("\n  "));
 
 	record("checkUpgrade: returns current commit",
@@ -304,10 +315,12 @@ async function main() {
 		for (const r of results.filter(r => !r.passed)) {
 			console.log(`    ${r.name}`);
 		}
-		process.exit(1);
+		process.exitCode = 1;
 	} else {
 		console.log("\n  ✅ ALL TESTS PASSED");
 	}
 }
 
-main().catch(e => { console.error("Test error:", e); process.exit(1); });
+main()
+	.catch(e => { console.error("Test error:", e); process.exitCode = 1; })
+	.finally(() => { try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {} });

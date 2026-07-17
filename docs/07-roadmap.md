@@ -4,14 +4,18 @@
 
 ## 阶段总览
 
+> 本文后续阶段清单保留设计与历史背景；当前实现事实以 [26-implementation-status](26-implementation-status.md) 为唯一状态源。旧的“✅ 完成”不自动等价于已经接入生产入口并通过离线/在线验证。
+
 | 阶段 | 周期 | 内容 | 预期收益 |
 |---|---|---|---|
 | Phase 0 | ✅ 完成 | 文档、架构、UI 方向 | 立论成立 |
 | Phase 1 | ✅ 完成 | M1/M2 + 前缀布局 + mask + cache 监控 + 价格层 + TUI 菜单 | 成本可观测, prefix layout subagent 省 37.8% |
-| Phase 2 | ✅ 完成 | M3 fork + RGAO 复杂度路由 + 模型能力 + 多 agent 基础 | 多模式路由 + team 管道 |
-| **Phase 2.5** | **进行中** | **M2-M5 执行能力补全** | **每种模式真正能发挥设计价值** |
-| Phase 3 | 规划中 | M6 异构 + 任务级路由 + 反馈闭环 + step-level routing | 护城河 |
-| Phase 4 | 规划中 | Web dashboard / Electron shell | 产品化 |
+| Phase 2 | implemented / 部分 wired | M3 fork + 静态路由 + 多 agent 基础 | M3/M4 仍 experimental |
+| **Phase 2.5** | **M1/M2/M5 wired，验证继续** | **执行闭环、质量门、取消、锁、checkpoint** | **生产纵向链路** |
+| Phase 3 | implemented / 部分 wired | 任务级路由、经验导入、step routing；M6 experimental | 先 shadow evaluation，再开放 auto |
+| Phase 4 | Desktop implemented / 部分 verified | Electron dashboard/control shell | 真实数据契约仍需收敛 |
+
+> 2026-07-16 优先级说明：近期主线是完成 M1/M2/M5 主体执行能力与 task-driven Desktop Control Room。模式由用户或主 Agent 显式选择；自动路由校准、模型/拓扑优化和 OS sandbox 后置，不阻塞工作台交付。
 
 > **战略调整 (2026-07)**: 先把 M2-M5 各种 agent 模式的执行能力做扎实, 再做智能路由。
 > 理由: 路由器选了模式但模式本身执行能力不够 = 选了也白选。详见 [docs/22](22-mode-capability-roadmap.md)。

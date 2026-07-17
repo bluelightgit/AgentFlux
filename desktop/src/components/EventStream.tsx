@@ -6,12 +6,6 @@ import React, { useState, useMemo } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 import { formatTokens, formatCost, formatHitRate } from "../lib/agent-status-enhanced";
 
-const STATUS_ICON: Record<number, string> = {
-  0: "OK",
-  124: "TIMEOUT",
-  [-1]: "ERROR",
-};
-
 export const EventStream: React.FC = () => {
   const agentTelemetry = useDashboardStore((s) => s.agentStatus?.agentTelemetry);
   const [filter, setFilter] = useState<string>("");

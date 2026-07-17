@@ -124,7 +124,11 @@ export function AgentOutputViewer(): React.ReactElement {
         </h3>
       </div>
 
-      {agents.length === 0 ? (
+      {loading ? (
+        <div className="flex h-24 items-center justify-center text-sm text-slate-400 dark:text-slate-500">
+          Loading agent sessions...
+        </div>
+      ) : agents.length === 0 ? (
         <EmptyState icon="Terminal" message="No agent sessions yet" />
       ) : (
         <div className="space-y-3">

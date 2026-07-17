@@ -243,6 +243,7 @@ export const AgentsPage: React.FC = () => {
     { key: "turns", label: "Avg Turns", width: "100px" },
     { key: "failures", label: "Failures", width: "90px" },
     { key: "retries", label: "Retries", width: "90px" },
+    { key: "communication", label: "Comm gate", width: "120px" },
     { key: "models", label: "Models" },
   ];
 
@@ -257,6 +258,13 @@ export const AgentsPage: React.FC = () => {
     turns: t.avgTurns.toFixed(1),
     failures: t.failures,
     retries: t.retries,
+    communication: t.communicationFailed > 0 ? (
+      <Badge color="red">{t.communicationFailed} failed</Badge>
+    ) : t.communicationPassed > 0 ? (
+      <Badge color="green">{t.communicationPassed} passed</Badge>
+    ) : (
+      <span className="text-xs text-slate-400">not required</span>
+    ),
     models: (
       <span className="text-xs text-slate-500 dark:text-slate-400">{t.models.join(", ") || "-"}</span>
     ),
@@ -280,14 +288,14 @@ export const AgentsPage: React.FC = () => {
       );
     }
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
         {definitions.map((d) => (
           <div
             key={d.name}
-            className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-5 flex flex-col gap-2"
+            className="af-panel flex flex-col gap-2 p-4"
           >
             <div className="flex items-center gap-2">
-              <Icon name="Bot" size={18} className="text-blue-500" />
+              <Icon name="Bot" size={17} className="text-[var(--af-operate)]" />
               <span className="font-bold text-slate-800 dark:text-slate-200">{d.name}</span>
             </div>
             <p className="text-sm text-slate-500 dark:text-slate-400">{d.description || "No description"}</p>
@@ -305,13 +313,56 @@ export const AgentsPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4" data-testid="agents-control-page">
       <AgentRegistryPanel />
 
+      <section className="overflow-hidden rounded-sm border border-[var(--af-line)] bg-[var(--af-sidebar)] text-slate-100">
+        <div className="flex items-center justify-between border-b border-slate-700 px-4 py-3">
+          <div>
+            <h2 className="font-mono text-sm font-semibold uppercase tracking-wider">Message / Delivery V2</h2>
+            <p className="mt-0.5 text-xs text-slate-400">Envelope commit markers and per-recipient acknowledgement state</p>
+          </div>
+          <Badge color="blue">{agentStatus?.messagesV2?.length ?? 0} recent</Badge>
+        </div>
+        {(agentStatus?.messagesV2?.length ?? 0) === 0 ? (
+          <div className="px-4 py-6 text-sm text-slate-400">No V2 envelopes observed.</div>
+        ) : (
+          <div className="max-h-80 divide-y divide-slate-800 overflow-auto">
+            {agentStatus?.messagesV2?.map((message) => (
+              <div key={message.id} className="grid gap-2 px-4 py-3 text-xs lg:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2 font-mono">
+                    <span className="text-cyan-300">{message.from}</span>
+                    <span className="text-slate-500">→</span>
+                    <span>{message.recipients.join(", ") || "no recipients"}</span>
+                    <span className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">{message.type}</span>
+                  </div>
+                  <p className="mt-1 truncate text-slate-300" title={message.content}>{message.content || "(empty)"}</p>
+                  <div className="mt-1 font-mono text-[10px] text-slate-500">
+                    {message.id}{message.correlationId ? ` · correlation ${message.correlationId}` : ""}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-start justify-end gap-1.5">
+                  {message.deliveries.map((delivery) => (
+                    <span
+                      key={`${message.id}-${delivery.recipient}`}
+                      className={`rounded px-2 py-1 font-mono ${delivery.status === "acknowledged" ? "bg-emerald-950 text-emerald-300" : delivery.status === "rejected" || delivery.status === "expired" ? "bg-red-950 text-red-300" : delivery.status === "delivered" ? "bg-blue-950 text-blue-300" : "bg-amber-950 text-amber-300"}`}
+                    >
+                      {delivery.recipient}: {delivery.status} · {delivery.attempts}x
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <header className="flex items-start justify-between border-b border-[var(--af-line)] pb-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-200">Agents</h1>
+          <p className="af-kicker">Operate / Registry</p>
+          <h1 className="mt-1 text-xl font-semibold text-[var(--af-ink)]">Agent operations</h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             Agent definitions, live status, and per-agent telemetry.
           </p>
@@ -319,25 +370,25 @@ export const AgentsPage: React.FC = () => {
         <button
           type="button"
           onClick={handleRefresh}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700/40 text-sm text-slate-600 dark:text-slate-400"
+          className="af-filter-chip"
           title="Refresh agent status"
         >
           <Icon name="RefreshCw" size={16} className="text-slate-500 dark:text-slate-400" />
           <span>Refresh</span>
         </button>
-      </div>
+      </header>
 
       {/* Section 1: Agent Definitions */}
-      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
+      <section className="af-panel">
+        <h2 className="af-panel-title mb-4">
           Agent Definitions
         </h2>
         {renderDefinitions()}
       </section>
 
       {/* Section 2: Agent Status */}
-      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
+      <section className="af-panel">
+        <h2 className="af-panel-title mb-4">
           Agent Status
         </h2>
         {statusRows.length === 0 ? (
@@ -353,8 +404,8 @@ export const AgentsPage: React.FC = () => {
       </section>
 
       {/* Section 3: Agent Telemetry */}
-      <section className="bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6">
-        <h2 className="text-lg font-semibold text-slate-700 dark:text-slate-200 mb-4">
+      <section className="af-panel">
+        <h2 className="af-panel-title mb-4">
           Agent Telemetry
         </h2>
         {telemetryRows.length === 0 ? (

@@ -16,7 +16,6 @@ import { Icon } from "./ui";
 import { formatCost } from "../lib/format";
 import {
   parseEventsFileAsync,
-  type SubagentRunEvent,
   type AnyEvent,
 } from "../lib/events-parser";
 import { useDashboardStore } from "../store/dashboard-store";
@@ -29,7 +28,6 @@ const POLL_INTERVAL_MS = 5_000;
  * Only `subagent.run` events are counted (see module docstring).
  */
 function computeCost(events: AnyEvent[]): {
-  totalCost: number;
   subagentCost: number;
   runCount: number;
 } {
@@ -43,17 +41,12 @@ function computeCost(events: AnyEvent[]): {
     }
   }
 
-  // For now total cost == subagent cost. Main-agent cache.sample costs
-  // are intentionally excluded (unreliable v2 delta format).
-  const totalCost = subagentCost;
-
-  return { totalCost, subagentCost, runCount };
+  return { subagentCost, runCount };
 }
 
 export function RealTimeCostCounter(): React.ReactElement {
   const fluxDir = useDashboardStore((s) => s.project?.fluxDir ?? "");
 
-  const [totalCost, setTotalCost] = useState<number>(0);
   const [subagentCost, setSubagentCost] = useState<number>(0);
   const [runCount, setRunCount] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(true);
@@ -65,7 +58,6 @@ export function RealTimeCostCounter(): React.ReactElement {
     const load = async () => {
       if (!fluxDir) {
         if (!cancelled) {
-          setTotalCost(0);
           setSubagentCost(0);
           setRunCount(0);
           setLoading(false);
@@ -77,16 +69,14 @@ export function RealTimeCostCounter(): React.ReactElement {
           `${fluxDir}/events.jsonl`,
         );
         if (cancelled) return;
-        const { totalCost: total, subagentCost: sub, runCount: runs } =
+        const { subagentCost: sub, runCount: runs } =
           computeCost(events);
-        setTotalCost(total);
         setSubagentCost(sub);
         setRunCount(runs);
         setLoading(false);
       } catch {
-        // File may not exist yet or be mid-write; ignore and retry next tick.
+        // File may not exist yet or be mid-write; treat as no data.
         if (!cancelled) {
-          setTotalCost(0);
           setSubagentCost(0);
           setRunCount(0);
           setLoading(false);
@@ -104,24 +94,43 @@ export function RealTimeCostCounter(): React.ReactElement {
     };
   }, [fluxDir]);
 
+  const tooltipText = loading
+    ? "Reading events.jsonl for cost data..."
+    : runCount === 0
+      ? "No subagent.run events found in events.jsonl"
+      : `Tracked subagent cost: $${subagentCost.toFixed(4)} from ${runCount} ${runCount === 1 ? "run" : "runs"}`;
+
+  // Muted styling when no events are available
+  const hasNoData = !loading && runCount === 0;
+  const costClass = loading
+    ? "text-slate-500 dark:text-slate-400"
+    : hasNoData
+      ? "text-slate-400 dark:text-slate-500"
+      : "text-slate-800 dark:text-slate-100";
+  const labelClass = hasNoData
+    ? "text-slate-400 dark:text-slate-500"
+    : "text-slate-500 dark:text-slate-400";
+
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
+    <div
+      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800"
+      title={tooltipText}
+      aria-label={tooltipText}
+    >
       <Icon
         name="DollarSign"
         size={16}
-        className="text-green-600 dark:text-green-400"
+        className={`${hasNoData ? "text-slate-400 dark:text-slate-500" : "text-green-600 dark:text-green-400"}`}
       />
-      <span className="font-mono text-sm font-bold text-slate-800 dark:text-slate-100">
-        {loading ? "—" : formatCost(totalCost)}
+      <span className={`text-xs whitespace-nowrap ${labelClass}`}>Tracked subagent cost</span>
+      <span className={`font-mono text-sm font-bold ${costClass}`}>
+        {loading ? "—" : formatCost(subagentCost)}
       </span>
-      <span className="text-slate-400 text-xs">/</span>
-      <span className="text-xs text-slate-500 dark:text-slate-400">
-        ({formatCost(subagentCost)})
-      </span>
-      <span className="text-slate-400 text-xs">|</span>
-      <span className="text-xs text-slate-500 dark:text-slate-400">
-        {runCount} runs
-      </span>
+      {!loading && (
+        <span className="text-xs text-slate-400">
+          ({runCount} {runCount === 1 ? "run" : "runs"})
+        </span>
+      )}
     </div>
   );
 }

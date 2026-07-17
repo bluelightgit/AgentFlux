@@ -14,6 +14,8 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { assignModel, type AssignResult } from "./model-capability";
+import { communicationPolicyFromFrontmatter, type CommunicationPolicyInput } from "./communication-policy";
+import type { WorkspaceCapabilityInput } from "./capability-policy";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
@@ -24,9 +26,13 @@ export interface RoleDefinition {
 	requirement?: Record<string, number>;  // 能力需求向量
 	tools?: string[];            // 可用工具列表
 	skills?: string[];           // 角色特有 skills
+	mcpServers?: string[];       // 当前 pi runtime 无 server 级 gate；非空会 fail-closed
+	workspace?: WorkspaceCapabilityInput;
 	systemPrompt?: string;       // 角色 system prompt
 	source: "md" | "json" | "builtin";  // 来源
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
+	/** Role-template defaults. A registered/run instance may apply a narrower override. */
+	communication?: CommunicationPolicyInput;
 }
 
 export interface RoleInstance {
@@ -36,9 +42,10 @@ export interface RoleInstance {
 	provider?: string;           // pi provider 名称
 	assignSource: AssignResult;  // 模型分配详情
 	session: string;             // pi session ID
-	status: "idle" | "running" | "blocked" | "done" | "failed";
+	status: "idle" | "running" | "blocked" | "done" | "failed" | "cancelled";
 	task: string;
 	createdAt: string;
+	updatedAt: string;
 	output?: string;             // 产出物路径 (handoff 等)
 }
 
@@ -148,6 +155,15 @@ function loadRolesFromMD(agentsDir: string): Map<string, RoleDefinition> {
 			systemPrompt: body || undefined,
 			source: "md",
 			thinking,
+			communication: communicationPolicyFromFrontmatter(frontmatter),
+			mcpServers: frontmatter.mcp_servers ? parseList(frontmatter.mcp_servers) : undefined,
+			workspace: frontmatter.workspace_roots || frontmatter.denied_paths || frontmatter.block_dangerous_commands
+				? {
+					roots: frontmatter.workspace_roots ? parseList(frontmatter.workspace_roots) : undefined,
+					deniedPaths: frontmatter.denied_paths ? parseList(frontmatter.denied_paths) : undefined,
+					blockDangerousCommands: frontmatter.block_dangerous_commands === undefined
+						? undefined : !["false", "no", "0", "off"].includes(frontmatter.block_dangerous_commands.toLowerCase()),
+				} : undefined,
 		});
 	}
 	return roles;
@@ -176,6 +192,9 @@ function loadRolesFromJSON(modelsConfig: any): Map<string, RoleDefinition> {
 			systemPrompt: d.systemPrompt,
 			source: "json",
 			thinking,
+			communication: d.communication && typeof d.communication === "object" ? d.communication : undefined,
+			mcpServers: Array.isArray(d.mcpServers) ? d.mcpServers : undefined,
+			workspace: d.workspace && typeof d.workspace === "object" ? d.workspace : undefined,
 		});
 	}
 	return roles;
@@ -269,6 +288,7 @@ export function createInstance(
 		status: "idle",
 		task,
 		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
 	};
 }
 
@@ -281,7 +301,9 @@ export function formatRoleList(roles: Map<string, RoleDefinition>): string {
 		const modelInfo = def.model ? `model=${def.model}` : def.requirement ? `req={${Object.entries(def.requirement).map(([k, v]) => `${k}:${v}`).join(",")}}` : "???";
 		const toolsInfo = def.tools ? `tools=[${def.tools.join(",")}]` : "tools=all";
 		const thinkInfo = def.thinking ? `thinking=${def.thinking}` : "";
-		lines.push(`  ${name.padEnd(16)} ${source}  ${modelInfo}  ${toolsInfo}${thinkInfo ? "  " + thinkInfo : ""}`);
+		const communicationInfo = def.communication
+			? `message=${def.communication.enabled === false ? "off" : "on"}${def.communication.requiredSendTo?.length ? ` required→${def.communication.requiredSendTo.join("|")}` : ""}` : "";
+		lines.push(`  ${name.padEnd(16)} ${source}  ${modelInfo}  ${toolsInfo}${thinkInfo ? "  " + thinkInfo : ""}${communicationInfo ? "  " + communicationInfo : ""}`);
 		if (def.description) lines.push(`  ${"".padEnd(16)} ${def.description}`);
 	}
 	return lines.join("\n");
@@ -292,7 +314,7 @@ export function formatInstanceList(registry: Registry): string {
 	const lines = ["Agent Instances:", ""];
 	for (const inst of registry.instances) {
 		const statusIcon = {
-			idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗",
+			idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘",
 		}[inst.status] ?? "?";
 		lines.push(`  ${statusIcon} ${inst.name.padEnd(20)} ${inst.role.padEnd(12)} ${inst.model.padEnd(20)} ${inst.status}`);
 		if (inst.task) lines.push(`    task: ${inst.task.slice(0, 80)}`);

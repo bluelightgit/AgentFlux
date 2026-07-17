@@ -128,11 +128,52 @@ export const PreferenceRadar: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">Preference Radar</h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-          Adjust the 5-dimensional routing preference vector. The predicted mode updates in real-time.
-        </p>
+      <div className="flex items-center gap-3 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+            Preference Radar
+            <span className="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 border border-blue-200 dark:border-blue-700">
+              Simulation estimate
+            </span>
+          </h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+            Local preference estimate (not from core router). Adjust sliders to preview simulated routing behavior.
+          </p>
+        </div>
+        {/* Connection / project status indicator */}
+        {(() => {
+          const electronAvailable = typeof window !== "undefined" && !!window.api?.ipcRenderer;
+          const projectConfigured = !!project?.fluxDir;
+
+          if (!projectConfigured) {
+            return (
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 border border-gray-200 dark:border-gray-700"
+                title="No AgentFlux project loaded. Open a workspace to enable preference saving."
+              >
+                🚫 No Project
+              </span>
+            );
+          }
+          if (!electronAvailable) {
+            return (
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-200 dark:border-amber-700"
+                title="Electron IPC not available. Changes cannot be saved to disk. Run in Electron for full functionality."
+              >
+                ⚠️ Read-Only
+              </span>
+            );
+          }
+          return (
+            <span
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs bg-green-50 text-green-600 dark:bg-green-900/30 dark:text-green-400 border border-green-200 dark:border-green-700"
+              title="Connected to Electron IPC. Preferences will persist to agentflux.json."
+            >
+              ✅ Connected
+            </span>
+          );
+        })()}
       </div>
 
       {message && (

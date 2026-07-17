@@ -80,6 +80,11 @@ import {
 
 export type { LucideIcon };
 
+/** Store-independent root for the shared desktop control-plane shell. */
+export function AppFrame({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <div className="af-app flex h-screen flex-col overflow-hidden" data-testid="agentflux-app-frame">{children}</div>;
+}
+
 // Icon name → Lucide component map
 const ICONS: Record<string, LucideIcon> = {
   Send,
@@ -163,15 +168,16 @@ const ICONS: Record<string, LucideIcon> = {
 // ----------------------------------------------------------------------------
 // Card
 // ----------------------------------------------------------------------------
-export interface CardProps {
+export interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   children: React.ReactNode;
   className?: string;
 }
 
-export function Card({ children, className }: CardProps): React.ReactElement {
+export function Card({ children, className, ...props }: CardProps): React.ReactElement {
   return (
     <div
-      className={`bg-white dark:bg-slate-800 rounded-lg shadow border border-slate-200 dark:border-slate-700 p-6 ${className ?? ''}`}
+      className={`af-panel ${className ?? ''}`}
+      {...props}
     >
       {children}
     </div>
@@ -201,7 +207,7 @@ const BADGE_CLASSES: Record<BadgeColor, string> = {
 export function Badge({ children, color = 'slate' }: BadgeProps): React.ReactElement {
   return (
     <span
-      className={`${BADGE_CLASSES[color]} border rounded-full px-2 py-0.5 text-xs`}
+      className={`${BADGE_CLASSES[color]} af-badge`}
     >
       {children}
     </span>
@@ -275,13 +281,13 @@ export function DataTable({
   rowClassName,
 }: DataTableProps): React.ReactElement {
   return (
-    <table className="w-full text-sm text-slate-700 dark:text-slate-200">
+    <table className="af-data-table w-full text-sm">
       <thead>
         <tr>
           {columns.map((col) => (
             <th
               key={col.key}
-              className="bg-slate-50 dark:bg-slate-900/50 text-slate-500 dark:text-slate-400 font-medium text-left px-3 py-2"
+              className="bg-[var(--af-panel-subtle)] font-mono text-[10px] font-semibold uppercase tracking-wider text-[var(--af-muted)] text-left px-3 py-2"
               style={col.width ? { width: col.width } : undefined}
             >
               {col.label}
@@ -297,7 +303,7 @@ export function DataTable({
             className={rowClassName}
           >
             {columns.map((col) => (
-              <td key={col.key} className="px-3 py-2 border-t border-slate-100 dark:border-slate-700">
+              <td key={col.key} className="px-3 py-2 border-t border-[var(--af-line-soft)]">
                 {row[col.key]}
               </td>
             ))}
@@ -345,7 +351,7 @@ export function JsonEditor({
         value={value}
         onChange={handleChange}
         spellCheck={false}
-        className="w-full h-80 font-mono text-sm rounded-lg bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="af-input w-full h-80 font-mono text-sm px-3 py-2"
       />
       {error ? (
         <div className="text-xs text-red-600">Invalid JSON: {error}</div>
@@ -354,7 +360,7 @@ export function JsonEditor({
         <button
           type="button"
           onClick={onSave}
-          className="bg-blue-600 text-white rounded-lg px-4 py-2 text-sm hover:bg-blue-700 disabled:opacity-50"
+          className="af-button-primary px-4 py-2 text-sm disabled:opacity-50"
           disabled={!!error}
         >
           Save
@@ -406,16 +412,19 @@ export function MetricCard({
 export interface EmptyStateProps {
   icon: string;
   message: string;
+  action?: React.ReactNode;
 }
 
 export function EmptyState({
   icon,
   message,
+  action,
 }: EmptyStateProps): React.ReactElement {
   return (
     <div className="flex flex-col items-center justify-center py-12">
       <Icon name={icon} size={48} className="text-slate-300 dark:text-slate-600" />
       <p className="mt-3 text-sm text-slate-400 dark:text-slate-500">{message}</p>
+      {action && <div className="mt-4">{action}</div>}
     </div>
   );
 }

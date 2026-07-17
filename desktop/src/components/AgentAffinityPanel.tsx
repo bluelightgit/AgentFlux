@@ -75,11 +75,17 @@ export function AgentAffinityPanel(): React.ReactElement {
   return (
     <Card>
       {/* Header */}
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-2">
         <Icon name="Target" size={18} className="text-slate-500 dark:text-slate-400" />
         <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
           Model-Role Affinity
         </h3>
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+          title="Static sample data — not connected to live affinity engine"
+        >
+          🧪 Sample Data
+        </span>
       </div>
 
       {/* Affinity matrix */}
@@ -158,7 +164,7 @@ export function AgentAffinityPanel(): React.ReactElement {
           </span>
         </div>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          Higher = better fit. Green border = best match per role.
+          Higher = better fit. Green border = best match per role. This is static example data from the design spec.
         </p>
       </div>
     </Card>

@@ -101,7 +101,7 @@ function deleteAgent(cwd: string, agentName: string): void {
 // ─── Status icons ──────────────────────────────────────────────────────────
 
 const STATUS_ICON: Record<string, string> = {
-	idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗",
+	idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘",
 };
 
 // ─── /flux-agents command ──────────────────────────────────────────────────
@@ -137,7 +137,7 @@ async function showAgentList(ctx: any): Promise<void> {
 		return;
 	}
 
-	const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: (v: string | null) => void) => {
+	const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (v: string | null) => void) => {
 		const container = new Container();
 		container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
 		container.addChild(new Text(theme.fg("accent", theme.bold("Select Agent")), 1, 0));

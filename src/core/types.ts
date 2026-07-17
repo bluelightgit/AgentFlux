@@ -54,6 +54,14 @@ export interface PreferenceVector {
 	multi_agent_willingness: number;// 0-1, 1=倾向多 agent
 }
 
+/** 每个产品预设对应一组完整目标权重；custom 保留用户当前向量。 */
+export const PRESET_VECTORS: Record<Exclude<Preset, "custom">, PreferenceVector> = {
+	eco: { cost_sensitivity: 0.9, accuracy_priority: 0.45, latency_priority: 0.4, parallelism_willingness: 0.2, multi_agent_willingness: 0.15 },
+	fast: { cost_sensitivity: 0.35, accuracy_priority: 0.55, latency_priority: 0.95, parallelism_willingness: 0.8, multi_agent_willingness: 0.45 },
+	accurate: { cost_sensitivity: 0.15, accuracy_priority: 0.98, latency_priority: 0.3, parallelism_willingness: 0.65, multi_agent_willingness: 0.85 },
+	balanced: { cost_sensitivity: 0.5, accuracy_priority: 0.6, latency_priority: 0.4, parallelism_willingness: 0.5, multi_agent_willingness: 0.4 },
+};
+
 export type Scenario = "bugfix" | "feature" | "refactor" | "explore" | "review";
 
 export interface ScenarioOverride extends Partial<PreferenceVector> {
@@ -124,6 +132,25 @@ export interface RoutingConfig {
 	override_mode: "auto" | "manual" | "suggest";
 }
 
+export interface RetentionConfig {
+	enabled: boolean;
+	terminal_agent_ttl_hours: number;
+	max_terminal_agents: number;
+	read_message_ttl_hours: number;
+	max_read_messages: number;
+	orphan_session_ttl_hours: number;
+}
+
+export interface CommunicationRuntimeConfig {
+	/** Enable live Message V2 → pi turn delivery for a named RPC runtime. */
+	rpc_inbox_pump: boolean;
+	poll_interval_ms: number;
+	batch_size: number;
+	heartbeat_interval_ms: number;
+	runtime_lease_ms: number;
+	redelivery_after_ms: number;
+}
+
 import { DEFAULT_PRICING_CONFIG, type PricingConfig } from "./pricing";
 
 export interface FluxConfig {
@@ -136,6 +163,8 @@ export interface FluxConfig {
 	context: ContextConfig;
 	budget: BudgetConfig;
 	routing: RoutingConfig;
+	retention: RetentionConfig;
+	communication: CommunicationRuntimeConfig;
 	pricing: PricingConfig;
 	sharedSkills?: string[];       // 所有角色共享的 skills (docs/19)
 }
@@ -150,12 +179,28 @@ export const DEFAULT_CONFIG: FluxConfig = {
 	context: { compaction_threshold: 0.70, mask_strategy: "hide_tool_results", mask_keep_last_n: 3 },
 	budget: { max_cost_per_task: 2.0, max_iterations: 5, max_wall_clock_seconds: 600 },
 	routing: { static_signals: true, budget_aware: true, experience_aware: false, override_mode: "suggest" },
+	retention: {
+		enabled: true,
+		terminal_agent_ttl_hours: 168,
+		max_terminal_agents: 100,
+		read_message_ttl_hours: 72,
+		max_read_messages: 500,
+		orphan_session_ttl_hours: 168,
+	},
+	communication: {
+		rpc_inbox_pump: false,
+		poll_interval_ms: 1000,
+		batch_size: 5,
+		heartbeat_interval_ms: 10_000,
+		runtime_lease_ms: 30_000,
+		redelivery_after_ms: 30_000,
+	},
 	pricing: DEFAULT_PRICING_CONFIG,
 };
 
 export const DEFAULT_PREFERENCE: PreferenceConfig = {
 	profile: "balanced",
-	vector: { cost_sensitivity: 0.5, accuracy_priority: 0.6, latency_priority: 0.4, parallelism_willingness: 0.5, multi_agent_willingness: 0.4 },
+	vector: { ...PRESET_VECTORS.balanced },
 	scenarios: {},
 	escalate_hint: "suggest",
 };

@@ -232,6 +232,7 @@ const Section1: React.FC<Section1Props> = ({
       if (n && typeof n === "object" && typeof n.id === "string") allIds.add(n.id);
     }
   }
+  for (const id of dagState.nodeIds) allIds.add(id);
   for (const id of dagState.completed) allIds.add(id);
   for (const id of dagState.failed) allIds.add(id);
   for (const id of runningIds) allIds.add(id);
@@ -307,9 +308,23 @@ const Section1: React.FC<Section1Props> = ({
       </div>
 
       {/* Description */}
-      <p className="text-lg font-bold text-slate-800 mb-3 break-words">
-        {dagState.description || "DAG execution in progress"}
-      </p>
+      <div className="mb-4 border-l-4 border-slate-700 bg-slate-50 px-4 py-3 dark:border-slate-400 dark:bg-slate-900/40">
+        <div className="mb-1 flex flex-wrap items-center gap-2">
+          <Badge color={dagState.status === "completed" ? "green" : dagState.status === "failed" || dagState.status === "timed_out" ? "red" : "blue"}>
+            {dagState.status}
+          </Badge>
+          {dagState.executionId ? <code className="text-xs text-slate-500">{dagState.executionId}</code> : null}
+        </div>
+        <p className="text-base font-bold text-slate-800 dark:text-slate-100 break-words">
+          {dagState.description || "DAG execution in progress"}
+        </p>
+        <div className="mt-2 flex flex-wrap gap-4 text-xs text-slate-500">
+          <span>Cost {formatCost(dagState.totalCost)}</span>
+          <span>Iteration {dagState.iterationCount}</span>
+          <span>{dagState.taskResults.length} task results</span>
+          <span>{Object.keys(dagState.artifactPaths).length} artifacts</span>
+        </div>
+      </div>
 
       {/* Legend + counts */}
       <div className="flex flex-wrap items-center gap-4 mb-2 text-xs text-slate-600">

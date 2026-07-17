@@ -56,7 +56,6 @@ export const CacheEfficiency: React.FC = () => {
     perAgent.sort((a, b) => b.cacheRead - a.cacheRead);
 
     const overallHitRate = totalCacheRead / (totalCacheRead + totalInput + 1e-9);
-    const cacheMissTokens = totalInput; // input that wasn't cache hit
     const estimatedFullCost = (totalInput + totalCacheRead) * 5e-6; // if all at input price
     const actualCost = totalCost;
     const savings = Math.max(0, estimatedFullCost - actualCost);

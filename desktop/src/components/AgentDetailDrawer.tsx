@@ -12,7 +12,7 @@
  * agent is a member of (`listGroups` + `getGroupMessages`).
  */
 import React, { useEffect, useState } from "react";
-import { Card, Badge, Icon, EmptyState, MetricCard, StatusDot, type StatusKind } from "./ui";
+import { Badge, Icon, EmptyState, MetricCard, StatusDot, type StatusKind } from "./ui";
 import { formatTokens, formatCost, formatPct, formatTs } from "../lib/format";
 import {
   type AgentInfo,

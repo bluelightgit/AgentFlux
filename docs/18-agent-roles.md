@@ -22,6 +22,19 @@
       "requirement": { "coding": 0.3, "reasoning": 0.9, "speed": 0.2, "context": 0.7, "cost_eff": 0.3 },
       "tools": ["read", "grep", "find", "ls", "bash"],
       "skills": ["planning"],
+      "mcpServers": [],
+      "workspace": {
+        "roots": ["."],
+        "deniedPaths": [".env", ".git"],
+        "blockDangerousCommands": true
+      },
+      "communication": {
+        "actions": ["send", "poll", "ack", "status"],
+        "allowedTargets": ["implementer", "group:planning"],
+        "requiredSendTo": ["implementer"],
+        "requireExplicitInboxAck": false,
+        "maxMessagesPerRun": 10
+      },
       "systemPrompt": "You are a senior planner. Analyze requirements, break down tasks, output implementation plan."
     },
     "implementer": {
@@ -57,6 +70,14 @@ description: Security vulnerability scanner
 tools: read, grep, bash
 model: gpt-5.5
 skills: security-checklist
+workspace_roots: .
+denied_paths: .env, .git
+block_dangerous_commands: true
+communication_actions: send, poll, ack, status
+communication_targets: reviewer, group:security
+required_handoff_to: reviewer
+require_explicit_inbox_ack: true
+max_messages_per_run: 10
 ---
 You are a security auditor. Focus on: injection, auth bypass, data leaks.
 Output: ## Critical / ## Warnings / ## Safe patterns / ## Summary
@@ -69,6 +90,16 @@ MD 格式的 frontmatter 字段:
 - `model` (可选): 直接指定模型 (与 `requirement` 二选一)
 - `requirement` (可选): JSON 格式的能力需求向量 (与 `model` 二选一)
 - `skills` (可选): 逗号分隔的 skill 列表
+- `mcp_servers` (可选): 允许的 MCP server；当前非空配置因 pi 缺少 server 级门禁而 fail-closed
+- `workspace_roots` (可选): 允许访问的工作区根目录列表
+- `denied_paths` (可选): 即使位于 root 内也禁止访问的路径列表
+- `block_dangerous_commands` (可选): 是否阻断高风险 shell 模式；低层不能从 true 改为 false
+- `communication_enabled` (可选): 是否为该角色注册身份绑定的 `flux_agent_message`
+- `communication_actions` (可选): `send,poll,ack,status` 的子集
+- `communication_targets` (可选): 允许的直接 Agent、`broadcast`、`group:<id>`、`group:*` 或 `*`
+- `required_handoff_to` (可选): 完成前必须发送 run-correlated handoff 的目标列表
+- `require_explicit_inbox_ack` (可选): 是否要求 Agent 主动调用工具确认所有注入的 V2 消息
+- `max_messages_per_run` (可选): 单次运行最多主动发送的消息数，范围 1–100
 
 MD body 作为 `systemPrompt`。
 
@@ -144,6 +175,12 @@ reviewer         →     reviewer-1
 | `task` | 分配的任务描述 |
 | `workingDir` | 工作目录 (默认项目根, 可选 worktree 隔离) |
 
+能力策略采用三层收窄模型：角色模板定义上限，注册实例可持久覆盖，`flux_subagent.capabilities`/`communication` 可在单次运行继续收窄。低层不能增加上层不存在的 tool、skill、MCP server、通信动作/目标或 workspace root，也不能关闭上层已要求的危险命令阻断、显式 ACK 和 required handoff。sender、instanceId、runId 由父进程注入，模型不能作为工具参数伪造。
+
+注册实例覆盖保存在 `.agentflux/runtime/capability-overrides/<agent>.json`，使用 revision 乐观锁、`wx` 写锁和原子替换；`flux_capability_policy get/set` 是规范管理入口。每次解析出的有效策略写入 `.agentflux/runtime/capability-effective/<agent>.json`，供 Desktop 只读展示 provenance、收窄来源和实际生效值。工具/Skill/MCP 形状变化会触发 cache-impact 提示；`cost_sensitivity<=0.01` 时静默。持久 session ID 还包含能力形状 hash，避免撤销权限后复用旧能力前缀。
+
+当前 tools 与 workspace 策略由 `subagent-entry.ts` 的宿主 `tool_call` hook 强制执行：工具白名单、根目录、拒绝路径、父目录逃逸和高风险 shell 模式会 fail-closed。这是 AgentFlux/pi 宿主层门禁，不是 OS 容器或系统级沙箱。当前 pi 运行时没有可验证的 MCP server 级门禁，因此非空 MCP allowlist 会被明确拒绝，而不是伪装已隔离。
+
 ### 实例注册表
 
 运行时实例状态保存在 `.agentflux/runtime/registry.json`:
@@ -186,14 +223,18 @@ reviewer         →     reviewer-1
       → 不可用: 如果有 requirement, 走亲和度; 否则报错
    b. role.requirement 存在 → 遍历 models.json 所有模型算亲和度, 取最高
    c. 都没有 → 报错 "角色必须指定 model 或 requirement"
-3. 解析工具: role.tools 存在 → 限制子进程工具; 不存在 → 继承全部
-4. 解析 skills: sharedSkills + role.skills 合并, 传给子进程 --skills
-5. 创建实例记录, 写入 registry.json
-6. 启动 pi 子进程 (独立 session)
-7. 子进程加载 subagent-entry.ts (prefix layout, 不注册额外 tool)
-8. 发送任务 prompt
-9. 监控完成, 更新实例状态
+3. 合并角色模板、注册实例和单次运行能力策略；任何扩大请求以 exit 77 fail-closed
+4. 解析有效 tools/skills；communication 启用时追加内部 `flux_agent_message`，禁用时不追加
+5. 检查 workspace/MCP 是否能由当前 pi hook 强制执行；无法执行的显式策略 fail-closed
+6. 写入 effective capability snapshot 与 `capability.policy` telemetry；创建实例记录
+7. 启动 pi 子进程；只传入有效 tools/skills，并注入不可由模型修改的策略/身份环境
+8. 子进程加载 `subagent-entry.ts`，注册 prefix layout、`tool_call` 门禁与身份绑定消息工具
+9. 发送任务 prompt
+10. 成功输出后检查 required handoff/显式 ACK；未满足时以 exit 76 fail-closed
+11. 写入 `message.protocol`/`subagent.run` telemetry，更新实例状态
 ```
+
+上述 Skill 合并已覆盖直接 `flux_subagent`、并行 subagent、team review workflow 和 DAG 角色加载入口。同一 Skill 会去重，`models.json.sharedSkills` 与旧配置同时存在时以前者为准，不做并集，避免旧配置意外扩大子 agent 能力。
 
 ## Agent 自创建角色 (未来方向)
 

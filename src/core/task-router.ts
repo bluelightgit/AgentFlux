@@ -15,7 +15,7 @@
  * 参考: RGAO (arxiv 2605.05657) — 从任务相关代码提取复杂度, 不是整个仓库
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { Mode, Scenario } from "./types";
@@ -34,13 +34,13 @@ export interface TaskClassification {
 
 /** 关键词→类型映射表 */
 const TYPE_KEYWORDS: Record<Exclude<TaskType, "unknown">, string[]> = {
-	bugfix: ["bug", "fix", "crash", "broken", "wrong", "debug", "regression", "not working", "doesn't work", "traceback", "exception", "stacktrace"],
-	feature: ["add", "implement", "create", "new", "build", "feature", "support", "enable", "extend", "introduce", "develop"],
-	refactor: ["refactor", "clean", "restructure", "reorganize", "simplify", "deduplicate", "extract", "rename", "move", "consolidate"],
-	explore: ["explore", "investigate", "understand", "analyze", "check", "look", "examine", "research", "study", "find out", "what does", "how does"],
-	review: ["review", "audit", "inspect", "evaluate", "assess", "check quality", "lint", "verify", "validate", "pr", "pull request"],
-	test: ["test", "coverage", "unit test", "integration test", "mock", "stub", "fixture", "tdd", "bdd"],
-	docs: ["document", "documentation", "readme", "doc", "comment", "javadoc", "docstring", "wiki"],
+	bugfix: ["bug", "fix", "crash", "broken", "wrong", "debug", "regression", "not working", "doesn't work", "traceback", "exception", "stacktrace", "修复", "故障", "崩溃", "错误", "异常", "回归", "无法运行", "不工作", "排查问题"],
+	feature: ["add", "implement", "create", "new", "build", "feature", "support", "enable", "extend", "introduce", "develop", "新增", "添加", "实现", "创建", "功能", "支持", "开发", "接入", "启用"],
+	refactor: ["refactor", "clean", "restructure", "reorganize", "simplify", "deduplicate", "extract", "rename", "move", "consolidate", "重构", "整理", "简化", "去重", "抽取", "重命名", "迁移", "合并模块"],
+	explore: ["explore", "investigate", "understand", "analyze", "check", "look", "examine", "research", "study", "find out", "what does", "how does", "探索", "调查", "理解", "分析", "研究", "查看", "看看", "怎么实现", "工作原理"],
+	review: ["review", "audit", "inspect", "evaluate", "assess", "check quality", "lint", "verify", "validate", "pr", "pull request", "审查", "评审", "审核", "代码检查", "质量检查", "验证"],
+	test: ["test", "coverage", "unit test", "integration test", "mock", "stub", "fixture", "tdd", "bdd", "测试", "覆盖率", "单元测试", "集成测试", "端到端"],
+	docs: ["document", "documentation", "readme", "doc", "comment", "javadoc", "docstring", "wiki", "文档", "说明", "注释", "使用指南"],
 };
 
 /** 文件路径正则 (匹配用户输入中的文件引用) */
@@ -118,8 +118,8 @@ export function analyzeTaskScope(cwd: string, mentionedFiles: string[] = []): Ta
 
 	try {
 		// 未暂存 + 已暂存变更
-		const out = execSync(
-			"git diff --stat HEAD --no-color",
+		const out = execFileSync(
+			"git", ["diff", "--stat", "HEAD", "--no-color"],
 			{ cwd, encoding: "utf-8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] },
 		);
 		// 解析 git diff --stat 输出

@@ -152,7 +152,7 @@ export async function executeHeterogeneousTeam(
 
 		// 并行执行就绪 agent (每个用不同 model)
 		for (const agentConfig of ready) {
-			try { board.updateAgentStatus(`m6-${agentConfig.name}`, { status: "running", role: agentConfig.role, workingOn: agentConfig.task.slice(0, 100) }); } catch {}
+			try { board.updateAgentStatus(`m6-${agentConfig.name}`, { status: "running", workingOn: agentConfig.task.slice(0, 100) }); } catch {}
 		}
 		// 并行执行就绪 agent (用 allSettled 防止单个 throw 导致整批丢失)
 		const batchSettled = await Promise.allSettled(
@@ -254,6 +254,7 @@ async function executeHeterogeneousAgent(
 		provider: providerUsed,
 		systemPrompt: role?.systemPrompt ?? `You are a ${config.role}.`,
 		thinking: thinkingUsed,
+		communication: role?.communication,
 		skills: [...(opts.sharedSkills ?? []), ...(role?.skills ?? [])].length > 0
 			? [...(opts.sharedSkills ?? []), ...(role?.skills ?? [])] : undefined,
 	};

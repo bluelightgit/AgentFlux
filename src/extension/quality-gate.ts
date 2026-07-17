@@ -21,7 +21,12 @@ import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
 import type { TelemetryWriter } from "../telemetry/events";
 
+export type QualityGateStatus = "passed" | "failed" | "indeterminate";
+
 export interface QualityGateResult {
+	/** 三态结果。indeterminate 表示 judge 不可用或响应不可验证。 */
+	status: QualityGateStatus;
+	/** 向后兼容字段：仅 status="passed" 时为 true。 */
 	passed: boolean;
 	feedback: string;           // LLM 给的反馈 (失败原因或确认语)
 	criteriaResults: Array<{ criterion: string; met: boolean }>;
@@ -29,6 +34,113 @@ export interface QualityGateResult {
 	gateModel: string | null;
 	gateInputTokens: number;
 	gateOutputTokens: number;
+}
+
+export interface QualityGateJudgement {
+	status: QualityGateStatus;
+	passed: boolean;
+	feedback: string;
+	criteriaResults: Array<{ criterion: string; met: boolean }>;
+}
+
+/**
+ * judge 子进程的可测试执行结果。把进程管理和 verdict 解释分开，
+ * 使 timeout/model error/parse error 能在不调用真实模型的情况下回归测试。
+ */
+export interface QualityGateJudgeExecution {
+	output: string;
+	exitCode: number;
+	timedOut?: boolean;
+	errorMessage?: string;
+	gateCost?: number;
+	gateModel?: string | null;
+	gateInputTokens?: number;
+	gateOutputTokens?: number;
+}
+
+function indeterminateJudgement(feedback: string): QualityGateJudgement {
+	return { status: "indeterminate", passed: false, feedback, criteriaResults: [] };
+}
+
+/** 严格解析 judge JSON；字段缺失、label 数量不符或 verdict 自相矛盾都返回 indeterminate。 */
+export function parseQualityGateJudgeOutput(output: string, criteria: string[]): QualityGateJudgement {
+	if (criteria.length === 0) {
+		return { status: "passed", passed: true, feedback: "No criteria to check — gate skipped", criteriaResults: [] };
+	}
+
+	const jsonMatch = output.match(/```json\s*([\s\S]*?)```/) || output.match(/\{[\s\S]*\}/);
+	if (!jsonMatch) return indeterminateJudgement("Quality gate judge response did not contain JSON");
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse((jsonMatch[1] || jsonMatch[0]).trim());
+	} catch (e: any) {
+		return indeterminateJudgement(`Quality gate judge returned invalid JSON: ${e?.message ?? e}`);
+	}
+
+	if (!parsed || typeof parsed !== "object") {
+		return indeterminateJudgement("Quality gate judge response is not an object");
+	}
+
+	const candidate = parsed as Record<string, unknown>;
+	if (typeof candidate.passed !== "boolean" || typeof candidate.feedback !== "string" || !Array.isArray(candidate.criteriaResults)) {
+		return indeterminateJudgement("Quality gate judge response does not match the required schema");
+	}
+	if (candidate.criteriaResults.length !== criteria.length) {
+		return indeterminateJudgement(`Quality gate judge returned ${candidate.criteriaResults.length}/${criteria.length} criteria results`);
+	}
+
+	const normalized: Array<{ criterion: string; met: boolean }> = [];
+	for (let i = 0; i < criteria.length; i++) {
+		const raw = candidate.criteriaResults[i];
+		if (!raw || typeof raw !== "object" || typeof (raw as any).criterion !== "string" || typeof (raw as any).met !== "boolean") {
+			return indeterminateJudgement(`Quality gate judge criterion ${i + 1} is malformed`);
+		}
+		normalized.push({ criterion: criteria[i], met: (raw as any).met });
+	}
+
+	const allMet = normalized.every(r => r.met);
+	if (candidate.passed !== allMet) {
+		return indeterminateJudgement("Quality gate judge verdict conflicts with its per-criterion results");
+	}
+
+	const status: QualityGateStatus = candidate.passed ? "passed" : "failed";
+	return {
+		status,
+		passed: status === "passed",
+		feedback: candidate.feedback || (status === "passed" ? "All criteria met" : "Some criteria not met"),
+		criteriaResults: normalized,
+	};
+}
+
+/** 将进程级错误与 judge JSON 合并为最终三态结果。 */
+export function interpretQualityGateJudgeExecution(
+	execution: QualityGateJudgeExecution,
+	criteria: string[],
+): QualityGateResult {
+	const metrics = {
+		gateCost: Number((execution.gateCost ?? 0).toFixed(6)),
+		gateModel: execution.gateModel ?? null,
+		gateInputTokens: execution.gateInputTokens ?? 0,
+		gateOutputTokens: execution.gateOutputTokens ?? 0,
+	};
+
+	let judgement: QualityGateJudgement;
+	if (criteria.length === 0) {
+		judgement = { status: "passed", passed: true, feedback: "No criteria to check — gate skipped", criteriaResults: [] };
+	} else if (execution.timedOut) {
+		judgement = indeterminateJudgement("Quality gate judge timed out");
+	} else if (execution.errorMessage) {
+		judgement = indeterminateJudgement(`Quality gate judge unavailable: ${execution.errorMessage}`);
+	} else if (execution.exitCode !== 0) {
+		judgement = indeterminateJudgement(`Quality gate judge exited with code ${execution.exitCode}`);
+	} else if (!execution.output.trim()) {
+		judgement = indeterminateJudgement("Quality gate judge returned empty output");
+	} else {
+		judgement = parseQualityGateJudgeOutput(execution.output, criteria);
+	}
+
+	return { ...judgement, ...metrics };
 }
 
 /**
@@ -49,13 +161,18 @@ export async function checkQualityGate(
 		pricing?: PricingTable;
 		telemetry?: TelemetryWriter;
 		sessionId?: string;
+		timeoutMs?: number;
+		signal?: AbortSignal;
 	},
 ): Promise<QualityGateResult> {
-	if (!criteria.length || !output.trim()) {
-		return {
-			passed: true, feedback: "No criteria to check or empty output — skipping gate",
-			criteriaResults: [], gateCost: 0, gateModel: null, gateInputTokens: 0, gateOutputTokens: 0,
-		};
+	if (!criteria.length) return interpretQualityGateJudgeExecution({ output: "", exitCode: 0 }, criteria);
+	if (opts.signal?.aborted) {
+		return interpretQualityGateJudgeExecution({ output: "", exitCode: 130, errorMessage: "cancelled before quality gate" }, criteria);
+	}
+	if (!output.trim()) {
+		return interpretQualityGateJudgeExecution({
+			output: "", exitCode: 0, errorMessage: "agent output is empty",
+		}, criteria);
 	}
 
 	const criteriaText = criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
@@ -87,21 +204,25 @@ Respond with ONLY the JSON, no other text.`;
 	args.push("--thinking", "off");
 	args.push("--tools", "read");  // 最小工具集
 
-	// system prompt 写临时文件
-	const tmpDir = mkdtempSync(join(tmpdir(), "flux-gate-"));
-	const tmpPrompt = join(tmpDir, "gate-prompt.md");
-	writeFileSync(tmpPrompt, "You are a quality gate checker. Respond only with JSON.", "utf-8");
-	args.push("--append-system-prompt", tmpPrompt);
-	args.push(gatePrompt);
-
 	let gateOutput = "";
 	let gateModel: string | null = null;
 	let gateInputTokens = 0;
 	let gateOutputTokens = 0;
 	let gateCost = 0;
 	let exitCode = 0;
+	let timedOut = false;
+	let errorMessage: string | undefined;
+	let stderrBuf = "";
+	let tmpDir: string | null = null;
 
 	try {
+		// system prompt 写临时文件
+		tmpDir = mkdtempSync(join(tmpdir(), "flux-gate-"));
+		const tmpPrompt = join(tmpDir, "gate-prompt.md");
+		writeFileSync(tmpPrompt, "You are a quality gate checker. Respond only with JSON.", "utf-8");
+		args.push("--append-system-prompt", tmpPrompt);
+		args.push(gatePrompt);
+
 		exitCode = await new Promise<number>((resolveExit) => {
 			const req = createRequire(import.meta.url);
 			let cliPath = "";
@@ -120,75 +241,98 @@ Respond with ONLY the JSON, no other text.`;
 			const proc = spawn(process.execPath, [cliPath, ...args], { cwd: opts.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 			let buffer = "";
 			let settled = false;
-			const done = (code: number) => { if (!settled) { settled = true; resolveExit(code); } };
-			const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} done(124); }, 30000);
+			let forcedExitCode: number | null = null;
+			const onAbort = () => {
+				forcedExitCode = 130;
+				errorMessage = "cancelled during quality gate";
+				try { proc.kill("SIGKILL"); } catch {}
+				done(130);
+			};
+			const done = (code: number) => {
+				if (!settled) {
+					settled = true;
+					opts.signal?.removeEventListener("abort", onAbort);
+					resolveExit(code);
+				}
+			};
+			opts.signal?.addEventListener("abort", onAbort, { once: true });
+			const timer = setTimeout(() => {
+				timedOut = true;
+				errorMessage = `timeout after ${opts.timeoutMs ?? 30000}ms`;
+				try { proc.kill("SIGKILL"); } catch {}
+				done(124);
+			}, opts.timeoutMs ?? 30000);
+
+			const processLine = (ln: string) => {
+				if (!ln.trim()) return;
+				try {
+					const ev = JSON.parse(ln);
+					if (ev.type !== "message_end" || ev.message?.role !== "assistant") return;
+					const u = ev.message.usage || {};
+					gateInputTokens += u.input || 0;
+					gateOutputTokens += u.output || 0;
+					if (opts.pricing && ev.message.model) {
+						gateCost += calcCost(u, lookupPrice(opts.pricing, ev.message.model));
+					} else {
+						gateCost += u.cost?.total || 0;
+					}
+					if (!gateModel && ev.message.model) gateModel = ev.message.model;
+					if (ev.message.errorMessage) errorMessage = ev.message.errorMessage;
+					const content = ev.message.content;
+					if (Array.isArray(content)) {
+						for (const b of content) if (b?.type === "text" && b.text) gateOutput += b.text;
+					}
+				} catch { /* 非 JSON 行不属于 pi 事件流 */ }
+			};
 
 			proc.stdout.on("data", (data) => {
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() ?? "";
-				for (const ln of lines) {
-					if (!ln.trim()) continue;
-					try {
-						const ev = JSON.parse(ln);
-						if (ev.type === "message_end" && ev.message?.role === "assistant") {
-							const u = ev.message.usage || {};
-							gateInputTokens += u.input || 0;
-							gateOutputTokens += u.output || 0;
-							if (opts.pricing && ev.message.model) {
-								gateCost += calcCost(u, lookupPrice(opts.pricing, ev.message.model));
-							} else {
-								gateCost += u.cost?.total || 0;
-							}
-							if (!gateModel && ev.message.model) gateModel = ev.message.model;
-							const content = ev.message.content;
-							if (Array.isArray(content)) {
-								for (const b of content) if (b?.type === "text" && b.text) gateOutput += b.text;
-							}
-						}
-					} catch {}
-				}
+				for (const ln of lines) processLine(ln);
 			});
-			proc.on("error", () => { clearTimeout(timer); done(1); });
-			proc.on("close", (code) => { clearTimeout(timer); done(code ?? 0); });
+			proc.stderr.on("data", data => {
+				stderrBuf = (stderrBuf + data.toString()).slice(-8000);
+			});
+			proc.on("error", (err) => {
+				errorMessage = `spawn error: ${err.message}`;
+				clearTimeout(timer);
+				done(1);
+			});
+			proc.on("close", (code, signal) => {
+				clearTimeout(timer);
+				if (buffer.trim()) processLine(buffer);
+				if (code == null && signal && !timedOut) errorMessage = `judge terminated by ${signal}`;
+				done(forcedExitCode ?? (code ?? (signal ? 1 : 0)));
+			});
 		});
+	} catch (e: any) {
+		exitCode = 1;
+		errorMessage = `judge execution error: ${e?.message ?? e}`;
 	} finally {
-		try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-	}
-
-	// 解析 LLM 输出的 JSON
-	let parsed: { passed: boolean; criteriaResults: Array<{ criterion: string; met: boolean }>; feedback: string } | null = null;
-	try {
-		// 提取 JSON 块 (LLM 可能包裹在 ```json ... ``` 中)
-		const jsonMatch = gateOutput.match(/```json\s*([\s\S]*?)```/) || gateOutput.match(/\{[\s\S]*\}/);
-		if (jsonMatch) {
-			const jsonStr = jsonMatch[1] || jsonMatch[0];
-			parsed = JSON.parse(jsonStr.trim());
+		if (tmpDir) {
+			try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 		}
-	} catch {}
-
-	if (!parsed) {
-		// JSON 解析失败, 回退为通过 (不阻塞工作流)
-		return {
-			passed: true,
-			feedback: `Quality gate could not parse LLM response (exit=${exitCode}). Raw: ${gateOutput.slice(0, 200)}`,
-			criteriaResults: criteria.map(c => ({ criterion: c, met: true })),
-			gateCost: Number(gateCost.toFixed(6)), gateModel, gateInputTokens, gateOutputTokens,
-		};
 	}
 
-	return {
-		passed: parsed.passed,
-		feedback: parsed.feedback || (parsed.passed ? "All criteria met" : "Some criteria not met"),
-		criteriaResults: parsed.criteriaResults || [],
-		gateCost: Number(gateCost.toFixed(6)), gateModel, gateInputTokens, gateOutputTokens,
-	};
+	if (!errorMessage && exitCode !== 0 && stderrBuf.trim()) errorMessage = stderrBuf.trim().slice(0, 500);
+	return interpretQualityGateJudgeExecution({
+		output: gateOutput,
+		exitCode,
+		timedOut,
+		errorMessage,
+		gateCost,
+		gateModel,
+		gateInputTokens,
+		gateOutputTokens,
+	}, criteria);
 }
 
 /** 格式化质量门结果 */
 export function formatQualityGateResult(r: QualityGateResult): string {
+	const status = r.status ?? (r.passed ? "passed" : "failed");
 	const lines = [
-		`[Quality Gate: ${r.passed ? "PASSED" : "FAILED"}]`,
+		`[Quality Gate: ${status.toUpperCase()}]`,
 		`  gate cost: $${r.gateCost.toFixed(6)} (${r.gateInputTokens} in / ${r.gateOutputTokens} out)`,
 	];
 	if (r.criteriaResults.length > 0) {

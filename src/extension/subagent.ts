@@ -14,18 +14,30 @@
  *   - 两者 LLM 工具列表完全一致 (都是内置工具), 行为可公平对比
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
 import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
 import { parseFrontmatter } from "../core/role-manager";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { ModelEntry, RoleRequirement } from "../core/model-capability";
-import { findFallbackModel } from "../core/model-capability";
+import { rankModels } from "../core/model-capability";
 import { SharedBoard } from "../core/shared-board";
+import { MessageBus } from "../core/message-bus";
+import {
+	communicationPolicyFromFrontmatter, evaluateCommunicationContract,
+	formatCommunicationContractInstruction,
+	type CommunicationContractReport, type CommunicationPolicyInput,
+} from "../core/communication-policy";
+import {
+	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, writeEffectiveCapabilitySnapshot,
+	type CapabilityPolicyInput, type WorkspaceCapabilityInput,
+} from "../core/capability-policy";
 
 // ──────────────────────────────── M2-1: 并行 subagent ────────────────────────────────
 
@@ -69,6 +81,8 @@ export async function runSubagentsParallel(
 		timeoutMs?: number;                 // 超时 (默认 120000)
 		maxRetries?: number;                // 重试次数 (默认 1)
 		lockFiles?: Record<string, string[]>;  // per-label 文件锁: {label: [file paths]}
+		signal?: AbortSignal;               // 调用方取消时终止所有子进程
+		maxCostUsd?: number;                // attempt 之间的实际成本硬停止
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
@@ -81,7 +95,7 @@ export async function runSubagentsParallel(
 		tasks.map((t, i) => {
 			const individualStart = Date.now();
 			// per-label session ID 优先, fallback 到 common.sessionId
-			const sid = common.sessionIds?.get(t.label) ?? common.sessionId;
+			const sid = (t.label ? common.sessionIds?.get(t.label) : undefined) ?? common.sessionId;
 			return runSubagent({
 				cwd: common.cwd,
 				agent: t.agent,
@@ -91,10 +105,13 @@ export async function runSubagentsParallel(
 				prefixLayout: common.prefixLayout,
 				pricing: common.pricing,
 				persistent: common.persistent,
+				persistentSessionId: common.persistent ? `flux-${t.label ?? t.agent.name}-${sid}` : undefined,
 				sessionDir: common.sessionDir,
 				timeoutMs: common.timeoutMs,
 				maxRetries: common.maxRetries ?? 1,
 				lockFiles: t.label ? common.lockFiles?.[t.label] : undefined,
+				signal: common.signal,
+				maxCostUsd: common.maxCostUsd,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -167,13 +184,17 @@ export function formatParallelResults(r: ParallelRunResult): string {
 
 export interface SubagentDef {
 	name: string;
+	role?: string;
 	description: string;
 	tools?: string[];
 	model?: string;
 	provider?: string;    // pi provider name; if omitted, child inherits pi default
 	skills?: string[];      // F2: 角色特有 skills (如 ["planning", "code-review"])
+	mcpServers?: string[];
+	workspace?: WorkspaceCapabilityInput;
 	systemPrompt: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
+	communication?: CommunicationPolicyInput; // 角色模板默认；运行实例可收窄或增加完成门
 }
 
 export interface SubagentRunResult {
@@ -194,24 +215,43 @@ export interface SubagentRunResult {
 	retryCount?: number;  // 自动重试次数 (0=首次成功)
 	fallbackModel?: string;  // 降级后的实际使用模型 (如果有)
 	fallbackFrom?: string;   // 原始模型名 (如果发生了降级)
+	communication?: CommunicationContractReport;
+	capability?: {
+		snapshotPath: string;
+		narrowed: string[];
+		cacheBreakingChanges: Array<"tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard">;
+	};
 }
 
 /** 从 .agentflux/agents/*.md 加载 agent 定义 (frontmatter + body), 回落到内建 reviewer */
 export function loadSubagent(cwd: string, name: string): SubagentDef | null {
+	// agent 名会参与文件路径和 session id，禁止路径穿越与分隔符。
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(name)) return null;
 	const dir = join(cwd, ".agentflux", "agents");
-	const file = join(dir, `${name}.md`);
+	const file = resolve(dir, `${name}.md`);
+	if (!file.startsWith(resolve(dir) + sep)) return null;
 	if (existsSync(file)) {
 		try {
 			const { frontmatter, body } = parseFrontmatter(readFileSync(file, "utf-8"));
 			if (!frontmatter.name) return null;
 			const tools = frontmatter.tools?.split(",").map((t) => t.trim()).filter(Boolean);
+			const skills = frontmatter.skills?.split(",").map((skill) => skill.trim()).filter(Boolean);
 			const thinking = frontmatter.thinking as SubagentDef["thinking"] | undefined;
 			return {
 				name: frontmatter.name, description: frontmatter.description ?? "",
 				tools: tools?.length ? tools : undefined, model: frontmatter.model,
 				provider: frontmatter.provider,
+				skills: skills?.length ? [...new Set(skills)] : undefined,
+				mcpServers: frontmatter.mcp_servers?.split(",").map(item => item.trim()).filter(Boolean),
+				workspace: frontmatter.workspace_roots || frontmatter.denied_paths
+					? {
+						roots: frontmatter.workspace_roots?.split(",").map(item => item.trim()).filter(Boolean),
+						deniedPaths: frontmatter.denied_paths?.split(",").map(item => item.trim()).filter(Boolean),
+						blockDangerousCommands: frontmatter.block_dangerous_commands !== "false",
+					} : undefined,
 				systemPrompt: body,
 				thinking: thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinking) ? thinking : undefined,
+				communication: communicationPolicyFromFrontmatter(frontmatter),
 			};
 		} catch { /* fall through */ }
 	}
@@ -230,13 +270,22 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 	return null;
 }
 
+/** 合并项目共享 Skill 与角色 Skill；返回副本，避免污染缓存或调用方定义。 */
+export function withSharedSkills(agent: SubagentDef, sharedSkills?: string[]): SubagentDef {
+	const skills = [...new Set([...(sharedSkills ?? []), ...(agent.skills ?? [])]
+		.map(skill => skill.trim())
+		.filter(Boolean))];
+	return { ...agent, skills: skills.length > 0 ? skills : undefined };
+}
+
 /** 子进程要加载的 entry 路径:
  *  - prefixLayout=true: 用 subagent-entry.ts (精简, 只加载 prefix-layout, 不注册 tool/command)
  *    避免改变子进程 LLM 工具列表和行为 (实验 C 暴露的问题)
  *  - prefixLayout=false: 不加载任何 AgentFlux 扩展 (naive 对照)
  */
-function getSubagentEntryPath(cwd: string): string {
-	return join(cwd, "src", "subagent-entry.ts");
+function getSubagentEntryPath(_cwd: string): string {
+	// 从已安装 package 自身定位，不能假设目标项目也有 src/subagent-entry.ts。
+	return resolve(dirname(fileURLToPath(import.meta.url)), "..", "subagent-entry.ts");
 }
 
 /** 决定 pi 可执行路径: 用 node + pi 的 cli.js (shell:false, 避免 Windows shell 分词) */
@@ -289,11 +338,13 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * 读取 agent 的 inbox + 群组消息, 拼接到 task 前面
  * 让 agent 能看到其他 agent 的反馈, 不需要主 agent 桥接
  */
-function prependInboxMessages(task: string, agentName: string, cwd: string): string {
+function prependInboxMessages(task: string, agentName: string, cwd: string): { task: string; v2MessageIds: string[] } {
 	try {
-		const board = new SharedBoard(join(cwd, ".agentflux"));
+		const fluxDir = join(cwd, ".agentflux");
+		const board = new SharedBoard(fluxDir);
 		const unread = board.getUnreadMessages(agentName);
 		const groupInbox = board.getGroupInbox(agentName);
+		const v2Messages = new MessageBus(fluxDir).poll(agentName, { limit: 20 });
 
 		// 收集所有群组中的最新消息 (只取最后 5 条 per group)
 		const groupMsgs: string[] = [];
@@ -307,15 +358,20 @@ function prependInboxMessages(task: string, agentName: string, cwd: string): str
 
 		const dmMsgs = unread.map(m => `[DM from ${m.from}] ${m.content.slice(0, 200)}`);
 
-		const allMsgs = [...dmMsgs, ...groupMsgs];
-		if (allMsgs.length === 0) return task;
+		const v2Msgs = v2Messages.map(({ envelope }) =>
+			`[V2 ${envelope.channel.type}/${envelope.channel.id} from ${envelope.from}] ${envelope.content.slice(0, 500)}`);
+		const allMsgs = [...dmMsgs, ...groupMsgs, ...v2Msgs];
+		if (allMsgs.length === 0) return { task, v2MessageIds: [] };
 
 		// 标记消息为已读
 		for (const m of unread) board.markMessageRead(m.id);
 
-		return `=== Messages from other agents ===\n${allMsgs.join("\n")}\n=== End messages ===\n\n${task}`;
+		return {
+			task: `=== Messages from other agents ===\n${allMsgs.join("\n")}\n=== End messages ===\n\n${task}`,
+			v2MessageIds: v2Messages.map(item => item.envelope.id),
+		};
 	} catch {
-		return task;  // SharedBoard 不存在时静默跳过
+		return { task, v2MessageIds: [] };  // SharedBoard 不存在时静默跳过
 	}
 }
 
@@ -330,6 +386,11 @@ function isModelError(msg?: string): boolean {
 function isTransientError(msg?: string, output?: string): boolean {
 	const text = `${msg ?? ""} ${output ?? ""}`;
 	return /502|503|500|overloaded|service unavailable|gateway|bad gateway|rate limit|429|timeout|connection (refused|reset|closed)|ECONNREFUSED|ETIMEDY|负载.*上限|过载|服务不可用|超时|请求失败|繁忙/i.test(text);
+}
+
+/** Provider/API 组合不兼容 — 重试同一组合通常无效，应切换模型/provider。 */
+function isProviderCompatibilityError(msg?: string): boolean {
+	return !!msg && /406(?: status code)?|not acceptable/i.test(msg);
 }
 
 /** 注册 agent 到 SharedBoard agent 注册表 */
@@ -358,6 +419,46 @@ function updateAgentStatusInBoard(agentName: string, status: "done" | "failed", 
 	} catch { /* 静默 */ }
 }
 
+const activeSubagentProcesses = new Map<string, ChildProcess>();
+
+/** 当前进程内仍在运行的 pi 子进程，供状态页和取消测试使用。 */
+export function getActiveSubagentRunIds(): string[] {
+	return [...activeSubagentProcesses.keys()];
+}
+
+async function terminateProcessTree(proc: ChildProcess): Promise<void> {
+	if (!proc.pid) return;
+	if (process.platform === "win32") {
+		await new Promise<void>((resolveDone) => {
+			const killer = spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
+				shell: false, stdio: "ignore", windowsHide: true,
+			});
+			killer.once("close", () => resolveDone());
+			killer.once("error", () => resolveDone());
+		});
+		return;
+	}
+	// POSIX 下子进程以独立 process group 启动，负 PID 可终止其整个后代树。
+	try { process.kill(-proc.pid, "SIGTERM"); }
+	catch { try { proc.kill("SIGTERM"); } catch { /* process 已退出 */ } }
+}
+
+function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+	if (signal?.aborted) return Promise.resolve(false);
+	return new Promise(resolveWait => {
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolveWait(true);
+		}, delayMs);
+		const onAbort = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			resolveWait(false);
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 export async function runSubagent(opts: {
 	cwd: string;
 	agent: SubagentDef;
@@ -369,6 +470,7 @@ export async function runSubagent(opts: {
 	provider?: string;
 	pricing?: PricingTable;  // F1-14: 父进程用价格表重算子进程成本
 	persistent?: boolean;     // M2-2: 持久 session
+	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
 	sessionDir?: string;      // M2-2: 自定义 session 目录
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4
 	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
@@ -380,52 +482,184 @@ export async function runSubagent(opts: {
 	roleRequirementForFallback?: RoleRequirement;     // 降级排序用的角色需求
 	fallbackHistory?: string[];                        // 已尝试过的模型 (避免循环)
 	lockFiles?: string[];                              // 文件锁: 防并行编辑冲突
+	signal?: AbortSignal;                              // 取消信号，终止真实子进程并停止重试
+	runId?: string;                                    // 外部 run 关联 id
+	maxCostUsd?: number;                               // attempt 间成本上限（单次调用可能产生少量超额）
+	taskId?: string;                                   // Message V2 / telemetry correlation
+	communicationOverride?: CommunicationPolicyInput; // 注册实例/单次调用动态覆盖角色模板
+	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
+	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
+	invocationOverride?: { command: string; args: string[] };
 }): Promise<SubagentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
-	const timeoutMs = opts.timeoutMs ?? 120000;
+	const runStartedAt = Date.now();
+	const timeoutMs = Math.max(1, opts.timeoutMs ?? 120000);
 	const maxRetries = opts.maxRetries ?? 0;
 	const retryDelayMs = opts.retryDelayMs ?? 2000;
+	const deadline = Date.now() + timeoutMs;
+	const processRunId = opts.runId ?? `subagent-${randomUUID()}`;
+	const agentInstanceId = `${agent.name}:${processRunId}`;
+	const capabilityRole = agent.role ?? agent.name;
+	const registeredRecord = loadRegisteredCapabilityOverride(join(cwd, ".agentflux"), agent.name);
+	if (registeredRecord && registeredRecord.role !== capabilityRole) {
+		return {
+			agent: agent.name, exitCode: 77, output: "",
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+			model: null,
+			errorMessage: `capability policy rejected: registered role ${registeredRecord.role} does not match ${capabilityRole}`,
+			retryCount: 0,
+		};
+	}
+	const registeredCapability = registeredRecord?.override;
+	const runCapability: CapabilityPolicyInput | undefined = opts.capabilityOverride || opts.communicationOverride
+		? { ...(opts.capabilityOverride ?? {}), communication: opts.communicationOverride ?? opts.capabilityOverride?.communication }
+		: undefined;
+	let capabilityPolicy;
+	let capabilitySnapshotPath = "";
+	try {
+		capabilityPolicy = resolveCapabilityPolicy({
+			cwd, agentName: agent.name, role: capabilityRole, runId: processRunId, instanceId: agentInstanceId,
+			template: {
+				tools: agent.tools, skills: agent.skills, mcpServers: agent.mcpServers,
+				communication: agent.communication, workspace: agent.workspace,
+			},
+			registered: registeredCapability,
+			run: runCapability,
+		});
+		if (!prefixLayout) capabilityPolicy.effective.workspace.enforcement = "unavailable";
+		capabilitySnapshotPath = writeEffectiveCapabilitySnapshot(join(cwd, ".agentflux"), capabilityPolicy);
+	} catch (error: any) {
+		telemetry?.writeCapabilityPolicy({
+			sessionId, runId: processRunId, agent: agent.name, role: capabilityRole,
+			instanceId: agentInstanceId, action: "reject", result: "denied",
+			detail: String(error?.message ?? error).slice(0, 500),
+		});
+		return {
+			agent: agent.name, exitCode: 77, output: "",
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+			model: null, errorMessage: `capability policy rejected: ${error?.message ?? error}`, retryCount: 0,
+		};
+	}
+	const communicationPolicy = capabilityPolicy.effective.communication;
+	const capabilityCacheChanges = [...new Set([
+		registeredCapability?.tools || runCapability?.tools ? "tool_schema" : null,
+		registeredCapability?.skills || runCapability?.skills ? "skill_set" : null,
+		registeredCapability?.mcpServers || runCapability?.mcpServers ? "mcp_set" : null,
+		registeredCapability?.communication || registeredCapability?.workspace
+			|| runCapability?.communication || runCapability?.workspace ? "runtime_policy_guard" : null,
+	].filter((item): item is "tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard" => !!item))];
+	const capabilityGeneration = createHash("sha256").update(JSON.stringify({
+		tools: capabilityPolicy.effective.tools,
+		skills: capabilityPolicy.effective.skills,
+		mcpServers: capabilityPolicy.effective.mcpServers,
+	})).digest("hex").slice(0, 12);
+	telemetry?.writeCapabilityPolicy({
+		sessionId, runId: processRunId, agent: agent.name, role: capabilityRole,
+		instanceId: agentInstanceId, action: "resolve", result: "success",
+		narrowed: capabilityPolicy.narrowed, cacheImpact: capabilityCacheChanges,
+		detail: `snapshot=${capabilitySnapshotPath}`,
+	});
 
 	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
 
 	// SharedBoard 集成: 读 inbox + 注册 agent
-	const taskWithInbox = prependInboxMessages(opts.task, agent.name, cwd);
+	let scopedTask = opts.lockFiles && opts.lockFiles.length > 0
+		? `${opts.task}\n\n=== Enforced file edit scope ===\nYou may read other files for context, but you may modify ONLY these paths:\n${opts.lockFiles.map(file => `- ${file}`).join("\n")}\nIf the task requires another file, stop and report the missing scope instead of editing it.\n=== End enforced scope ===`
+		: opts.task;
+	const communicationInstruction = formatCommunicationContractInstruction(communicationPolicy);
+	if (communicationInstruction) scopedTask = `${scopedTask}\n\n${communicationInstruction}`;
+	const inboxInjection = prependInboxMessages(scopedTask, agent.name, cwd);
+	const taskWithInbox = inboxInjection.task;
 	registerAgentInBoard(agent, opts.task, cwd, opts.model ?? agent.model, opts.provider ?? agent.provider);
 
-	// 文件锁: 获取要编辑的文件的锁
+	// 文件锁 owner 必须是本次运行实例，不能只用角色名（两个 implementer 不是同一 owner）。
+	const lockOwner = `${agent.name}:${processRunId}`;
+
+	// 文件锁: 获取要编辑的文件的锁。任何冲突都 fail-closed。
 	const lockedFiles: string[] = [];
+	let lockError: string | undefined;
 	if (opts.lockFiles && opts.lockFiles.length > 0) {
 		try {
 			const board = new SharedBoard(join(cwd, ".agentflux"));
 			for (const fp of opts.lockFiles) {
-				if (board.acquireFileLock(agent.name, fp)) {
+				if (board.acquireFileLock(lockOwner, fp)) {
 					lockedFiles.push(fp);
 				} else {
-					console.error(`[flux subagent] ${agent.name} WARNING: file lock failed for ${fp}, proceeding anyway`);
+					lockError = `file lock conflict: ${fp}`;
+					break;
 				}
 			}
-		} catch { /* */ }
+			if (lockError) board.releaseAllLocks(lockOwner);
+		} catch (error: any) {
+			lockError = `file lock error: ${error?.message ?? error}`;
+		}
 	}
 
 	let retryCount = 0;
 	let lastResult: SubagentRunResult | null = null;
+	let attemptCount = 0;
+	const aggregateUsage: SubagentRunResult["usage"] = {
+		turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
+	};
 
-	while (retryCount <= maxRetries) {
+	const communicationUnavailable = !prefixLayout
+		&& (communicationPolicy.requiredSendTo.length > 0 || communicationPolicy.requireExplicitInboxAck);
+	const workspaceGuardUnavailable = !prefixLayout
+		&& !!(agent.workspace || registeredCapability?.workspace || runCapability?.workspace);
+	if (lockError || opts.signal?.aborted || communicationUnavailable || workspaceGuardUnavailable) {
+		lastResult = {
+			agent: agent.name,
+			exitCode: lockError ? 73 : opts.signal?.aborted ? 130 : communicationUnavailable ? 76 : 77,
+			output: "",
+			usage: { ...aggregateUsage },
+			model: null,
+			errorMessage: lockError ?? (opts.signal?.aborted ? "cancelled before start"
+				: communicationUnavailable ? "communication contract requires prefixLayout subagent extension"
+					: "workspace capability requires prefixLayout subagent tool hook"),
+			retryCount: 0,
+		};
+	}
+
+	while (retryCount <= maxRetries && ![73, 76, 77, 130].includes(lastResult?.exitCode ?? -1)) {
+		if (opts.signal?.aborted) {
+			lastResult = {
+				agent: agent.name, exitCode: 130, output: "", usage: { ...aggregateUsage }, model: null,
+				errorMessage: "cancelled", retryCount: Math.max(0, attemptCount - 1),
+			};
+			break;
+		}
+		if (opts.maxCostUsd !== undefined && aggregateUsage.cost >= opts.maxCostUsd) {
+			lastResult = {
+				agent: agent.name, exitCode: 75, output: "", usage: { ...aggregateUsage }, model: null,
+				errorMessage: `budget exhausted: $${aggregateUsage.cost.toFixed(6)} >= $${opts.maxCostUsd.toFixed(6)}`,
+				retryCount: Math.max(0, attemptCount - 1),
+			};
+			break;
+		}
+		const attemptTimeoutMs = deadline - Date.now();
+		if (attemptTimeoutMs <= 0) {
+			if (lastResult) {
+				lastResult.exitCode = 124;
+				lastResult.errorMessage = `total timeout (${timeoutMs / 1000}s) exhausted across retries/fallbacks`;
+			}
+			break;
+		}
 		// 每次迭代重建 args (因为 tmpDir 路径会变)
 		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--no-context-files", "--approve"];
 
 		// M2-2: 持久 session vs 一次性 ephemeral
 		if (opts.persistent) {
 			const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
-			const agentSessionId = `flux-${agent.name}`;
+			const rawSessionId = `${opts.persistentSessionId ?? `flux-${agent.name}`}-cap-${capabilityGeneration}`;
+			const agentSessionId = rawSessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
 			attemptArgs.push("--session-dir", sDir);
 			attemptArgs.push("--session-id", agentSessionId);
 		} else {
 			attemptArgs.push("--no-session");
 		}
 		// skills
-		if (agent.skills && agent.skills.length > 0) {
-			for (const skill of agent.skills) attemptArgs.push("--skill", skill);
+		if (capabilityPolicy.effective.skills.length > 0) {
+			for (const skill of capabilityPolicy.effective.skills) attemptArgs.push("--skill", skill);
 		} else {
 			attemptArgs.push("--no-skills");
 		}
@@ -439,7 +673,8 @@ export async function runSubagent(opts: {
 		if (provider) attemptArgs.push("--provider", provider);
 		if (model) attemptArgs.push("--model", model);
 		attemptArgs.push("--thinking", thinkingLevel);
-		if (agent.tools?.length) attemptArgs.push("--tools", agent.tools.join(","));
+		if (capabilityPolicy.effective.tools.length > 0) attemptArgs.push("--tools", capabilityPolicy.effective.tools.join(","));
+		else attemptArgs.push("--no-tools");
 
 		let tmpDir: string | null = null;
 		if (agent.systemPrompt.trim()) {
@@ -455,20 +690,58 @@ export async function runSubagent(opts: {
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
 			retryCount,
-			fallbackModel: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? (opts.model ?? agent.model ?? null) : undefined,
+			fallbackModel: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? (opts.model ?? agent.model ?? undefined) : undefined,
 			fallbackFrom: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? opts.fallbackHistory[0] : undefined,
 		};
+		attemptCount++;
 
 		try {
 			const outputParts: string[] = [];
 			let stderrBuf = "";
 			const exitCode = await new Promise<number>((resolveExit) => {
-				const invocation = getPiInvocation(attemptArgs);
-				const proc = spawn(invocation.command, invocation.args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+				const invocation = opts.invocationOverride
+					? { command: opts.invocationOverride.command, args: [...opts.invocationOverride.args, ...attemptArgs] }
+					: getPiInvocation(attemptArgs);
+				const proc = spawn(invocation.command, invocation.args, {
+					cwd,
+					shell: false,
+					stdio: ["ignore", "pipe", "pipe"],
+					detached: process.platform !== "win32",
+					windowsHide: true,
+					env: {
+						...process.env,
+						AGENTFLUX_AGENT_NAME: agent.name,
+						AGENTFLUX_AGENT_INSTANCE_ID: agentInstanceId,
+						AGENTFLUX_RUN_ID: processRunId,
+						AGENTFLUX_TASK_ID: opts.taskId ?? "",
+						AGENTFLUX_COMMUNICATION_POLICY: JSON.stringify(communicationPolicy),
+						AGENTFLUX_CAPABILITY_POLICY: JSON.stringify(capabilityPolicy.effective),
+					},
+				});
 				let buffer = "";
 				let settled = false;
-				const done = (code: number) => { if (!settled) { settled = true; resolveExit(code); } };
-				const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* */ } done(124); }, timeoutMs);
+				let forcedExitCode: number | null = null;
+				let killGraceTimer: NodeJS.Timeout | undefined;
+				const done = (code: number) => {
+					if (!settled) {
+						settled = true;
+						activeSubagentProcesses.delete(processRunId);
+						opts.signal?.removeEventListener("abort", onAbort);
+						if (killGraceTimer) clearTimeout(killGraceTimer);
+						resolveExit(code);
+					}
+				};
+				const requestTermination = (exitCode: number) => {
+					if (forcedExitCode !== null) return;
+					forcedExitCode = exitCode;
+					void terminateProcessTree(proc);
+					// 正常情况下等待 close；极端卡死时 5 秒后解除调用方等待。
+					killGraceTimer = setTimeout(() => done(exitCode), 5000);
+				};
+				const onAbort = () => requestTermination(130);
+				activeSubagentProcesses.set(processRunId, proc);
+				opts.signal?.addEventListener("abort", onAbort, { once: true });
+				const timer = setTimeout(() => requestTermination(124), attemptTimeoutMs);
 
 				const processLine = (line: string) => {
 					if (!line.trim()) return;
@@ -506,8 +779,11 @@ export async function runSubagent(opts: {
 					for (const ln of lines) processLine(ln);
 				});
 				proc.stderr.on("data", (data) => { stderrBuf += data.toString(); });
-				proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(1); });
-				proc.on("close", (code) => { clearTimeout(timer); done(code ?? 0); });
+				proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(forcedExitCode ?? 1); });
+				proc.on("close", (code, signal) => {
+					clearTimeout(timer);
+					done(forcedExitCode ?? (code ?? (signal ? 130 : 1)));
+				});
 			});
 
 			result.exitCode = exitCode;
@@ -518,6 +794,13 @@ export async function runSubagent(opts: {
 		}
 
 		lastResult = result;
+		aggregateUsage.turns += result.usage.turns;
+		aggregateUsage.input += result.usage.input;
+		aggregateUsage.output += result.usage.output;
+		aggregateUsage.cacheRead += result.usage.cacheRead;
+		aggregateUsage.cacheWrite += result.usage.cacheWrite;
+		aggregateUsage.cost += result.usage.cost;
+		aggregateUsage.contextTokens = result.usage.contextTokens;
 
 		// 成功 → 返回 (exitCode=0 且无 errorMessage)
 		if (result.exitCode === 0 && !result.errorMessage) {
@@ -525,61 +808,126 @@ export async function runSubagent(opts: {
 		}
 
 		// 失败 → 判断是否应该重试
+		if (result.exitCode === 130 || opts.signal?.aborted) break;
 		const isTimeout = result.exitCode === 124;
 		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
 		const modelErr = isModelError(result.errorMessage);
 		const transientErr = isTransientError(result.errorMessage, result.output);
+		const providerCompatibilityErr = isProviderCompatibilityError(result.errorMessage);
 
-		// 模型降级: 模型不可用时, 尝试切换到低一档模型 (opt-in)
-		if (modelErr && opts.enableModelFallback && opts.modelsForFallback && opts.roleRequirementForFallback) {
+		const tryModelFallback = (): boolean => {
+			if (!opts.enableModelFallback || !opts.modelsForFallback || !opts.roleRequirementForFallback) return false;
 			const currentModel = opts.model ?? agent.model ?? "";
 			const tried = opts.fallbackHistory ?? [currentModel];
-			// 过滤已尝试的模型
-			const availableModels: Record<string, ModelEntry> = {};
-			for (const [id, entry] of Object.entries(opts.modelsForFallback)) {
-				if (!tried.includes(id)) availableModels[id] = entry;
-			}
-			if (Object.keys(availableModels).length > 0) {
-				const fallback = findFallbackModel(currentModel, opts.roleRequirementForFallback, availableModels);
-				if (fallback) {
-					console.error(`[flux subagent] ${agent.name} model "${currentModel}" unavailable, degrading to "${fallback}"...`);
-					// 用降级模型重试 (不算在 maxRetries 内)
-					opts.model = fallback;
-					opts.fallbackHistory = [...tried, fallback];
-					// 更新 provider 以匹配降级模型
-					if (opts.modelsForFallback[fallback]?.provider) {
-						opts.provider = opts.modelsForFallback[fallback].provider;
-					}
-					continue;  // 重试, 不增加 retryCount
-				}
-			}
-		}
+			const fallback = rankModels(opts.roleRequirementForFallback, opts.modelsForFallback)
+				.map(candidate => candidate.model)
+				.find(candidate => !tried.includes(candidate));
+			if (!fallback || tried.includes(fallback)) return false;
 
-		if (retryCount < maxRetries && (isTimeout || isProcessError || modelErr || transientErr)) {
+			console.error(`[flux subagent] ${agent.name} model/provider "${currentModel}" unavailable, degrading to "${fallback}"...`);
+			opts.model = fallback;
+			opts.fallbackHistory = [...tried, fallback];
+			if (opts.modelsForFallback[fallback]?.provider) {
+				opts.provider = opts.modelsForFallback[fallback].provider;
+			}
+			return true;
+		};
+
+		// 明确的模型或 provider 不兼容错误无需重复相同请求，直接降级。
+		if ((modelErr || providerCompatibilityErr) && tryModelFallback()) continue;
+
+		if (retryCount < maxRetries && (isTimeout || isProcessError || modelErr || transientErr || providerCompatibilityErr)) {
 			const baseDelay = transientErr ? 5000 : retryDelayMs;  // 502/503 退避更久
 			const delay = baseDelay * Math.pow(2, retryCount);  // 指数退避
-			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
+			if (Date.now() + delay >= deadline) {
+				result.exitCode = 124;
+				result.errorMessage = `total timeout (${timeoutMs / 1000}s) exhausted before retry`;
+				break;
+			}
+			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : providerCompatibilityErr ? `provider compatibility: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
 			console.error(`[flux subagent] ${agent.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries} in ${delay}ms...`);
-			await new Promise(r => setTimeout(r, delay));
+			if (!await waitForRetry(delay, opts.signal)) {
+				result.exitCode = 130;
+				result.errorMessage = "cancelled during retry backoff";
+				break;
+			}
 			retryCount++;
 			continue;
 		}
+
+		// 同一 provider 的瞬时错误耗尽重试后，切换下一档模型/provider。
+		if (transientErr && tryModelFallback()) continue;
 
 		// 不重试或达到上限 → 跳出
 		break;
 	}
 
-	const finalResult = lastResult!;
+	const finalResult = lastResult ?? {
+		agent: agent.name, exitCode: 1, output: "", usage: { ...aggregateUsage }, model: null,
+		errorMessage: "subagent finished without a result", retryCount: Math.max(0, attemptCount - 1),
+	};
+	finalResult.usage = { ...aggregateUsage };
+	finalResult.retryCount = Math.max(finalResult.retryCount ?? 0, attemptCount - 1);
+	finalResult.capability = {
+		snapshotPath: capabilitySnapshotPath,
+		narrowed: [...capabilityPolicy.narrowed],
+		cacheBreakingChanges: capabilityCacheChanges,
+	};
+
+	if (finalResult.exitCode === 0 && !finalResult.errorMessage) {
+		const communication = evaluateCommunicationContract({
+			bus: new MessageBus(join(cwd, ".agentflux")), policy: communicationPolicy,
+			sender: agent.name, runId: processRunId, injectedMessageIds: inboxInjection.v2MessageIds,
+		});
+		finalResult.communication = communication;
+		if (!communication.passed) {
+			finalResult.exitCode = 76;
+			const failures = [
+				communication.missingSendTo.length > 0 ? `missing handoff to ${communication.missingSendTo.join(", ")}` : "",
+				communication.unacknowledgedInbox.length > 0 ? `unacknowledged inbox ${communication.unacknowledgedInbox.join(", ")}` : "",
+			].filter(Boolean);
+			finalResult.errorMessage = `communication contract incomplete: ${failures.join("; ")}`;
+		}
+	}
+
+	// 默认兼容模式：只有完整成功（含 communication gate）才确认启动前 inbox。
+	// 显式 ACK 契约必须由 agent 工具在结束前完成。
+	if (finalResult.exitCode === 0 && !finalResult.errorMessage
+		&& !communicationPolicy.requireExplicitInboxAck && inboxInjection.v2MessageIds.length > 0) {
+		try {
+			const bus = new MessageBus(join(cwd, ".agentflux"));
+			for (const messageId of inboxInjection.v2MessageIds) bus.acknowledge(agent.name, messageId);
+		} catch (error: any) {
+			console.error(`[flux message-v2] ${agent.name} acknowledgement failed: ${error?.message ?? error}`);
+		}
+	}
 
 	const hitRate = finalResult.usage.cacheRead / (finalResult.usage.cacheRead + finalResult.usage.input + 1e-9);
 	telemetry?.writeSubagentRun({
 		sessionId, agent: agent.name, task: opts.task.slice(0, 200), model: finalResult.model,
+		runId: processRunId,
+		startedAt: runStartedAt,
+		finishedAt: Date.now(),
 		turns: finalResult.usage.turns, input: finalResult.usage.input, output: finalResult.usage.output,
 		cacheRead: finalResult.usage.cacheRead, cacheWrite: finalResult.usage.cacheWrite,
 		costUsd: Number(finalResult.usage.cost.toFixed(6)), contextTokens: finalResult.usage.contextTokens,
 		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: finalResult.exitCode,
 		persistent: opts.persistent ?? false, thinking: thinkingLevel,
 		retryCount: finalResult.retryCount,
+		communication: finalResult.communication ? {
+			passed: finalResult.communication.passed,
+			missingSendTo: finalResult.communication.missingSendTo,
+			unacknowledgedInbox: finalResult.communication.unacknowledgedInbox,
+		} : undefined,
+		outcome: {
+			status: finalResult.exitCode === 0 && !finalResult.errorMessage ? "success"
+				: finalResult.exitCode === 130 ? "cancelled"
+				: finalResult.exitCode === 124 ? "timeout" : "failure",
+			success: finalResult.exitCode === 0 && !finalResult.errorMessage,
+			exitCode: finalResult.exitCode,
+			retryCount: finalResult.retryCount,
+			error: finalResult.errorMessage,
+		},
 	});
 
 	// SharedBoard: 更新 agent 状态
@@ -589,7 +937,7 @@ export async function runSubagent(opts: {
 	if (lockedFiles.length > 0) {
 		try {
 			const board = new SharedBoard(join(cwd, ".agentflux"));
-			board.releaseAllLocks(agent.name);
+			board.releaseAllLocks(lockOwner);
 		} catch { /* */ }
 	}
 
@@ -600,9 +948,15 @@ export async function runSubagent(opts: {
 export function formatSubagentResult(r: SubagentRunResult): string {
 	const hitRate = r.usage.cacheRead / (r.usage.cacheRead + r.usage.input + 1e-9);
 	const retryInfo = r.retryCount && r.retryCount > 0 ? ` · retries=${r.retryCount}` : "";
+	const succeeded = r.exitCode === 0 && !r.errorMessage;
+	const modelInfo = r.fallbackFrom
+		? ` · fallback=${r.fallbackFrom}→${r.fallbackModel ?? r.model ?? "unknown"}`
+		: r.model ? ` · model=${r.model}` : "";
 	return [
-		`[AgentFlux subagent: ${r.agent}]`,
-		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}`,
+		`[AgentFlux subagent: ${r.agent}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
+		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}`,
+		...(r.errorMessage ? [`error: ${r.errorMessage}`] : []),
+		...(r.capability?.narrowed.length ? [`capability: ${r.capability.narrowed.join(", ")}${r.capability.cacheBreakingChanges.length ? ` · cache-impact=${r.capability.cacheBreakingChanges.join("|")}` : ""}`] : []),
 		``,
 		r.output || "(no output)",
 	].join("\n");

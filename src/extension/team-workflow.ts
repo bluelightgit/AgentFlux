@@ -11,7 +11,7 @@
  *   4. 多轮循环 — 直到 reviewer 通过或达到 maxRounds
  */
 
-import { runSubagent, runSubagentsParallel, loadSubagent, type SubagentDef, type SubagentRunResult, type ParallelSubagentTask, type ParallelRunResult } from "./subagent";
+import { runSubagent, runSubagentsParallel, loadSubagent, withSharedSkills, type SubagentDef, type SubagentRunResult, type ParallelSubagentTask, type ParallelRunResult } from "./subagent";
 import { SharedBoard } from "../core/shared-board";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
@@ -26,12 +26,16 @@ export interface TeamTask {
 }
 
 export interface AgentReview {
+	status: TeamReviewStatus;
 	passed: boolean;
 	issues: string[];
 	suggestions: string[];
 }
 
+export type TeamReviewStatus = "passed" | "failed" | "indeterminate";
+
 export interface TeamReviewResult {
+	status: TeamReviewStatus;
 	agents: Record<string, AgentReview>;  // label → review
 	overall: string;
 	passedCount: number;
@@ -46,7 +50,7 @@ export interface TeamWorkflowResult {
 		reviewResult: TeamReviewResult | null;
 		failedLabels: string[];   // 需要重新 dispatch 的 labels
 	}>;
-	finalStatus: "passed" | "max_rounds" | "no_review";
+	finalStatus: "passed" | "max_rounds" | "no_review" | "indeterminate" | "cancelled" | "budget_exceeded";
 	totalCost: number;
 	totalWallMs: number;
 }
@@ -67,16 +71,15 @@ function buildLockAssignments(tasks: { task: string; label: string }[]): Record<
 	const lockMap: Record<string, string[]> = {};
 	for (const t of tasks) {
 		const files = extractFilePaths(t.task);
-		const owned: string[] = [];
 		for (const fp of files) {
 			if (!fileOwner[fp]) {
 				fileOwner[fp] = t.label;
-				owned.push(fp);
 			} else if (fileOwner[fp] !== t.label) {
 				console.error(`[team-workflow] file conflict: ${fp} wanted by ${t.label}, already owned by ${fileOwner[fp]}`);
 			}
 		}
-		if (owned.length > 0) lockMap[t.label] = owned;
+		// 冲突任务仍必须请求同一把锁；否则第二个任务会因“未分配锁”继续写入。
+		if (files.length > 0) lockMap[t.label] = files;
 	}
 	return lockMap;
 }
@@ -99,11 +102,18 @@ export async function runTeamWithReview(
 		prefixLayout?: boolean;
 		maxRounds?: number;       // 默认 2 (初始 + 1 轮 retry)
 		timeoutMs?: number;       // 默认 180000
+		signal?: AbortSignal;
+		maxCostUsd?: number;
+		sharedSkills?: string[];
 	},
 ): Promise<TeamWorkflowResult> {
 	const maxRounds = opts.maxRounds ?? 2;
 	const timeoutMs = opts.timeoutMs ?? 180000;
 	const board = new SharedBoard(opts.fluxDir);
+	if (implementerTasks.length === 0) throw new Error("Team workflow requires at least one implementer task");
+	if (!Number.isInteger(maxRounds) || maxRounds < 1) throw new Error("Team workflow maxRounds must be a positive integer");
+	const labels = implementerTasks.map(t => t.label);
+	if (new Set(labels).size !== labels.length) throw new Error("Team workflow task labels must be unique");
 
 	const rounds: TeamWorkflowResult["rounds"] = [];
 	let totalCost = 0;
@@ -119,12 +129,15 @@ export async function runTeamWithReview(
 	let finalStatus: TeamWorkflowResult["finalStatus"] = "max_rounds";
 
 	for (let round = 0; round < maxRounds; round++) {
+		if (opts.signal?.aborted) { finalStatus = "cancelled"; break; }
+		if (opts.maxCostUsd !== undefined && totalCost >= opts.maxCostUsd) { finalStatus = "budget_exceeded"; break; }
 		// ── Phase 1: 并行 dispatch implementers (persistent) ──
 		// 加载 agent 定义
 		const agentDefs = new Map<string, SubagentDef>();
 		for (const t of currentTasks) {
 			if (!agentDefs.has(t.agent)) {
-				const def = loadSubagent(opts.cwd, t.agent);
+				const loaded = loadSubagent(opts.cwd, t.agent);
+				const def = loaded ? withSharedSkills(loaded, opts.sharedSkills) : null;
 				agentDefs.set(t.agent, def ?? { name: t.agent } as SubagentDef);
 			}
 		}
@@ -148,54 +161,88 @@ export async function runTeamWithReview(
 			timeoutMs,
 			maxRetries: 2,   // 502/timeout 自动重试
 			lockFiles: buildLockAssignments(currentTasks.map(t => ({ task: t.task, label: t.label }))),
+			signal: opts.signal,
+			maxCostUsd: opts.maxCostUsd === undefined ? undefined : Math.max(0, opts.maxCostUsd - totalCost),
 		});
 
 		totalCost += implResult.totalCost;
+		if (opts.signal?.aborted) {
+			rounds.push({ round: round + 1, implementerResults: implResult, reviewResult: null, failedLabels: currentTasks.map(task => task.label) });
+			finalStatus = "cancelled";
+			break;
+		}
+		if (opts.maxCostUsd !== undefined && totalCost >= opts.maxCostUsd) {
+			rounds.push({ round: round + 1, implementerResults: implResult, reviewResult: null, failedLabels: currentTasks.map(task => task.label) });
+			finalStatus = "budget_exceeded";
+			break;
+		}
 
-		// ── Phase 2: dispatch reviewer ──
+		// ── Phase 2/3: dispatch reviewer + 严格解析反馈 ──
 		const reviewTask = buildReviewTask(currentTasks, implResult, round);
-		const reviewerDef = loadSubagent(opts.cwd, reviewerAgent) ?? { name: reviewerAgent } as SubagentDef;
-		const reviewResult = await runSubagent({
-			cwd: opts.cwd,
-			agent: reviewerDef,
-			task: reviewTask,
-			sessionId: `flux-team-review-round${round}`,
-			telemetry: opts.telemetry,
-			prefixLayout: opts.prefixLayout ?? false,
-			pricing: opts.pricing,
-			persistent: false,           // reviewer 不需要 persistent
-			timeoutMs: 120000,
-			maxRetries: 0,
-		});
+		const loadedReviewer = loadSubagent(opts.cwd, reviewerAgent);
+		const reviewerDef = loadedReviewer ? withSharedSkills(loadedReviewer, opts.sharedSkills) : null;
+		let reviewerRun: SubagentRunResult | null = null;
+		let review: TeamReviewResult;
 
-		totalCost += reviewResult.costUsd ?? 0;
+		if (!reviewerDef) {
+			review = createIndeterminateTeamReview(currentTasks, "", `Reviewer '${reviewerAgent}' is not available`);
+		} else {
+			try {
+				reviewerRun = await runSubagent({
+					cwd: opts.cwd,
+					agent: reviewerDef,
+					task: reviewTask,
+					sessionId: `flux-team-review-round${round}`,
+					telemetry: opts.telemetry,
+					prefixLayout: opts.prefixLayout ?? false,
+					pricing: opts.pricing,
+					persistent: false,           // reviewer 不需要 persistent
+					timeoutMs: 120000,
+					maxRetries: 0,
+					signal: opts.signal,
+					maxCostUsd: opts.maxCostUsd === undefined ? undefined : Math.max(0, opts.maxCostUsd - totalCost),
+				});
+				totalCost += reviewerRun.usage.cost;
 
-		// ── Phase 3: 解析 reviewer 反馈 ──
-		const review = parseReviewOutput(reviewResult.output, currentTasks);
+				if (reviewerRun.exitCode !== 0 || reviewerRun.errorMessage || !reviewerRun.output.trim()) {
+					const reason = reviewerRun.errorMessage
+						?? (reviewerRun.exitCode !== 0 ? `Reviewer exited with code ${reviewerRun.exitCode}` : "Reviewer returned empty output");
+					review = createIndeterminateTeamReview(currentTasks, reviewerRun.output, reason);
+				} else {
+					review = parseReviewOutput(reviewerRun.output, currentTasks);
+				}
+			} catch (e: any) {
+				review = createIndeterminateTeamReview(currentTasks, "", `Reviewer execution failed: ${e?.message ?? e}`);
+			}
+		}
+
+		// implementer 进程失败是硬失败，不能被 reviewer 的 passed=true 覆盖。
+		review = mergeImplementerExecutionFailures(review, currentTasks, implResult);
 
 		// ── Phase 4: 将反馈写入群组 + DM ──
 		// 创建团队群组 (如果不存在)
-		const teamGroupId = `team-${Date.now().toString(36)}`;
-		const allMembers = [...currentTasks.map(t => t.label), "reviewer"];
+		let teamGroupId: string | null = null;
+		const allMembers = [...currentTasks.map(t => t.label), reviewerAgent];
 		try {
-			board.createGroup(`Team Round ${round + 1}`, allMembers, "team", "reviewer", "实现→审查反馈循环");
+			const group = board.createGroup(`Team Round ${round + 1}`, allMembers, "team", reviewerAgent, "实现→审查反馈循环");
+			teamGroupId = group.id;
 			// reviewer 发送总体反馈到群组 (所有 agent 可见)
-			board.sendGroupMessage("reviewer", teamGroupId, `Round ${round + 1} review: ${review.passedCount}/${review.totalCount} passed. ${review.overall}`);
-		} catch { /* 群组可能已存在 */ }
+			board.sendGroupMessage(reviewerAgent, teamGroupId, `Round ${round + 1} review [${review.status}]: ${review.passedCount}/${review.totalCount} passed. ${review.overall}`);
+		} catch { /* 群组消息失败不改变 review verdict */ }
 
 		for (const [label, agentReview] of Object.entries(review.agents)) {
 			if (!agentReview.passed) {
 				// 群组消息: 具体反馈 (所有 agent 可见, 透明)
 				try {
-					board.sendGroupMessage("reviewer", teamGroupId,
+					if (teamGroupId) board.sendGroupMessage(reviewerAgent, teamGroupId,
 						`@${label}: ${agentReview.issues.length} issues found. ${agentReview.suggestions.slice(0, 2).join(" ")}`);
 				} catch {}
 				// DM: 完整反馈 (只有该 agent 看)
 				board.sendMessage(
-					"reviewer",
+					reviewerAgent,
 					label,
 					"review_feedback",
-					JSON.stringify({ round: round + 1, issues: agentReview.issues, suggestions: agentReview.suggestions }, null, 2),
+					JSON.stringify({ round: round + 1, status: agentReview.status, issues: agentReview.issues, suggestions: agentReview.suggestions }, null, 2),
 				);
 			}
 		}
@@ -211,6 +258,11 @@ export async function runTeamWithReview(
 			reviewResult: review,
 			failedLabels,
 		});
+
+		if (review.status === "indeterminate") {
+			finalStatus = "indeterminate";
+			break;
+		}
 
 		if (failedLabels.length === 0) {
 			finalStatus = "passed";
@@ -242,37 +294,36 @@ export async function runTeamWithReview(
 
 // ── 辅助函数 ──
 
-function buildReviewTask(
+export function buildReviewTask(
 	tasks: TeamTask[],
 	implResult: ParallelRunResult,
 	round: number,
 ): string {
-	const outputs = implResult.results.map((r, i) => {
-		const task = tasks[i];
+	const outputs = tasks.map((task, i) => {
 		const result = implResult.results[i];
-		const output = result?.result?.output ?? result?.error ?? "(no output)";
-		return `## Agent: ${task.label}\n**Task:** ${task.task.slice(0, 200)}\n**Status:** ${result?.ok ? "OK" : "FAILED"}\n**Output:**\n${output.slice(0, 3000)}`;
+		const succeeded = !!result && result.exitCode === 0 && !result.errorMessage;
+		const output = result?.output || "(no output)";
+		const error = result?.errorMessage ? `\n**Execution error:** ${result.errorMessage.slice(0, 500)}` : "";
+		return `## Agent: ${task.label}\n**Task:** ${task.task.slice(0, 200)}\n**Status:** ${succeeded ? "OK" : "FAILED"}${error}\n**Output:**\n${output.slice(0, 3000)}`;
 	}).join("\n\n");
+	const responseExample = JSON.stringify({
+		agents: Object.fromEntries(tasks.map(t => [t.label, {
+			passed: false,
+			issues: ["specific issue"],
+			suggestions: ["specific fix"],
+		}])),
+		overall: `0 of ${tasks.length} agents passed`,
+		passedCount: 0,
+		totalCount: tasks.length,
+	}, null, 2);
 
 	return `You are reviewing the output of ${tasks.length} implementer agents (Round ${round + 1}).
 
 Review each agent's output against their task. For each agent, determine if the task was completed correctly.
 
-Output a JSON object (and ONLY the JSON, no other text):
+Output a JSON object (and ONLY the JSON, no other text). The agents object MUST contain exactly these labels and no others: ${tasks.map(t => t.label).join(", ")}.
 \`\`\`json
-{
-  "agents": {
-    "${tasks[0]?.label}": {
-      "passed": true/false,
-      "issues": ["specific issue 1", "specific issue 2"],
-      "suggestions": ["how to fix issue 1", "how to fix issue 2"]
-    }
-    // ... one entry per agent label
-  },
-  "overall": "X of Y agents passed",
-  "passedCount": number,
-  "totalCount": ${tasks.length}
-}
+${responseExample}
 \`\`\`
 
 Judge based on: code correctness, completeness, adherence to task spec, no emoji, Lucide SVG icons only, follows existing code patterns.
@@ -283,39 +334,129 @@ ${outputs}
 `;
 }
 
-function parseReviewOutput(output: string, tasks: TeamTask[]): TeamReviewResult {
-	// 尝试提取 JSON
-	const jsonMatch = output.match(/```json\s*([\s\S]*?)```/) || output.match(/\{[\s\S]*\}/);
-	let parsed: any = null;
+export function createIndeterminateTeamReview(
+	tasks: TeamTask[],
+	rawOutput: string,
+	reason: string,
+): TeamReviewResult {
+	return {
+		status: "indeterminate",
+		agents: Object.fromEntries(tasks.map(t => [t.label, {
+			status: "indeterminate" as const,
+			passed: false,
+			issues: [reason],
+			suggestions: [],
+		}])),
+		overall: reason,
+		passedCount: 0,
+		totalCount: tasks.length,
+		rawOutput,
+	};
+}
 
-	if (jsonMatch) {
-		try {
-			parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-		} catch {
-			// JSON 解析失败, fallback 到全通过
-		}
-	}
+function implementerFailureReason(result: SubagentRunResult | undefined): string | null {
+	if (!result) return "Implementer result is missing";
+	if (result.errorMessage) return `Implementer execution failed: ${result.errorMessage}`;
+	if (result.exitCode !== 0) return `Implementer exited with code ${result.exitCode}`;
+	return null;
+}
 
-	if (!parsed || !parsed.agents) {
-		// Fallback: 全部标记为 passed (非阻塞)
-		return {
-			agents: Object.fromEntries(tasks.map(t => [t.label, { passed: true, issues: [], suggestions: [] }])),
-			overall: "Review parse failed, defaulting to pass",
-			passedCount: tasks.length,
-			totalCount: tasks.length,
-			rawOutput: output,
+/** Reviewer 不能覆盖已知的 implementer 进程失败。 */
+export function mergeImplementerExecutionFailures(
+	review: TeamReviewResult,
+	tasks: TeamTask[],
+	implResult: ParallelRunResult,
+): TeamReviewResult {
+	const agents: Record<string, AgentReview> = { ...review.agents };
+	const failedByExecution: string[] = [];
+
+	for (let i = 0; i < tasks.length; i++) {
+		const task = tasks[i];
+		const reason = implementerFailureReason(implResult.results[i]);
+		if (!reason) continue;
+		failedByExecution.push(task.label);
+		const existing = agents[task.label] ?? {
+			status: "indeterminate" as const, passed: false, issues: [], suggestions: [],
+		};
+		agents[task.label] = {
+			...existing,
+			status: "failed",
+			passed: false,
+			issues: [reason, ...existing.issues.filter(issue => issue !== reason)],
 		};
 	}
 
-	let passedCount = 0;
-	for (const t of tasks) {
-		const r = parsed.agents[t.label];
-		if (r && r.passed) passedCount++;
+	const passedCount = tasks.filter(t => agents[t.label]?.passed === true).length;
+	const status: TeamReviewStatus = review.status === "indeterminate"
+		? "indeterminate"
+		: passedCount === tasks.length ? "passed" : "failed";
+	return {
+		...review,
+		status,
+		agents,
+		passedCount,
+		totalCount: tasks.length,
+		overall: failedByExecution.length > 0
+			? `Implementer execution failed for: ${failedByExecution.join(", ")}. ${review.overall}`
+			: review.overall,
+	};
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+export function parseReviewOutput(output: string, tasks: TeamTask[]): TeamReviewResult {
+	const jsonMatch = output.match(/```json\s*([\s\S]*?)```/) || output.match(/\{[\s\S]*\}/);
+	if (!jsonMatch) return createIndeterminateTeamReview(tasks, output, "Reviewer response did not contain JSON");
+
+	let parsed: any;
+	try {
+		parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+	} catch (e: any) {
+		return createIndeterminateTeamReview(tasks, output, `Reviewer returned invalid JSON: ${e?.message ?? e}`);
+	}
+
+	if (!parsed || typeof parsed !== "object" || !parsed.agents || typeof parsed.agents !== "object" || Array.isArray(parsed.agents)) {
+		return createIndeterminateTeamReview(tasks, output, "Reviewer response does not match the required schema");
+	}
+	if (typeof parsed.overall !== "string" || !Number.isInteger(parsed.passedCount) || !Number.isInteger(parsed.totalCount)) {
+		return createIndeterminateTeamReview(tasks, output, "Reviewer summary fields are missing or malformed");
+	}
+
+	const expectedLabels = tasks.map(t => t.label).sort();
+	const actualLabels = Object.keys(parsed.agents).sort();
+	if (new Set(expectedLabels).size !== expectedLabels.length || actualLabels.length !== expectedLabels.length
+		|| actualLabels.some((label, i) => label !== expectedLabels[i])) {
+		return createIndeterminateTeamReview(tasks, output,
+			`Reviewer labels do not match expected labels: ${expectedLabels.join(", ")}`);
+	}
+
+	const agents: Record<string, AgentReview> = {};
+	for (const task of tasks) {
+		const raw = parsed.agents[task.label];
+		if (!raw || typeof raw !== "object" || typeof raw.passed !== "boolean"
+			|| !isStringArray(raw.issues) || !isStringArray(raw.suggestions)) {
+			return createIndeterminateTeamReview(tasks, output, `Reviewer result for '${task.label}' is malformed`);
+		}
+		agents[task.label] = {
+			status: raw.passed ? "passed" : "failed",
+			passed: raw.passed,
+			issues: raw.issues,
+			suggestions: raw.suggestions,
+		};
+	}
+
+	const passedCount = tasks.filter(t => agents[t.label].passed).length;
+	if (parsed.totalCount !== tasks.length || parsed.passedCount !== passedCount) {
+		return createIndeterminateTeamReview(tasks, output,
+			`Reviewer counts are inconsistent: reported ${parsed.passedCount}/${parsed.totalCount}, actual ${passedCount}/${tasks.length}`);
 	}
 
 	return {
-		agents: parsed.agents,
-		overall: parsed.overall || `${passedCount} of ${tasks.length} passed`,
+		status: passedCount === tasks.length ? "passed" : "failed",
+		agents,
+		overall: parsed.overall,
 		passedCount,
 		totalCount: tasks.length,
 		rawOutput: output,
@@ -345,10 +486,10 @@ export function formatTeamWorkflowResult(result: TeamWorkflowResult): string {
 		lines.push(`Implementers: ${round.implementerResults.results.length} agents, $${round.implementerResults.totalCost.toFixed(4)}`);
 
 		if (round.reviewResult) {
-			lines.push(`Review: ${round.reviewResult.passedCount}/${round.reviewResult.totalCount} passed`);
+			lines.push(`Review [${round.reviewResult.status}]: ${round.reviewResult.passedCount}/${round.reviewResult.totalCount} passed`);
 			for (const [label, review] of Object.entries(round.reviewResult.agents)) {
 				const r = review as AgentReview;
-				const status = r.passed ? "PASS" : "FAIL";
+				const status = r.status === "indeterminate" ? "INDETERMINATE" : r.passed ? "PASS" : "FAIL";
 				lines.push(`  [${status}] ${label}`);
 				if (!r.passed && r.issues.length > 0) {
 					r.issues.forEach((i: string) => lines.push(`         - ${i}`));
@@ -356,8 +497,10 @@ export function formatTeamWorkflowResult(result: TeamWorkflowResult): string {
 			}
 		}
 
-		if (round.failedLabels.length > 0) {
+		if (round.failedLabels.length > 0 && round.reviewResult?.status !== "indeterminate") {
 			lines.push(`Retry needed for: ${round.failedLabels.join(", ")}`);
+		} else if (round.reviewResult?.status === "indeterminate") {
+			lines.push("Reviewer unavailable or response invalid; workflow stopped without retrying.");
 		}
 		lines.push("");
 	}

@@ -10,10 +10,13 @@ import { optimizeBudget, buildAgentModelOptions, formatBudgetPlan, type AgentMod
 import { SidecarClient, optimizeWithBudget } from "../src/core/sidecar";
 import { ExperienceStore } from "../src/core/experience-store";
 import { join } from "node:path";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const CWD = process.cwd();
-const FLUX_DIR = join(CWD, ".agentflux");
+const PROJECT_FLUX_DIR = join(CWD, ".agentflux");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "agentflux-f3-sidecar-"));
+const FLUX_DIR = join(TEST_ROOT, ".agentflux");
 
 interface TestResult { name: string; passed: boolean; detail: string; }
 const results: TestResult[] = [];
@@ -30,7 +33,7 @@ async function main() {
 
 	let modelsConfig: any = null;
 	try {
-		modelsConfig = JSON.parse(readFileSync(join(FLUX_DIR, "models.json"), "utf-8"));
+		modelsConfig = JSON.parse(readFileSync(join(PROJECT_FLUX_DIR, "models.json"), "utf-8"));
 	} catch {}
 	const models = modelsConfig?.models ?? {};
 
@@ -144,7 +147,6 @@ async function main() {
 	// ─── 回退测试: suggestMode via SidecarClient ───
 	console.log("\n  [SidecarClient fallback: suggestMode]");
 
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
 	const expStore = new ExperienceStore(FLUX_DIR);
 
 	// 添加一些经验数据
@@ -186,8 +188,8 @@ async function main() {
 
 	sidecar.dispose();
 
-	// ─── 清理 ───
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
+	// ─── 清理临时目录，从不触碰项目真实 .agentflux ───
+	try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {}
 
 	// ─── 汇总 ───
 	console.log("\n" + "=".repeat(70));

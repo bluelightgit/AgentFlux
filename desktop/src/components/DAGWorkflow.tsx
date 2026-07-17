@@ -31,7 +31,7 @@ const STATUS_ICON: Record<string, string> = {
 
 export const DAGWorkflow: React.FC = () => {
   const dagState = useDashboardStore((s) => s.agentStatus?.dagState);
-  const blackboardAgents = useDashboardStore((s) => s.agentStatus?.blackboardAgents);
+  const blackboardAgents = useDashboardStore((s) => s.agentStatus?.blackboardAgents ?? []);
 
   // Build node list from DAG state + blackboard agents
   const nodes: DAGNode[] = useMemo(() => {

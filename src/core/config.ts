@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
-	DEFAULT_CONFIG, DEFAULT_PREFERENCE, PRESET_TO_MODE,
+	DEFAULT_CONFIG, DEFAULT_PREFERENCE, PRESET_TO_MODE, PRESET_VECTORS,
 	type FluxConfig, type PreferenceConfig, type Preset, type Mode, type Scenario,
 } from "./types";
 
@@ -51,7 +51,29 @@ export function loadConfig(cwd: string): FluxConfig {
 export function loadPreference(cwd: string): PreferenceConfig {
 	const raw = loadRawConfig(cwd);
 	const pref = raw.preference ?? {};
-	return deepMerge(DEFAULT_PREFERENCE, pref as Partial<PreferenceConfig>);
+	const profile = (pref.profile ?? raw.mode ?? DEFAULT_PREFERENCE.profile) as Preset;
+	const presetVector = profile === "custom" ? DEFAULT_PREFERENCE.vector : PRESET_VECTORS[profile] ?? DEFAULT_PREFERENCE.vector;
+	return deepMerge({ ...DEFAULT_PREFERENCE, profile, vector: { ...presetVector } }, pref as Partial<PreferenceConfig>);
+}
+
+/**
+ * 解析项目共享 Skill。
+ *
+ * docs/18、docs/19 将 sharedSkills 定义在 models.json，因此 modelsConfig 是主来源；
+ * 早期版本曾把它放进 agentflux.json，保留 config.sharedSkills 作为兼容回退。
+ * 两处同时存在时不做并集，避免旧配置意外扩大子 agent 权限。
+ */
+export function resolveSharedSkills(config: FluxConfig, modelsConfig: any): string[] {
+	const hasModelsValue = !!modelsConfig
+		&& typeof modelsConfig === "object"
+		&& Object.prototype.hasOwnProperty.call(modelsConfig, "sharedSkills");
+	const raw = hasModelsValue ? modelsConfig.sharedSkills : config.sharedSkills;
+	if (!Array.isArray(raw)) return [];
+	return [...new Set(raw
+		.filter((value): value is string => typeof value === "string")
+		.map(value => value.trim())
+		.filter(value => value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value))
+	)];
 }
 
 /** 保存偏好配置回 .agentflux/agentflux.json (合并写入) */
@@ -77,9 +99,12 @@ export function applyScenarioOverride(
 ): PreferenceConfig {
 	if (!scenario || !pref.scenarios[scenario]) return pref;
 	const ov = pref.scenarios[scenario]!;
+	const profile = ov.profile ?? pref.profile;
+	const profileVector = profile === "custom" ? pref.vector : PRESET_VECTORS[profile] ?? pref.vector;
 	const merged: PreferenceConfig = {
 		...pref,
-		vector: { ...pref.vector, ...ov } as any,
+		profile,
+		vector: { ...profileVector, ...ov } as any,
 	};
 	if (ov.profile) {
 		merged.profile = ov.profile;
@@ -98,13 +123,52 @@ export function applyRuntimeOverride(
 	if (!runtimePreset || runtimePreset === config.mode) return { config, pref };
 	return {
 		config: { ...config, mode: runtimePreset },
-		pref: { ...pref, profile: runtimePreset },
+		pref: {
+			...pref,
+			profile: runtimePreset,
+			vector: runtimePreset === "custom" ? pref.vector : { ...(PRESET_VECTORS[runtimePreset] ?? pref.vector) },
+		},
 	};
 }
 
 /** 校验配置软约束 (docs/04), 返回 warning 列表 */
 export function validateConfig(config: FluxConfig): string[] {
 	const warnings: string[] = [];
+	if (!Number.isInteger(config.communication.poll_interval_ms) || config.communication.poll_interval_ms < 100 || config.communication.poll_interval_ms > 60_000) {
+		warnings.push("communication.poll_interval_ms 必须是 100–60000 的整数毫秒");
+	}
+	if (!Number.isInteger(config.communication.batch_size) || config.communication.batch_size < 1 || config.communication.batch_size > 20) {
+		warnings.push("communication.batch_size 必须是 1–20 的整数");
+	}
+	if (!Number.isInteger(config.communication.heartbeat_interval_ms) || config.communication.heartbeat_interval_ms < 1_000 || config.communication.heartbeat_interval_ms > 60_000) {
+		warnings.push("communication.heartbeat_interval_ms 必须是 1000–60000 的整数毫秒");
+	}
+	if (!Number.isInteger(config.communication.runtime_lease_ms) || config.communication.runtime_lease_ms < 5_000 || config.communication.runtime_lease_ms > 300_000) {
+		warnings.push("communication.runtime_lease_ms 必须是 5000–300000 的整数毫秒");
+	} else if (config.communication.runtime_lease_ms < config.communication.heartbeat_interval_ms * 2) {
+		warnings.push("communication.runtime_lease_ms 应至少为 heartbeat_interval_ms 的 2 倍");
+	}
+	if (!Number.isInteger(config.communication.redelivery_after_ms) || config.communication.redelivery_after_ms < 5_000 || config.communication.redelivery_after_ms > 3_600_000) {
+		warnings.push("communication.redelivery_after_ms 必须是 5000–3600000 的整数毫秒");
+	}
+	if (config.retention.enabled) {
+		for (const [name, value] of Object.entries({
+			terminal_agent_ttl_hours: config.retention.terminal_agent_ttl_hours,
+			read_message_ttl_hours: config.retention.read_message_ttl_hours,
+			orphan_session_ttl_hours: config.retention.orphan_session_ttl_hours,
+		})) {
+			if (!Number.isFinite(value) || value < 1) warnings.push(`retention.${name} 必须是 >= 1 的有限小时数`);
+		}
+		for (const [name, value] of Object.entries({
+			max_terminal_agents: config.retention.max_terminal_agents,
+			max_read_messages: config.retention.max_read_messages,
+		})) {
+			if (!Number.isInteger(value) || value < 0) warnings.push(`retention.${name} 必须是 >= 0 的整数`);
+		}
+	}
+	if (config.routing.budget_aware) {
+		warnings.push("routing.budget_aware 当前仅执行任务成本/次数/墙钟硬限制；model/topology 预算优化器尚未接入生产入口");
+	}
 	if (config.context_topology === "peers" && config.lifecycle === "compact") {
 		warnings.push("peers + compact: 持久 session 用 compact 会频繁摧毁 cache, 建议 handoff/fork-prune");
 	}

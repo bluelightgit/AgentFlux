@@ -7,8 +7,9 @@
 
 ### 1.1 AgentFlux Desktop 是什么
 
-AgentFlux Desktop 是 AgentFlux 路由决策系统的可视化前端和项目管理中心。它不替代 pi TUI 的编码能力，而是在上层提供：
+AgentFlux Desktop 是 AgentFlux 的多 Agent 工作台和路由决策控制面。它通过 pi RPC 管理独立 runtime，让用户直接分发任务和持续沟通；pi TUI 仍保留终端原生体验。Desktop 提供：
 
+- **多 Agent 操作台**: 同时启动多个独立 runtime，发送 Prompt/Steer/Follow-up，取消任务并查看真实事件流
 - **决策可视化**: 将路由历史、cache 趋势、成本分析从 footer 文字升级为交互式图表
 - **多项目管理**: 一个界面监控多个项目的 agent 运行状态、路由决策、成本趋势
 - **后台 daemon**: pi 进程在后台运行，Desktop 作为控制面板和通知中心
@@ -18,14 +19,14 @@ AgentFlux Desktop 是 AgentFlux 路由决策系统的可视化前端和项目管
 
 | 维度 | pi TUI 扩展 (现有) | AgentFlux Desktop (Phase 4) |
 |---|---|---|
-| 用户界面 | 终端 footer + SelectList | 桌面 GUI + 图表 + 通知 |
+| 用户界面 | 终端 footer + SelectList | runtime roster + 对话/事件流 + 任务 composer + 图表/通知 |
 | 项目数 | 单项目 | 多项目并行监控 |
 | 运行时 | pi 进程内 (extension) | 独立进程 + pi daemon |
 | 数据消费 | 实时 footer | events.jsonl 历史聚合 + 实时推送 |
 | 偏好调整 | `/flux preference` TUI | 雷达图拖拽 + 场景覆盖编辑 |
 | 路由控制 | override_mode footer hint | 一键切换 suggest/auto + 手动选模式 |
 
-核心理念: **pi TUI 是执行层, Desktop 是决策层和监控层**。两者共享 `.agentflux/` 配置和 `events.jsonl` 数据。
+核心理念: **pi/AgentFlux 是执行与路由内核，Desktop 是多 runtime 操作、决策和监控工作台**。两者共享 `.agentflux/` 配置、RPC 事件和 `events.jsonl` 数据。
 
 ### 1.3 目标用户
 

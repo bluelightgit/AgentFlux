@@ -32,6 +32,7 @@ export function useLiveUpdate(
     const poll = async () => {
       try {
         const size = await window.api.getFileSize(filePath);
+        if (cancelled) return;
         setState(prev => {
           if (size > prev.lastSize) {
             onNewDataRef.current?.();

@@ -5,7 +5,8 @@
 
 import { join } from "node:path";
 import { existsSync, readFileSync, readdirSync, appendFileSync, statSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { loadConfig } from "../core/config";
 
 // ─── 类型 ───
 
@@ -72,6 +73,27 @@ export interface VersionInfo {
 
 // ─── 版本信息 ───
 
+function runGit(cwd: string, args: string[], timeout = 5000): string {
+	return execFileSync("git", args, {
+		cwd,
+		encoding: "utf-8",
+		timeout,
+		stdio: ["ignore", "pipe", "ignore"],
+	}).trim();
+}
+
+function listTypeScriptFiles(dir: string): string[] {
+	if (!existsSync(dir)) return [];
+
+	const files: string[] = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const path = join(dir, entry.name);
+		if (entry.isDirectory()) files.push(...listTypeScriptFiles(path));
+		else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(path);
+	}
+	return files;
+}
+
 export function getVersionInfo(cwd: string): VersionInfo {
 	let version = "unknown";
 	try {
@@ -83,23 +105,20 @@ export function getVersionInfo(cwd: string): VersionInfo {
 	let clean = false;
 	let branch = "unknown";
 	try {
-		commit = execSync("git rev-parse --short HEAD", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
-		clean = execSync("git status --porcelain", { cwd, encoding: "utf-8", timeout: 5000 }).trim() === "";
-		branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+		commit = runGit(cwd, ["rev-parse", "--short", "HEAD"]);
+		clean = runGit(cwd, ["status", "--porcelain"]) === "";
+		branch = runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 	} catch {}
 
-	let fileCount = 0;
+	const files = listTypeScriptFiles(join(cwd, "src"));
+	const fileCount = files.length;
 	let totalLines = 0;
-	try {
-		const files = execSync('find src/ -name "*.ts"', { cwd, encoding: "utf-8", timeout: 5000 }).trim().split("\n").filter(Boolean);
-		fileCount = files.length;
-		for (const f of files) {
-			try {
-				const content = readFileSync(join(cwd, f), "utf-8");
-				totalLines += content.split("\n").length;
-			} catch {}
-		}
-	} catch {}
+	for (const file of files) {
+		try {
+			const content = readFileSync(file, "utf-8");
+			totalLines += content === "" ? 0 : content.split(/\r?\n/).length;
+		} catch {}
+	}
 
 	return { version, commit, clean, branch, fileCount, totalLines };
 }
@@ -175,8 +194,9 @@ export function checkHealth(cwd: string, fluxDir: string): HealthReport {
 
 	// 5. SharedBoard dirs
 	try {
-		const requiredDirs = ["", "tasks", "handoffs", "decisions", "messages"];
-		const missing = requiredDirs.filter(d => !existsSync(join(fluxDir, d)));
+		const sharedDir = join(fluxDir, "shared");
+		const requiredDirs = ["", "tasks", "handoffs", "decisions", "messages", "groups", "agents"];
+		const missing = requiredDirs.filter(d => !existsSync(join(sharedDir, d)));
 		if (missing.length === 0) {
 			checks.push({ name: "SharedBoard", status: "ok", detail: "all dirs exist" });
 		} else {
@@ -214,7 +234,7 @@ export function checkHealth(cwd: string, fluxDir: string): HealthReport {
 
 	// 8. Git status (source code integrity)
 	try {
-		const porcelain = execSync("git status --porcelain", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+		const porcelain = runGit(cwd, ["status", "--porcelain"]);
 		if (porcelain === "") {
 			checks.push({ name: "Git", status: "ok", detail: "working tree clean" });
 		} else {
@@ -254,9 +274,77 @@ export function checkHealth(cwd: string, fluxDir: string): HealthReport {
 			} else {
 				checks.push({ name: "Models", status: "warn", detail: `unknown models using pricing fallback: ${unknown.join(", ")} — add to models.json for accurate cost` });
 			}
+		} else {
+			checks.push({ name: "Models", status: "ok", detail: "no telemetry events yet" });
 		}
 	} catch (e: any) {
 		checks.push({ name: "Models", status: "warn", detail: `model check failed: ${e?.message}` });
+	}
+
+	// 10. Lifecycle retention / active-state pressure
+	try {
+		const config = loadConfig(cwd);
+		const runtimeDir = join(fluxDir, "runtime");
+		const sharedDir = join(fluxDir, "shared");
+		const roleRoot = existsSync(join(runtimeDir, "registry.json"))
+			? JSON.parse(readFileSync(join(runtimeDir, "registry.json"), "utf-8")) : { instances: [] };
+		const persistentRoot = existsSync(join(runtimeDir, "persistent-agents.json"))
+			? JSON.parse(readFileSync(join(runtimeDir, "persistent-agents.json"), "utf-8")) : { agents: [] };
+		const sharedAgents = existsSync(join(sharedDir, "agents", "_registry.json"))
+			? JSON.parse(readFileSync(join(sharedDir, "agents", "_registry.json"), "utf-8")) : [];
+		const roleTerminal = (roleRoot.instances ?? []).filter((item: any) => ["done", "failed", "cancelled"].includes(item.status)).length;
+		const persistentItems = Array.isArray(persistentRoot) ? persistentRoot : persistentRoot.agents ?? [];
+		const persistentTerminal = persistentItems.filter((item: any) => ["done", "failed", "cancelled"].includes(item.status)).length;
+		const sharedTerminal = (Array.isArray(sharedAgents) ? sharedAgents : []).filter((item: any) => ["done", "failed"].includes(item.status)).length;
+		const messageDir = join(sharedDir, "messages");
+		let readDirect = 0;
+		if (existsSync(messageDir)) {
+			for (const file of readdirSync(messageDir).filter(file => file.endsWith(".json"))) {
+				try {
+					const message = JSON.parse(readFileSync(join(messageDir, file), "utf-8"));
+					if (message.read === true && message.to !== "broadcast") readDirect++;
+				} catch {}
+			}
+		}
+		let messageV2Terminal = 0;
+		let messageV2Outstanding = 0;
+		let messageV2Bytes = 0;
+		const messageV2Root = join(sharedDir, "messages-v2");
+		const deliveryRoot = join(messageV2Root, "deliveries");
+		if (existsSync(deliveryRoot)) {
+			for (const recipient of readdirSync(deliveryRoot, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
+				const recipientDir = join(deliveryRoot, recipient.name);
+				for (const file of readdirSync(recipientDir).filter(file => file.endsWith(".json"))) {
+					try {
+						const path = join(recipientDir, file);
+						const delivery = JSON.parse(readFileSync(path, "utf-8"));
+						messageV2Bytes += statSync(path).size;
+						if (["acknowledged", "rejected", "expired"].includes(delivery.status)) messageV2Terminal++;
+						else messageV2Outstanding++;
+					} catch {}
+				}
+			}
+		}
+		const envelopeRoot = join(messageV2Root, "envelopes");
+		if (existsSync(envelopeRoot)) {
+			for (const file of readdirSync(envelopeRoot).filter(file => file.endsWith(".json"))) {
+				try { messageV2Bytes += statSync(join(envelopeRoot, file)).size; } catch {}
+			}
+		}
+		const sessionsDir = join(runtimeDir, "sessions");
+		const activeSessions = existsSync(sessionsDir)
+			? readdirSync(sessionsDir, { withFileTypes: true }).filter(entry => entry.isFile()).length : 0;
+		const archiveDir = join(fluxDir, "archive", "lifecycle");
+		const archives = existsSync(archiveDir)
+			? readdirSync(archiveDir, { withFileTypes: true }).filter(entry => entry.isDirectory()).length : 0;
+		const terminal = roleTerminal + persistentTerminal + sharedTerminal;
+		checks.push({
+			name: "Retention",
+			status: config.retention.enabled ? "ok" : "warn",
+			detail: `${config.retention.enabled ? "auto GC enabled" : "auto GC disabled"}; terminal=${terminal}, read-direct=${readDirect}, v2-terminal=${messageV2Terminal}, v2-outstanding=${messageV2Outstanding}, v2-bytes=${messageV2Bytes}, active-sessions=${activeSessions}, archives=${archives}`,
+		});
+	} catch (e: any) {
+		checks.push({ name: "Retention", status: "warn", detail: `retention check failed: ${e?.message}` });
 	}
 
 	const okCount = checks.filter(c => c.status === "ok").length;
@@ -307,7 +395,10 @@ export function scanRecentIssues(eventsPath: string, windowSize = 20): Issue[] {
 		// 3. Routing fallback frequency
 		const routingEvents = recent.filter(e => e.type === "routing.decision");
 		if (routingEvents.length >= 3) {
-			const fallbacks = routingEvents.filter(e => e.fallback === true);
+			const fallbacks = routingEvents.filter(e =>
+				e.fallback === true // v1 telemetry compatibility
+				|| (Array.isArray(e.reason) && e.reason.some((reason: string) => reason.startsWith("capability:")))
+			);
 			if (fallbacks.length > routingEvents.length / 2) {
 				issues.push({
 					severity: "warn",
@@ -319,7 +410,7 @@ export function scanRecentIssues(eventsPath: string, windowSize = 20): Issue[] {
 		}
 
 		// 4. Context percent high (approaching compaction)
-		const highCtx = cacheEvents.filter(e => (e.contextPercent ?? 0) > 85);
+		const highCtx = cacheEvents.filter(e => (e.contextPercent ?? 0) > 0.85);
 		if (highCtx.length >= 2) {
 			issues.push({
 				severity: "warn",
@@ -336,7 +427,7 @@ export function scanRecentIssues(eventsPath: string, windowSize = 20): Issue[] {
 
 // ─── 升级检测 ───
 
-export function checkUpgrade(cwd: string): UpgradeInfo {
+export function checkUpgrade(cwd: string, options: { fetchRemote?: boolean } = {}): UpgradeInfo {
 	let currentCommit = "unknown";
 	let currentMessage = "";
 	let currentBranch = "main";
@@ -344,25 +435,25 @@ export function checkUpgrade(cwd: string): UpgradeInfo {
 	let hasRemote = false;
 
 	try {
-		currentCommit = execSync("git rev-parse --short HEAD", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
-		currentMessage = execSync("git log -1 --format=%s", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
-		currentBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+		currentCommit = runGit(cwd, ["rev-parse", "--short", "HEAD"]);
+		currentMessage = runGit(cwd, ["log", "-1", "--format=%s"]);
+		currentBranch = runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 	} catch {}
 
 	// Check if remote exists
 	try {
-		const remotes = execSync("git remote", { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+		const remotes = runGit(cwd, ["remote"]);
 		hasRemote = remotes.length > 0;
 	} catch {}
 
 	if (hasRemote) {
 		try {
 			// Fetch (non-fatal)
-			execSync("git fetch --quiet", { cwd, encoding: "utf-8", timeout: 15000 });
+			if (options.fetchRemote !== false) runGit(cwd, ["fetch", "--quiet"], 15000);
 
 			// Get commits between HEAD and origin/<branch>
 			const range = `HEAD..origin/${currentBranch}`;
-			const log = execSync(`git log ${range} --oneline --format=%h|%s`, { cwd, encoding: "utf-8", timeout: 5000 }).trim();
+			const log = runGit(cwd, ["log", range, "--format=%h|%s"]);
 
 			if (log) {
 				remoteCommits = log.split("\n").filter(Boolean).map(line => {

@@ -20,11 +20,13 @@ import { assessStepComplexity, selectModelForStep, planStepModels, formatStepMod
 import { loadConfig } from "../src/core/config";
 import { loadPricing } from "../src/core/pricing";
 import { join } from "node:path";
-import { readFileSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const CWD = process.cwd();
-const FLUX_DIR = join(CWD, ".agentflux");
-const TEST_EXP_DIR = join(FLUX_DIR, "runtime", "test-experience");
+const PROJECT_FLUX_DIR = join(CWD, ".agentflux");
+const TEST_ROOT = mkdtempSync(join(tmpdir(), "agentflux-f3-experience-"));
+const FLUX_DIR = join(TEST_ROOT, ".agentflux");
 
 interface TestResult { name: string; passed: boolean; detail: string; }
 const results: TestResult[] = [];
@@ -42,16 +44,13 @@ async function main() {
 	const config = loadConfig(CWD);
 	let pricingTable: any = null;
 	try {
-		pricingTable = await loadPricing(FLUX_DIR, config.pricing, "deepseek-v4-flash");
+		pricingTable = await loadPricing(FLUX_DIR, { ...config.pricing, enable_remote_fetch: false }, "deepseek-v4-flash");
 	} catch (e: any) { console.warn(`Pricing load failed: ${e?.message}`); }
 
 	let modelsConfig: any = null;
 	try {
-		modelsConfig = JSON.parse(readFileSync(join(FLUX_DIR, "models.json"), "utf-8"));
+		modelsConfig = JSON.parse(readFileSync(join(PROJECT_FLUX_DIR, "models.json"), "utf-8"));
 	} catch {}
-
-	// 清理测试数据
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
 
 	// ═══════════════════════════════════════════
 	// F3-3: ExperienceStore
@@ -295,8 +294,8 @@ async function main() {
 		reviewStep?.selection.thinking === "high",
 		`review thinking=${reviewStep?.selection.thinking}`);
 
-	// ─── 清理 ───
-	try { rmSync(join(FLUX_DIR, "runtime", "experience.jsonl")); } catch {}
+	// ─── 清理临时目录，从不触碰项目真实 .agentflux ───
+	try { rmSync(TEST_ROOT, { recursive: true, force: true }); } catch {}
 
 	// ─── 汇总 ───
 	console.log("\n" + "=".repeat(70));

@@ -1,6 +1,6 @@
 # 19 - 多 Agent 架构
 
-> 共享黑板 + 角色信箱。文件沟通,不做 IPC。MCP 全局共享,tools/skills 角色隔离。
+> 共享黑板 + 角色信箱。持久消息用可审计文件协议，实时 runtime 由受控 RPC pump 注入；能力按角色、注册实例和单次运行逐层收窄。
 
 ## 问题
 
@@ -224,7 +224,7 @@ reviewer:    read, grep, bash  (只读)
 tester:      read, write, edit, bash  (可写测试文件)
 ```
 
-子进程启动时通过 pi 的工具过滤机制限制可用工具 (当前 pi 子进程通过 `--no-skills` 等参数控制,后续可扩展为精确工具白名单)。
+子进程启动时通过 pi 的 `--tools` 参数应用角色工具白名单；通信策略启用时，宿主会将 `flux_agent_message` 追加到该白名单，禁用时不追加。未配置 Skill 时使用 `--no-skills`，配置后按项传递 `--skill`。这属于进程级可用能力过滤，但 reviewer/planner 若仍获准 `bash`，仅靠 prompt 中的“只读”约束不等同于安全沙箱。
 
 ### Skills: 角色级过滤 + 共享继承
 
@@ -239,7 +239,43 @@ tester:      read, write, edit, bash  (可写测试文件)
 }
 ```
 
-`sharedSkills` 是所有角色都加载的基础 skill,`roles[x].skills` 是角色特有的。子进程启动时用 `--skills` 参数传入完整列表 (shared + role-specific)。
+`sharedSkills` 是所有角色都加载的基础 Skill，规范位置是 `.agentflux/models.json`；`roles[x].skills` 或 Agent Markdown frontmatter 的 `skills` 是角色特有配置。运行时合并、去重后，每项用一个 `--skill` 传给子进程；如果 `models.json` 未声明，兼容读取旧版 `.agentflux/agentflux.json.sharedSkills`。直接、并行、team 与 DAG 入口使用同一合并规则。
+
+## Message/Delivery V2
+
+V2 使用消息本体与逐接收者 Delivery 分离的文件协议，目录位于 `.agentflux/shared/messages-v2/`：
+
+- direct、broadcast、group 都在发送时快照实际接收者，每个接收者独立维护 `pending → delivered → acknowledged/rejected/expired`。
+- `dedupeKey` 提供发送者作用域的幂等发送；`correlationId`、`taskId`、`artifactId` 用于问题/回复和任务 provenance。
+- 每个 Agent 有独立 cursor、优先级队列、pending 上限和消息大小/接收者数量限制。
+- poll 只把消息标记为 `delivered`；一次性 subagent 成功完成后才 ack，失败时保留 delivered 状态并在 lease 到期后重投。
+- `flux_message_v2` 提供给主协调 Agent；`flux_agent_message` 由精简子进程入口按角色策略注册。后者不接受 sender 参数，发送身份、实例 ID 和 run ID 由父进程注入。
+- 角色模板可声明 actions/targets 白名单、单次消息上限、`requiredSendTo` 和显式 inbox ACK；注册实例可以持久收窄，直接 `flux_subagent` 调用还可以在其上做单次动态收窄。扩大动作、目标或 quota 会在 provider 调用前 fail-closed。
+- required handoff 只接受当前 run correlation 的出站消息；显式 ACK 契约要求子 Agent 主动确认。任一条件缺失时 completion gate 以 exit 76 fail-closed，并记录 `message.protocol`/`subagent.run` 审计信息。
+
+该协议和身份/契约层已做 offline 验证。Persistent/RPC runtime 已具备实验性的 inbox pump：空闲消息注入新 prompt，忙碌的 high/critical 或 `steer` 消息注入 steer，普通消息排入 follow-up；只有对应轮次成功返回 assistant 结果后才 ACK，失败或断线保留 Delivery 并等待 lease 重投。pi 的 queued follow-up 在同一 agent lifecycle 内 drain，pump 以当前轮和下一次 assistant 结果为 ACK 边界，不依赖第二个 `agent_start`。pump 默认关闭，由配置或受控启动器显式开启。
+
+Runtime 注册采用 name（可路由身份）+ instanceId（具体进程身份）两层模型：heartbeat 续租、活跃租约拒绝同名接管、presence 更新按 instanceId fencing；crash 后新实例必须等待租约，到期后才可用同名接管并重投 delivered 消息。Desktop live smoke 已验证 normal follow-up、critical steer、idle prompt、abort cancelled、同名租约冲突和 crash 后 attempts=2 的恢复 ACK。
+
+## 分层能力与隔离边界
+
+tools、skills、MCP、通信与 workspace 使用统一的三层策略：角色模板是能力上限，注册实例覆盖持久化到 `.agentflux/runtime/capability-overrides/`，单次运行只能继续收窄。有效策略、provenance 与收窄字段写入 `.agentflux/runtime/capability-effective/`，Desktop 通过只读 IPC 消费；修改必须走带 expected revision 的 `flux_capability_policy set`。
+
+有效 tool/skill 集合会直接成为子进程 CLI 参数；宿主 `tool_call` hook 同时检查工具白名单、workspace roots、denied paths、路径逃逸与危险 shell 模式。能力扩大在启动 provider 前以 exit 77 拒绝，策略解析和拒绝均写入 `capability.policy` 审计。该门禁不等于 OS 沙箱；当前 pi 也没有可验证的 MCP server 级 hook，因此非空 MCP 策略暂时 fail-closed。能力形状改变会产生 cache-impact 提示并改变持久 session 的能力 hash，避免权限撤销后命中旧 session。
+
+这仍不等于所有一次性 subagent 都具备实时收件能力：普通 `flux_subagent` 子进程没有常驻 RPC 控制通道，运行期间仍需模型主动调用 `flux_agent_message poll`。实时自动收件只承诺给启用了 pump 且身份唯一的 Persistent/RPC runtime；跨进程断线恢复的完整 Desktop live smoke 在实现状态文档中单独跟踪。
+
+## 生命周期与回收
+
+子进程的运行时生命周期由 abort signal、超时和进程树终止负责；完成后的 registry、消息和 session 文件属于持久状态，不会占用主 Agent 的上下文，但无限增长会增加状态扫描、UI 展示和磁盘开销。
+
+当前生产策略：
+
+- `session_start` 按 `retention` 配置自动执行安全 GC；也可用 `/flux gc dry-run` 预览或 `/flux gc` 手动执行。
+- 只处理带有效时间戳的终态 Agent；运行中存在子进程时正式 GC fail-closed。
+- V1 已读点对点消息可归档；V1 未读、广播和群组消息保留。V2 只有在所有接收者的 Delivery 均为 `acknowledged/rejected/expired` 后，才按 `read_message_ttl_hours` 和 `max_read_messages` 归档 envelope 与逐成员 delivery；任何 pending/delivered Delivery 都会保留。
+- 被活跃 Agent 引用的 session 永远保留；移除终态 Agent 后的 session 和超过 TTL 的孤儿 session 移入审计归档。
+- 归档目录为 `.agentflux/archive/lifecycle/<run-id>/`，包含 manifest、V1/V2 消息和 session。Retention health 同时报告 V2 terminal/outstanding delivery 和活跃消息字节数。当前 GC 收缩活跃状态集，但归档本身的磁盘 TTL/总容量上限尚未实现。
 
 ## 主 agent 作为协调者
 
@@ -302,7 +338,7 @@ tester:      read, write, edit, bash  (可写测试文件)
 ## 关键设计决策
 
 1. **文件沟通,不做 IPC** — 简单、可审计、可恢复、git 友好
-2. **MCP 全局共享,tools/skills 角色隔离** — 重资源共享,轻资源按需
+2. **能力默认最小化并逐层收窄** — tools/skills/通信/workspace 已有宿主门禁；MCP 在缺少 server 级 hook 时 fail-closed
 3. **主 agent 是 leader** — 和用户日常工作流一致,不需要额外协调层
 4. **实例化而非单例** — 同一角色可以多个实例并行工作
 5. **handoff 文档是沟通载体** — 不是塞整个对话历史,而是写结构化的交接信息

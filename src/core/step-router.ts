@@ -181,18 +181,20 @@ export function selectModelForStep(
 	}
 
 	// 预算约束检查
-	const selectedModel = modelScores.find(m => m.name === preferredModel)!;
+	let selectedModel = modelScores.find(m => m.name === preferredModel)!;
 	let estimatedCost = 0;
 	if (pricing && selectedModel) {
 		// 粗估: 输入 2000 tokens + 输出 500 tokens
 		estimatedCost = 2000 * selectedModel.inputPrice + 500 * selectedModel.outputPrice;
-		if (input.maxCostPerTask && estimatedCost > input.maxCostPerTask) {
+		const maxCostPerTask = input.maxCostPerTask;
+		if (maxCostPerTask !== undefined && maxCostPerTask > 0 && estimatedCost > maxCostPerTask) {
 			// 降级到更便宜的模型
 			const cheaper = modelScores
-				.filter(m => (2000 * m.inputPrice + 500 * m.outputPrice) <= input.maxCostPerTask)
+				.filter(m => (2000 * m.inputPrice + 500 * m.outputPrice) <= maxCostPerTask)
 				.sort((a, b) => b.cost_eff - a.cost_eff);
 			if (cheaper.length > 0) {
 				preferredModel = cheaper[0].name;
+				selectedModel = cheaper[0];
 				estimatedCost = 2000 * cheaper[0].inputPrice + 500 * cheaper[0].outputPrice;
 				reason += ` (budget-constrained: switched to ${preferredModel})`;
 			}

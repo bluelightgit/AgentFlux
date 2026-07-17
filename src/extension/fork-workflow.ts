@@ -351,7 +351,7 @@ export async function handleForkCompareCommand(
 		? extractText(parentEntry.message.content)
 		: "(task not found)";
 
-	telemetry?.writeContextEvent({
+	opts.telemetry?.writeContextEvent({
 		sessionId: opts.sessionId, turnIndex: -1,
 		action: "fork",
 		detail: `fork compare: A=${currentLeafId.slice(0, 12)} (${currentOutput.length}chars) vs B=${sibling.id.slice(0, 12)} (${sibling.output.length}chars)`,
@@ -365,7 +365,7 @@ export async function handleForkCompareCommand(
 	);
 
 	// 记录比较结果
-	telemetry?.writeContextEvent({
+	opts.telemetry?.writeContextEvent({
 		sessionId: opts.sessionId, turnIndex: -1,
 		action: "fork",
 		detail: `fork compare result: winner=${comparison.winner}, merged=${comparison.mergedOutput.length}chars`,

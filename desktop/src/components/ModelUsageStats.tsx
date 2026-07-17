@@ -160,7 +160,7 @@ export function ModelUsageStats(): React.ReactElement {
   // Total cost across all models (drives the cost-distribution chart).
   const totalCost = models.reduce((s, m) => s + m.totalCost, 0);
 
-  const columns = [
+  const columns: Array<{ key: keyof (typeof rows)[number]; label: string }> = [
     { key: "name", label: "Model" },
     { key: "runs", label: "Runs" },
     { key: "cost", label: "Total Cost" },

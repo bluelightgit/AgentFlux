@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useDashboardStore, type PageName } from '../store/dashboard-store';
-import { Icon, StatusDot } from './ui';
+import { AppFrame, Icon, StatusDot } from './ui';
 import { useTheme } from './ThemeProvider';
 import { useKeyboardNav } from '../hooks/useKeyboardNav';
 import { useCommandPalette } from '../hooks/useCommandPalette';
+
 import { CommandPalette } from './CommandPalette';
 import { RealTimeCostCounter } from './RealTimeCostCounter';
 import { GlobalSearchBar } from './GlobalSearchBar';
@@ -12,17 +13,24 @@ import TitleBar from './TitleBar';
 // ---------------------------------------------------------------------------
 // Navigation items (per design spec §2.2 / §3)
 // ---------------------------------------------------------------------------
-const NAV_ITEMS: { id: PageName; label: string; icon: string }[] = [
-  { id: 'overview', label: 'Overview', icon: 'LayoutDashboard' },
-  { id: 'sessions', label: 'Sessions', icon: 'MessageSquare' },
-  { id: 'agents', label: 'Agents', icon: 'Users' },
-  { id: 'routing', label: 'Routing', icon: 'Route' },
-  { id: 'telemetry', label: 'Telemetry', icon: 'Activity' },
-  { id: 'dag', label: 'DAG', icon: 'Workflow' },
-  { id: 'issues', label: 'Issues', icon: 'ClipboardList' },
-  { id: 'chat', label: 'Chat', icon: 'MessageCircle' },
-  { id: 'config', label: 'Config', icon: 'Settings2' },
-  { id: 'settings', label: 'Settings', icon: 'Settings' },
+const NAV_GROUPS: { label: string; items: { id: PageName; label: string; icon: string; note?: string }[] }[] = [
+  { label: 'OPERATE', items: [
+    { id: 'workbench', label: 'Control Room', icon: 'Layers', note: 'create & run tasks' },
+    { id: 'agents', label: 'Agents', icon: 'Users', note: 'identities & caps' },
+    { id: 'chat', label: 'Messages', icon: 'MessageCircle', note: 'read-only' },
+  ] },
+  { label: 'OBSERVE', items: [
+    { id: 'telemetry', label: 'Activity / Costs', icon: 'Activity', note: 'read-only' },
+    { id: 'overview', label: 'Overview', icon: 'LayoutDashboard', note: 'read-only' },
+    { id: 'sessions', label: 'Sessions', icon: 'MessageSquare', note: 'read-only' },
+  ] },
+  { label: 'ADVANCED', items: [
+    { id: 'routing', label: 'Routing', icon: 'Route' },
+    { id: 'dag', label: 'DAG', icon: 'Workflow', note: 'diagnostics' },
+    { id: 'config', label: 'Config', icon: 'Settings2' },
+    { id: 'issues', label: 'Issue drafts', icon: 'ClipboardList', note: 'draft' },
+    { id: 'settings', label: 'Settings', icon: 'Settings' },
+  ] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -35,6 +43,8 @@ const TopBar: React.FC = () => {
   const addWorkspacePath = useDashboardStore((s) => s.addWorkspacePath);
   const removeWorkspaceById = useDashboardStore((s) => s.removeWorkspaceById);
   const reload = useDashboardStore((s) => s.reload);
+  const project = useDashboardStore((s) => s.project);
+  const events = useDashboardStore((s) => s.events);
   const { theme, toggleTheme } = useTheme();
   const { toggle: togglePalette } = useCommandPalette();
 
@@ -77,7 +87,7 @@ const TopBar: React.FC = () => {
 
   return (
     <header
-      className="h-14 shrink-0 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center px-4 gap-4"
+      className="af-topbar"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       {/* Left: Workspace selector */}
@@ -85,7 +95,9 @@ const TopBar: React.FC = () => {
         <button
           type="button"
           onClick={() => setDropdownOpen((v) => !v)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-700"
+          aria-expanded={dropdownOpen}
+          aria-haspopup="listbox"
+          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-700 dark:text-slate-300 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
         >
           <Icon name="FolderOpen" size={18} className="text-slate-500" />
           <span className="font-medium truncate max-w-[180px]">{currentName}</span>
@@ -93,7 +105,7 @@ const TopBar: React.FC = () => {
         </button>
 
         {dropdownOpen && (
-          <div className="absolute left-0 top-full mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-lg z-50 overflow-hidden">
+          <div className="absolute left-0 top-full mt-1 w-64 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg z-50 overflow-hidden">
             <ul className="max-h-72 overflow-auto py-1">
               {workspaces.length === 0 && (
                 <li className="px-3 py-2 text-sm text-slate-400">No workspaces</li>
@@ -103,10 +115,11 @@ const TopBar: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => handleSelect(w.id)}
-                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 ${
+                    aria-pressed={activeWorkspace?.id === w.id}
+                    className={`w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 dark:hover:bg-slate-700/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400 ${
                       activeWorkspace?.id === w.id
-                        ? 'text-blue-600 font-medium'
-                        : 'text-slate-700'
+                        ? 'text-blue-600 dark:text-blue-400 font-medium'
+                        : 'text-slate-700 dark:text-slate-300'
                     }`}
                   >
                     <Icon name="FolderOpen" size={16} className="text-slate-400 shrink-0" />
@@ -128,7 +141,7 @@ const TopBar: React.FC = () => {
                           removeWorkspaceById(w.id);
                         }
                       }}
-                      className="shrink-0 p-1 rounded text-slate-400 hover:text-red-500 hover:bg-slate-100 cursor-pointer"
+                      className="shrink-0 p-1 rounded text-slate-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
                     >
                       <Icon name="X" size={14} />
                     </span>
@@ -140,7 +153,7 @@ const TopBar: React.FC = () => {
               <button
                 type="button"
                 onClick={handleAddWorkspace}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-600 hover:bg-slate-50"
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-slate-50 dark:hover:bg-slate-700/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
               >
                 <Icon name="Plus" size={16} />
                 <span>Add Workspace</span>
@@ -151,30 +164,50 @@ const TopBar: React.FC = () => {
       </div>
 
       {/* Center: App title */}
-      <div className="flex-1 text-center text-lg font-bold text-slate-800">
-        AgentFlux
+      <div className="flex-1 min-w-0 text-center">
+        <span className="font-mono text-sm font-semibold uppercase tracking-[0.16em] text-[var(--af-ink)]">AgentFlux</span>
+        <span className="ml-2 hidden text-[9px] uppercase tracking-wider text-[var(--af-muted)] 2xl:inline">Operations control plane</span>
       </div>
 
       {/* Right: Cost counter, Live indicator, Command palette, Theme toggle, Refresh */}
       <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        <GlobalSearchBar />
+        {/* Live / status indicator — derived from store signals only */}
+        {(() => {
+          const hasEvents = project !== null && events.length > 0;
 
-        <RealTimeCostCounter />
+          if (hasEvents) {
+            return (
+              <div className="flex items-center gap-1.5" title="Viewing locally cached events." aria-label="Local data available">
+                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span className="hidden xl:inline text-xs text-amber-600 dark:text-amber-400">Local data</span>
+              </div>
+            );
+          }
+          return (
+            <div className="flex items-center gap-1.5" title="No project selected. No data source available." aria-label="No live data source">
+              <span className="w-2 h-2 rounded-full bg-gray-400" />
+              <span className="hidden xl:inline text-xs text-gray-500 dark:text-gray-400">Offline snapshot</span>
+            </div>
+          );
+        })()}
 
-        <div className="flex items-center gap-1.5" title="Live updates active">
-          <span className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-xs text-green-600">Live</span>
+        <div className="hidden xl:block">
+          <GlobalSearchBar />
+        </div>
+
+        <div className="hidden xl:block">
+          <RealTimeCostCounter />
         </div>
 
         <button
           type="button"
           onClick={togglePalette}
-          aria-label="Command palette"
+          aria-label="Command palette (Cmd+K)"
           title="Command palette (Cmd+K)"
-          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
         >
           <Icon name="Search" size={18} />
-          <span className="text-xs text-slate-400 ml-2">Cmd+K</span>
+          <span className="hidden xl:inline text-xs text-slate-400 ml-2">Cmd+K</span>
         </button>
 
         <button
@@ -182,7 +215,7 @@ const TopBar: React.FC = () => {
           onClick={toggleTheme}
           aria-label="Toggle theme"
           title="Toggle theme"
-          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+          className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-600 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
         >
           <Icon name={theme === 'dark' ? 'Sun' : 'Moon'} size={18} className="text-slate-500" />
         </button>
@@ -192,11 +225,11 @@ const TopBar: React.FC = () => {
           onClick={() => reload()}
           aria-label="Refresh"
           title="Refresh"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm text-slate-600"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-600 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           <Icon name="RefreshCw" size={16} className="text-slate-500" />
-          <span>Refresh</span>
+          <span className="hidden xl:inline">Refresh</span>
         </button>
       </div>
 
@@ -221,31 +254,36 @@ const Sidebar: React.FC = () => {
     : 0;
 
   return (
-    <aside className="w-60 bg-slate-900 dark:bg-black text-slate-200 dark:text-slate-300 h-full overflow-y-auto shrink-0 flex flex-col">
-      <nav className="flex-1 px-3 py-4 space-y-1">
-        {NAV_ITEMS.map((item) => {
+    <aside className="af-sidebar h-full overflow-y-auto flex flex-col">
+      <nav className="flex-1 px-3 py-4 space-y-5">
+        {NAV_GROUPS.map((group) => <section key={group.label} aria-label={group.label}>
+          <h2 className="mb-1 px-3 font-mono text-[10px] font-semibold tracking-[0.18em] text-slate-600">{group.label}</h2>
+          <div className="space-y-0.5">{group.items.map((item) => {
           const active = currentPage === item.id;
           return (
             <button
               key={item.id}
               type="button"
               onClick={() => setPage(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+              aria-current={active ? 'page' : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2 border-l-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--af-operate)] focus-visible:ring-inset ${
                 active
-                  ? 'bg-slate-800 dark:bg-slate-700 text-white'
-                  : 'text-slate-400 dark:text-slate-500 hover:bg-slate-800/50 dark:hover:bg-slate-800/50 hover:text-slate-200'
+                  ? 'bg-slate-800 text-white border-[var(--af-operate)]'
+                  : 'border-transparent text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
               }`}
             >
               <Icon name={item.icon} size={18} />
               <span>{item.label}</span>
+              {item.note && <span className="ml-auto font-mono text-[9px] uppercase text-slate-600">{item.note}</span>}
               {item.id === 'agents' && activeCount > 0 && (
-                <span className="ml-auto bg-blue-500 text-white text-xs px-2 py-0.5 rounded-full">
+                <span className="ml-auto bg-blue-500 dark:bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full">
                   {activeCount}
                 </span>
               )}
             </button>
           );
-        })}
+          })}</div>
+        </section>)}
       </nav>
 
       {project && (
@@ -266,8 +304,8 @@ const Sidebar: React.FC = () => {
 // ---------------------------------------------------------------------------
 // MainContent
 // ---------------------------------------------------------------------------
-const MainContent: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <main className="flex-1 min-h-0 p-8 overflow-auto bg-slate-100 dark:bg-slate-900">{children}</main>
+const MainContent: React.FC<{ children: React.ReactNode; compact?: boolean }> = ({ children, compact }) => (
+  <main className={`af-main ${compact ? 'p-2' : 'p-5 lg:p-7'}`}>{children}</main>
 );
 
 // ---------------------------------------------------------------------------
@@ -280,14 +318,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useKeyboardNav(currentPage, setPage);
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden">
+    <AppFrame>
       <TopBar />
       <div className="flex flex-1 overflow-hidden min-h-0">
         <Sidebar />
-        <MainContent>{children}</MainContent>
+        <MainContent compact={currentPage === 'workbench'}>{children}</MainContent>
       </div>
       <CommandPalette open={paletteOpen} onClose={closePalette} />
-    </div>
+    </AppFrame>
   );
 }
 

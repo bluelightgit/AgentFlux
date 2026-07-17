@@ -80,6 +80,8 @@ export function route(input: RouteInput): RoutingDecision {
 	// 候选集: baseline + prefExpected + 邻近 mode
 	const candidates = new Set<Mode>([baseline, prefExpected, "M1", "M2"]);
 	if (input.stage !== "Seed") candidates.add("M3");
+	// M5 是当前可执行的多阶段管道；中高复杂度任务必须让它进入候选集。
+	if ((phase3Signal?.complexity.tier ?? input.taskSignal?.complexityTier ?? 0) >= 2) candidates.add("M5");
 	if (input.pref.vector.multi_agent_willingness > 0.6) { candidates.add("M4"); candidates.add("M6"); }
 	// Phase 3: 如果有 taskRoutingSignal, 把它的推荐 mode 也加入候选
 	if (phase3Signal) candidates.add(phase3Signal.recommendedMode);

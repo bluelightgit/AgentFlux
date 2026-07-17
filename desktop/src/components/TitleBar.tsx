@@ -76,7 +76,7 @@ const TitleBar: React.FC = () => {
         onClick={handleMinimize}
         aria-label="Minimize window"
         title="Minimize"
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors"
+        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
       >
         <Icon name="Minus" size={16} />
       </button>
@@ -85,7 +85,7 @@ const TitleBar: React.FC = () => {
         onClick={handleMaximize}
         aria-label="Toggle maximize window"
         title={maximized ? 'Restore' : 'Maximize'}
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors"
+        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
       >
         <Icon name="Square" size={14} />
       </button>
@@ -94,7 +94,7 @@ const TitleBar: React.FC = () => {
         onClick={handleClose}
         aria-label="Close window"
         title="Close"
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-red-500 hover:text-white dark:text-slate-300 transition-colors"
+        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-red-500 hover:text-white dark:text-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
       >
         <Icon name="X" size={16} />
       </button>

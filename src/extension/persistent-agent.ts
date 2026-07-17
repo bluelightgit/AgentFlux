@@ -24,7 +24,7 @@ export interface PersistentAgent {
 	role: string;               // 角色模板名
 	model: string;
 	sessionFile: string;        // .agentflux/runtime/sessions/{name}.session
-	status: "idle" | "running" | "done" | "failed";
+	status: "idle" | "running" | "done" | "failed" | "cancelled" | "retry_wait";
 	callCount: number;          // 被调用次数
 	totalCost: number;          // 累计成本
 	totalCacheRead: number;     // 累计 cache read
@@ -95,6 +95,7 @@ export async function runPersistentAgent(
 		provider: role.model ? models[role.model]?.provider : undefined,
 		systemPrompt: role.systemPrompt ?? `You are a ${roleName}.`,
 		thinking: role.thinking,
+		communication: role.communication,
 		skills: [...(opts.sharedSkills ?? []), ...(role.skills ?? [])].length > 0
 			? [...(opts.sharedSkills ?? []), ...(role.skills ?? [])] : undefined,
 	};
@@ -131,23 +132,36 @@ export async function runPersistentAgent(
 		console.error(`[flux m4] ${agentName}: read ${unread.length} unread messages`);
 	}
 
-	// 运行 subagent (persistent=true)
-	const result = await runSubagent({
-		cwd: opts.cwd,
-		agent: agentDef,
-		task: fullTask,
-		sessionId: opts.sessionId,
-		telemetry: opts.telemetry,
-		prefixLayout: opts.prefixLayout,
-		model: agentDef.model,
-		provider: agentDef.provider,
-		pricing: opts.pricing,
-		persistent: true,
-		sessionDir,
-		thinking: agentDef.thinking,
-		timeoutMs: 180000,
-		maxRetries: 1,
-	});
+	// 运行 subagent (persistent=true)。异常也必须结束 running 状态。
+	let result: SubagentRunResult;
+	try {
+		result = await runSubagent({
+			cwd: opts.cwd,
+			agent: agentDef,
+			task: fullTask,
+			sessionId: opts.sessionId,
+			telemetry: opts.telemetry,
+			prefixLayout: opts.prefixLayout,
+			model: agentDef.model,
+			provider: agentDef.provider,
+			pricing: opts.pricing,
+			persistent: true,
+			sessionDir,
+			thinking: agentDef.thinking,
+			timeoutMs: 180000,
+			maxRetries: 1,
+		});
+	} catch (error) {
+		const failedRegistry = loadPersistentRegistry(opts.fluxDir);
+		const failedAgent = failedRegistry.agents.find(a => a.name === agentName);
+		if (failedAgent) {
+			failedAgent.status = "failed";
+			failedAgent.lastUsedAt = new Date().toISOString();
+			savePersistentRegistry(opts.fluxDir, failedRegistry);
+		}
+		board.updateAgentStatus(agentName, { status: "failed" });
+		throw error;
+	}
 
 	// 更新注册表
 	const reg2 = loadPersistentRegistry(opts.fluxDir);
@@ -198,14 +212,23 @@ export async function consumeNextTask(
 
 	console.error(`[flux m4] ${agentName}: claimed task ${task.id} — ${task.title.slice(0, 80)}`);
 
-	// 执行任务
-	const result = await runPersistentAgent(agentName, roleName, task.title, opts);
+	let result: SubagentRunResult;
+	try {
+		result = await runPersistentAgent(agentName, roleName, task.title, opts);
+	} catch (error: any) {
+		board.failTask(task.id, error?.message ?? String(error));
+		throw error;
+	}
 
-	// M4-4: 完成任务 + 通知依赖者
-	board.completeTask(task.id, {
-		output: result.output?.slice(0, 500),
-		verdict: result.exitCode === 0 ? "completed" : "failed",
-	});
+	// 只有真实成功才能完成任务；失败不会解锁依赖者。
+	if (result.exitCode === 0 && !result.errorMessage) {
+		board.completeTask(task.id, {
+			output: result.output?.slice(0, 500),
+			verdict: "completed",
+		});
+	} else {
+		board.failTask(task.id, result.errorMessage ?? `subagent exited with code ${result.exitCode}`);
+	}
 
 	return { task, result };
 }
@@ -216,7 +239,7 @@ export function formatPersistentRegistry(registry: PersistentRegistry): string {
 	if (registry.agents.length === 0) return "No persistent agents.";
 	const lines = ["Persistent Agents:", ""];
 	for (const a of registry.agents) {
-		const icon = { idle: "○", running: "●", done: "✓", failed: "✗" }[a.status] ?? "?";
+		const icon = { idle: "○", running: "●", done: "✓", failed: "✗", cancelled: "⊘", retry_wait: "↻" }[a.status] ?? "?";
 		lines.push(`  ${icon} ${a.name.padEnd(20)} ${a.role.padEnd(12)} calls=${a.callCount} cost=$${a.totalCost.toFixed(6)} cache=${a.totalCacheRead}`);
 	}
 	return lines.join("\n");

@@ -14,6 +14,7 @@
  *   /flux complexity                        # show RGAO complexity signal
  *   /flux team status|plan|build|review|abort|roles|models|affinity|pipeline
  *   /flux work <task>                      # MA-5: multi-agent DAG execution (persistent agents + quality gates)
+ *   /flux gc [dry-run]                     # archive terminal agent/message/session state
  *   /flux compact                           # compaction advice (B-dimension adaptive)
  *   /flux status                            # full status report (version, mode, subsystems, issues)
  *   /flux health                            # health check (8 subsystem diagnostics)
@@ -26,8 +27,8 @@ import { matchesKey, Key, truncateToWidth } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
-import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile, CacheStats } from "./core/types";
-import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig, presetToExpectedMode } from "./core/config";
+import type { FluxRuntimeState, RoutingDecision, Preset, ProjectProfile, CacheStats, Mode } from "./core/types";
+import { loadConfig, loadPreference, savePreference, applyRuntimeOverride, validateConfig, presetToExpectedMode, resolveSharedSkills } from "./core/config";
 import { route } from "./core/routing";
 import { TelemetryWriter, cacheStatsToSample } from "./telemetry/events";
 import { collectCacheStats, fmt, fmtCost, pct } from "./extension/cache-monitor";
@@ -35,7 +36,7 @@ import { collectMaturity, loadOrCreateProfile, bumpSessionHistory } from "./exte
 import { installFooter, setFluxStatus, buildFluxSummary, buildInspectorText } from "./extension/footer";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { applyMask } from "./extension/mask";
-import { loadSubagent, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, type ParallelSubagentTask } from "./extension/subagent";
+import { loadSubagent, withSharedSkills, runSubagent, formatSubagentResult, runSubagentsParallel, formatParallelResults, getActiveSubagentRunIds, type ParallelSubagentTask } from "./extension/subagent";
 import { runTeamWithReview, formatTeamWorkflowResult, type TeamTask } from "./extension/team-workflow";
 import { SharedBoard, formatGroups, formatGroupMessages, formatAgents } from "./core/shared-board";
 import { registerForkMode, handleForkCommand, getForkCandidates } from "./extension/fork-mode";
@@ -50,10 +51,38 @@ import { handleFluxAgentsCommand, handleFluxBackCommand, getAgentSystemPromptOve
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
+import { generateTaskDAG, executeDAG, formatDAGResult, type DAGExecutionResult } from "./extension/dag-executor";
+import { buildTaskRoutePlan, formatTaskRoutePlan, remainingTaskWallClock, resolveExecutableMode, type TaskRoutePlan } from "./core/execution-plan";
+import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
+import { MessageBus } from "./core/message-bus";
+import { assessCacheImpact, diffRuntimeCacheShape, formatCacheImpactWarning, type RuntimeCacheShape } from "./core/cache-impact";
 import { loadAllRoles } from "./core/role-manager";
-import { generateTaskDAG, executeDAG, formatDAG, formatDAGResult, type TaskDAG, type DAGExecutionResult } from "./extension/dag-executor";
+import { RpcInboxPump } from "./extension/rpc-inbox-pump";
+import {
+	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
+	type CapabilityPolicyInput,
+} from "./core/capability-policy";
+
+const EXECUTION_MODES = new Set<Mode>(["M1", "M2", "M3", "M4", "M5", "M6"]);
+const DIRECT_WORK_MODES = new Set<Mode>(["M1", "M2", "M5"]);
+
+function parseExecutionMode(value: string | undefined): Mode | undefined {
+	if (!value) return undefined;
+	const normalized = value.trim().toUpperCase() as Mode;
+	return EXECUTION_MODES.has(normalized) ? normalized : undefined;
+}
+
+function parseWorkCommand(args: string[]): { task: string; mode?: Mode; error?: string } {
+	if (args[0] !== "--mode") return { task: args.join(" ").trim() };
+	const mode = parseExecutionMode(args[1]);
+	if (!mode || !DIRECT_WORK_MODES.has(mode)) {
+		return { task: "", error: "--mode must be one of M1, M2, or M5. M3/M4/M6 remain experimental and use their dedicated commands." };
+	}
+	return { task: args.slice(2).join(" ").trim(), mode };
+}
 
 export default function (pi: ExtensionAPI) {
+	const explicitRuntimeMode = parseExecutionMode(process.env.AGENTFLUX_EXECUTION_MODE);
 	// ---------- 可变运行时状态 ----------
 	const state: FluxRuntimeState = {
 		mode: "M2", preset: "balanced", expectedMode: "M2", stage: "Seed", role: "doer",
@@ -72,8 +101,87 @@ export default function (pi: ExtensionAPI) {
 	let pricingTable: PricingTable | null = null;
 	let complexitySignal: TaskComplexitySignal | null = null;
 	let teamCtx: TeamContext | null = null;
+	let currentTaskPlan: TaskRoutePlan | null = null;
+	let pendingExplicitPlan: TaskRoutePlan | null = null;
+	let runtimeCacheShape: RuntimeCacheShape | null = null;
+	let rpcInboxPump: RpcInboxPump | null = null;
+	let rpcRuntimeAgentName: string | null = null;
+	let rpcRuntimeInstanceId: string | null = null;
+
+	function configureRpcInboxPump(ctx: any, config = loadConfig(ctx.cwd)): void {
+		rpcInboxPump?.stop();
+		rpcInboxPump = null;
+		rpcRuntimeAgentName = null;
+		rpcRuntimeInstanceId = null;
+		const envEnabled = /^(?:1|true|yes)$/i.test(process.env.AGENTFLUX_RPC_INBOX_PUMP ?? "");
+		if (!envEnabled && !config.communication.rpc_inbox_pump) return;
+		const recipient = process.env.AGENTFLUX_AGENT_NAME || pi.getSessionName?.();
+		if (!recipient || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(recipient)) {
+			console.error("[flux rpc-inbox] disabled: a valid AGENTFLUX_AGENT_NAME or pi session name is required");
+			return;
+		}
+		const instanceId = process.env.AGENTFLUX_RUNTIME_INSTANCE_ID || `rpc:${sessionId}`;
+		try {
+			const board = new SharedBoard(fluxDir);
+			board.registerRuntimeAgent({
+				name: recipient, role: "rpc-runtime", status: "idle",
+				model: ctx.model?.id, provider: ctx.model?.provider,
+				sessionFile: ctx.sessionManager?.getSessionFile?.(), instanceId,
+				runtimePid: process.pid,
+			}, { leaseMs: config.communication.runtime_lease_ms });
+			board.ensureAllGroup([recipient]);
+		} catch (error: any) {
+			console.error(`[flux rpc-inbox] disabled: ${error?.message ?? error}`);
+			return;
+		}
+		rpcRuntimeAgentName = recipient;
+		rpcRuntimeInstanceId = instanceId;
+		rpcInboxPump = new RpcInboxPump({
+			fluxDir, recipient,
+			pollIntervalMs: config.communication.poll_interval_ms,
+			batchSize: config.communication.batch_size,
+			heartbeatIntervalMs: config.communication.heartbeat_interval_ms,
+			redeliveryAfterMs: config.communication.redelivery_after_ms,
+			isIdle: () => ctx.isIdle?.() ?? true,
+			sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
+			onAudit: event => {
+				for (const messageId of event.messageIds) telemetry?.writeMessageProtocol({
+					sessionId, runId: instanceId, action: event.action, agent: recipient,
+					instanceId, messageId, result: event.result,
+					detail: [event.mode ? `mode=${event.mode}` : "", event.detail ?? ""].filter(Boolean).join("; ") || undefined,
+				});
+			},
+			onHeartbeat: now => {
+				const updated = new SharedBoard(fluxDir).updateAgentPresence(
+					recipient, { heartbeatAt: now.toISOString(), runtimePid: process.pid }, instanceId,
+				);
+				if (!updated) throw new Error(`runtime lease lost for ${recipient}`);
+			},
+		});
+		// session_start is still initializing pi's AgentSession. An immediate
+		// extension-originated prompt can be accepted by the bridge before the RPC
+		// session is ready to start a turn. Let the first interval run after the
+		// hook has returned; explicit restart remains safe with the same behavior.
+		rpcInboxPump.start({ immediate: false });
+		console.error(`[flux rpc-inbox] started recipient=${recipient} interval=${config.communication.poll_interval_ms}ms batch=${config.communication.batch_size}`);
+	}
+	const activeRuns = new Map<string, { controller: AbortController; startedAt: number; task: string }>();
 
 	const getState = () => state;
+	const stableStringify = (value: unknown): string => JSON.stringify(value, (_key, current) => {
+		if (!current || typeof current !== "object" || Array.isArray(current)) return current;
+		return Object.fromEntries(Object.entries(current).sort(([a], [b]) => a.localeCompare(b)));
+	});
+	const buildRuntimeCacheShape = (cwd: string, modelsConfig: any, sharedSkills: string[]): RuntimeCacheShape => {
+		const roles = [...loadAllRoles(cwd, modelsConfig).entries()].sort(([a], [b]) => a.localeCompare(b));
+		return {
+			toolSchema: stableStringify(roles.map(([name, role]) => [name, role.tools ?? [], role.communication ?? null])),
+			skillSet: stableStringify(roles.map(([name, role]) => [name, [...new Set([...sharedSkills, ...(role.skills ?? [])])].sort()])),
+			mcpSet: stableStringify(modelsConfig?.mcp ?? modelsConfig?.mcpServers ?? {}),
+			systemPrompts: stableStringify(roles.map(([name, role]) => [name, role.systemPrompt ?? ""])),
+			modelAssignments: stableStringify(roles.map(([name, role]) => [name, role.model ?? role.requirement ?? null])),
+		};
+	};
 
 	// 上一 turn 的累计值, 用于计算增量 (避免 telemetry 聚合时重复计算)
 	let prevCumulative: CacheStats | null = null;
@@ -119,15 +227,29 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function runRouter(ctx: any) {
+	function runRouter(ctx: any, taskText?: string): TaskRoutePlan | null {
 		const config = loadConfig(ctx.cwd);
 		let pref = loadPreference(ctx.cwd);
 		const ov = applyRuntimeOverride(config, pref, runtimePreset);
 		state.preset = ov.config.mode;
 		pref = ov.pref;
 
-		decision = route({ stage: state.stage, pref, preset: state.preset, taskSignal: complexitySignal ?? undefined });
-		state.mode = decision.mode;
+		if (taskText?.trim()) {
+			currentTaskPlan = buildTaskRoutePlan({ cwd: ctx.cwd, task: taskText, stage: state.stage, config: ov.config, pref, requestedMode: explicitRuntimeMode });
+			decision = currentTaskPlan.decision;
+			if (!currentTaskPlan.requiresConfirmation) state.mode = currentTaskPlan.effectiveMode;
+			if (currentTaskPlan.fallbackReason) decision.reason.push(`capability:${currentTaskPlan.fallbackReason}`);
+		} else {
+			currentTaskPlan = null;
+			decision = route({
+				stage: state.stage, pref, preset: state.preset,
+				taskSignal: complexitySignal ?? undefined,
+				overrideMode: ov.config.routing.override_mode,
+			});
+			const resolved = resolveExecutableMode(decision.mode);
+			state.mode = resolved.effectiveMode;
+			if (resolved.fallbackReason) decision.reason.push(`capability:${resolved.fallbackReason}`);
+		}
 		state.expectedMode = decision.biasSources.preference ?? state.mode;
 
 		// 校验 warnings → reason
@@ -137,8 +259,8 @@ export default function (pi: ExtensionAPI) {
 		// F2-10: override_mode suggest — non-intrusive footer hint (no popup)
 		if (config.routing.override_mode === "suggest" && decision.confidence >= 0.7) {
 			const expected = presetToExpectedMode(state.preset);
-			if (decision.mode !== expected) {
-			routeHint = `router suggests ${decision.mode} (${(decision.confidence*100).toFixed(0)}%) | preset ${state.preset} expects ${expected}`;
+			if (state.mode !== expected) {
+			routeHint = `router suggests ${decision.mode}${decision.mode === state.mode ? "" : `→${state.mode}`} (${(decision.confidence*100).toFixed(0)}%) | preset ${state.preset} expects ${expected}`;
 			if (!ctx.hasUI) console.error(`[flux] route hint: ${routeHint}`);
 			} else {
 			routeHint = null;
@@ -149,7 +271,17 @@ export default function (pi: ExtensionAPI) {
 			sessionId, mode: state.mode, preset: state.preset, stage: state.stage, role: state.role,
 			reason: decision.reason, confidence: decision.confidence, fallback: decision.fallback,
 			biasSources: decision.biasSources, expected: decision.expected,
+			taskId: currentTaskPlan?.taskId,
+			decisionId: currentTaskPlan?.decisionId,
+			taskType: currentTaskPlan?.signal.classification.type,
+			complexityTier: currentTaskPlan?.signal.complexity.tier,
+			fileCount: currentTaskPlan?.signal.complexity.fileCount,
+			diffLines: currentTaskPlan?.signal.scope.diffLines,
+			actualMode: currentTaskPlan && !currentTaskPlan.requiresConfirmation ? currentTaskPlan.effectiveMode : undefined,
+			overrideMode: config.routing.override_mode,
+			applied: decision.applied,
 		});
+		return currentTaskPlan;
 	}
 
 	// ---------- 自重启: 重新执行初始化序列 ----------
@@ -169,6 +301,7 @@ export default function (pi: ExtensionAPI) {
 
 		step(2, "Reloading config", "done");
 		const config = loadConfig(ctx.cwd);
+		configureRpcInboxPump(ctx, config);
 
 		step(3, "Reloading pricing table", "...");
 		try {
@@ -198,7 +331,28 @@ export default function (pi: ExtensionAPI) {
 		} catch (e: any) {
 			step(4, "Reloading models.json", `failed: ${e?.message}`);
 		}
-		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
+		const sharedSkills = resolveSharedSkills(config, modelsConfig);
+		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
+		const nextCacheShape = buildRuntimeCacheShape(ctx.cwd, modelsConfig, sharedSkills);
+		if (runtimeCacheShape) {
+			const pref = applyRuntimeOverride(config, loadPreference(ctx.cwd), runtimePreset).pref;
+			for (const change of diffRuntimeCacheShape(runtimeCacheShape, nextCacheShape)) {
+				const warning = formatCacheImpactWarning(assessCacheImpact(change, pref));
+				if (warning) lines.push("", warning);
+			}
+		}
+		runtimeCacheShape = nextCacheShape;
+		if (config.retention.enabled) {
+			try {
+				const gcReport = runLifecycleGc(fluxDir, config.retention, { activeRunIds: getActiveSubagentRunIds() });
+				const changed = Object.values(gcReport.removed).reduce((sum, items) => sum + items.length, 0);
+				if (!ctx.hasUI && (changed > 0 || gcReport.blockedReason || gcReport.warnings.length > 0)) {
+					console.error(`[flux] ${formatLifecycleGcReport(gcReport)}`);
+				}
+			} catch (error: any) {
+				if (!ctx.hasUI) console.error(`[flux] lifecycle GC failed closed: ${error?.message ?? error}`);
+			}
+		}
 
 		step(5, "Recollecting complexity signal", "...");
 		try {
@@ -212,7 +366,7 @@ export default function (pi: ExtensionAPI) {
 
 		step(7, "Re-running router", "...");
 		runRouter(ctx);
-		step(7, "Re-running router", `${state.mode} (conf ${decision?.confidence.toFixed(2)})`);
+		step(7, "Re-running router", `${state.mode} (conf ${(decision as RoutingDecision | null)?.confidence.toFixed(2) ?? "n/a"})`);
 
 		step(8, "Refreshing cache stats", "...");
 		refreshCache(ctx);
@@ -276,7 +430,9 @@ export default function (pi: ExtensionAPI) {
 		} catch (e: any) {
 			if (!ctx.hasUI) console.error(`[flux] models.json load failed: ${e?.message}`);
 		}
-		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills: config.sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
+		const sharedSkills = resolveSharedSkills(config, modelsConfig);
+		teamCtx = { cwd: ctx.cwd, fluxDir, telemetry, modelsConfig, sharedSkills, prefixLayout: config.cache.prefix_layout === "static_first", pricing: pricingTable ?? undefined };
+		runtimeCacheShape = buildRuntimeCacheShape(ctx.cwd, modelsConfig, sharedSkills);
 
 		runRouter(ctx);
 		refreshCache(ctx);
@@ -284,6 +440,25 @@ export default function (pi: ExtensionAPI) {
 		installFooter(ctx, getState, () => routeHint);
 		if (ctx.hasUI) ctx.ui.notify(`AgentFlux · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode} · ${state.mode}`, "info");
 		else console.error(`[flux] init · ${state.stage}/${state.role} · ${state.preset}→${state.expectedMode} · mode ${state.mode}`);
+		configureRpcInboxPump(ctx, config);
+	});
+
+	pi.on("agent_start", async () => {
+		rpcInboxPump?.onAgentStart();
+		if (rpcRuntimeAgentName) {
+			try { new SharedBoard(fluxDir).updateAgentPresence(rpcRuntimeAgentName, { status: "running" }, rpcRuntimeInstanceId ?? undefined); } catch {}
+		}
+	});
+
+	pi.on("message_end", async (event: any) => {
+		const message = event?.message;
+		if (message?.role !== "assistant") return;
+		const aborted = message.stopReason === "aborted";
+		const success = !message.errorMessage && message.stopReason !== "error" && !aborted;
+		rpcInboxPump?.onAssistantMessageEnd(success);
+		if (rpcRuntimeAgentName) {
+			try { new SharedBoard(fluxDir).updateAgentPresence(rpcRuntimeAgentName, { status: success ? "idle" : aborted ? "cancelled" : "failed" }, rpcRuntimeInstanceId ?? undefined); } catch {}
+		}
 	});
 
 	pi.on("turn_end", async (event: any, ctx: any) => {
@@ -388,6 +563,18 @@ export default function (pi: ExtensionAPI) {
 		if (profile) bumpSessionHistory(ctx.cwd, profile);
 	});
 
+	pi.on("session_shutdown", async () => {
+		rpcInboxPump?.stop();
+		rpcInboxPump = null;
+		if (rpcRuntimeAgentName) {
+			try { new SharedBoard(fluxDir).updateAgentPresence(rpcRuntimeAgentName, { status: "done" }, rpcRuntimeInstanceId ?? undefined); } catch {}
+		}
+		rpcRuntimeAgentName = null;
+		rpcRuntimeInstanceId = null;
+		for (const [, run] of activeRuns) run.controller.abort("AgentFlux session shutdown");
+		activeRuns.clear();
+	});
+
 	// ---------- F1-3 mask (context 事件, LLM 调用前) ----------
 
 	pi.on("context", async (event: any, ctx: any) => {
@@ -425,13 +612,33 @@ export default function (pi: ExtensionAPI) {
 	// ---------- before_agent_start: agent role prompt injection ----------
 
 	pi.on("before_agent_start", async (event: any, ctx: any) => {
-		const rolePrompt = getAgentSystemPromptOverride(ctx.cwd);
-		if (rolePrompt) {
-			return {
-				systemPrompt: event.systemPrompt + "\n\n" + rolePrompt,
-			};
+		const plan = pendingExplicitPlan?.task === event.prompt
+			? pendingExplicitPlan
+			: runRouter(ctx, event.prompt);
+		const explicitlyApplied = pendingExplicitPlan?.task === event.prompt;
+		if (explicitlyApplied) pendingExplicitPlan = null;
+		if (plan && (explicitlyApplied || !plan.requiresConfirmation)) {
+			state.mode = plan.effectiveMode;
+			setFluxStatus(ctx, getState);
 		}
-		return undefined;
+		const rolePrompt = getAgentSystemPromptOverride(ctx.cwd);
+		const routingPrompt = plan ? [
+			"=== AgentFlux task execution plan ===",
+			formatTaskRoutePlan(plan),
+			plan.blockedReason
+				? `Do not execute this task: ${plan.blockedReason}. Explain the configuration problem.`
+				: plan.effectiveMode === "M2" && (explicitlyApplied || !plan.requiresConfirmation)
+					? "Apply M2: the main agent owns implementation and final verification; delegate only bounded independent research/review/test work through flux_subagent or flux_subagent_parallel. Do not delegate overlapping file edits."
+					: plan.effectiveMode === "M5" && (explicitlyApplied || !plan.requiresConfirmation)
+						? "Apply M5: call flux_execute_plan exactly once with the user's task before editing; use its DAG artifacts and report the verified outcome. Do not duplicate the DAG's file edits in parallel."
+						: plan.effectiveMode === "M1"
+							? "Apply M1: execute directly in the main agent and verify the result."
+							: "This is a route suggestion only. Do not launch a different executor without user confirmation; explain the suggested plan if it materially changes the work.",
+			"=== End AgentFlux task execution plan ===",
+		].join("\n") : "";
+		const additions = [rolePrompt, routingPrompt].filter(Boolean);
+		if (additions.length === 0) return undefined;
+		return { systemPrompt: event.systemPrompt + "\n\n" + additions.join("\n\n") };
 	});
 
 	// ---------- M3 fork 事件 (Phase 2) ----------
@@ -440,6 +647,199 @@ export default function (pi: ExtensionAPI) {
 	registerCompactionAdvisor(pi, () => ({ sessionId, telemetry }));
 
 	// ---------- 命令 ----------
+
+	async function dispatchDagPlan(plan: TaskRoutePlan, ctx: any, signal?: AbortSignal): Promise<DAGExecutionResult> {
+		if (!teamCtx) throw new Error("team context not initialized");
+		if (plan.blockedReason) throw new Error(plan.blockedReason);
+		if (plan.executor !== "dag") throw new Error(`plan ${plan.effectiveMode} uses ${plan.executor}, not DAG`);
+		const startedAt = Date.now();
+		const plannerBudget = plan.budget.maxCostUsd;
+		const dag = await generateTaskDAG(plan.task, {
+			cwd: ctx.cwd,
+			model: teamCtx.modelsConfig?.models?.["oa/glm-5.2"] ? "oa/glm-5.2" : undefined,
+			models: teamCtx.modelsConfig?.models,
+			pricing: teamCtx.pricing,
+			telemetry,
+			sessionId,
+			prefixLayout: teamCtx.prefixLayout,
+			signal,
+			maxCostUsd: plannerBudget,
+			// planner 可能需要完成 provider 降级；保留任务总 deadline，避免隐藏的 120s 截断。
+			timeoutMs: Math.min(240_000, plan.budget.maxWallClockMs),
+		});
+		const elapsed = Date.now() - startedAt;
+		const remainingWallClock = remainingTaskWallClock(plan.budget.maxWallClockMs, elapsed);
+		return executeDAG(dag, {
+			cwd: ctx.cwd,
+			fluxDir,
+			modelsConfig: teamCtx.modelsConfig,
+			telemetry,
+			prefixLayout: teamCtx.prefixLayout,
+			pricing: teamCtx.pricing,
+			sessionId,
+			sharedSkills: teamCtx.sharedSkills,
+			persistent: true,
+			enableQualityGate: true,
+			maxRetries: Math.max(0, Math.min(2, plan.budget.maxIterations - 1)),
+			// 节点共享任务总 deadline；不要用隐藏的 300s 上限截断用户配置的墙钟预算。
+			timeoutMs: remainingWallClock,
+			maxWallClockMs: remainingWallClock,
+			// max_iterations 约束 retry/feedback，不应截断一个合法的 N 节点 DAG。
+			maxIterations: dag.nodes.length + plan.budget.maxIterations,
+			maxCostUsd: plan.budget.maxCostUsd,
+			maxParallel: 3,
+			signal,
+			executionId: plan.taskId,
+		});
+	}
+
+	pi.registerTool({
+		name: "flux_execute_plan",
+		label: "Flux Execute Routed Plan",
+		description: "Execute a task through AgentFlux's unified Task→RoutePlan→M5 DAG path. Use only when the injected AgentFlux task plan selects M5. Enforces cancellation, wall-clock/iteration limits, step budget stops, quality gates, checkpoints, and artifacts.",
+		parameters: Type.Object({ task: Type.String({ description: "The exact user task to execute" }) }),
+		async execute(_toolCallId, params, signal, _onUpdate, ctx: any) {
+			const config = loadConfig(ctx.cwd);
+			const pref = applyRuntimeOverride(config, loadPreference(ctx.cwd), runtimePreset).pref;
+			const plan = currentTaskPlan?.task === params.task
+				? currentTaskPlan
+				: buildTaskRoutePlan({ cwd: ctx.cwd, task: params.task, stage: state.stage, config, pref });
+			if (plan.executor !== "dag") {
+				return { content: [{ type: "text", text: `${formatTaskRoutePlan(plan)}\n\nThis plan stays in the main agent; no DAG was launched.` }], details: { plan } };
+			}
+			const result = await dispatchDagPlan(plan, ctx, signal);
+			return { content: [{ type: "text", text: `${formatTaskRoutePlan(plan)}\n\n${formatDAGResult(result)}` }], details: { plan, executionId: result.executionId, artifactPaths: result.artifactPaths } };
+		},
+	});
+
+	pi.registerTool({
+		name: "flux_message_v2",
+		label: "Flux Message V2",
+		description: "Leader-side Message/Delivery V2 operations. send creates per-recipient deliveries with dedupe/backpressure; poll marks selected messages delivered; ack confirms processing. Subagents use the separate identity-bound flux_agent_message tool.",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("send"), Type.Literal("poll"), Type.Literal("ack"), Type.Literal("status")]),
+			sender: Type.Optional(Type.String({ description: "Leader-authorized sender identity; default main" })),
+			target: Type.Optional(Type.String({ description: "Direct agent, broadcast, or group:<groupId>; for poll/ack this is recipient" })),
+			messageType: Type.Optional(Type.String()),
+			content: Type.Optional(Type.String()),
+			messageId: Type.Optional(Type.String()),
+			dedupeKey: Type.Optional(Type.String()),
+			correlationId: Type.Optional(Type.String()),
+			taskId: Type.Optional(Type.String()),
+			priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high"), Type.Literal("critical")])),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+			const bus = new MessageBus(join(ctx.cwd, ".agentflux"));
+			const sender = params.sender ?? "main";
+			if (params.action === "send") {
+				if (!params.target || !params.content) throw new Error("send requires target and content");
+				const metadata = {
+					dedupeKey: params.dedupeKey, correlationId: params.correlationId,
+					taskId: params.taskId, priority: params.priority,
+				};
+				const result = params.target === "broadcast"
+					? bus.sendBroadcast(sender, params.messageType ?? "message", params.content, metadata)
+					: params.target.startsWith("group:")
+						? bus.sendGroup(sender, params.target.slice("group:".length), params.messageType ?? "message", params.content, metadata)
+						: bus.sendDirect(sender, params.target, params.messageType ?? "message", params.content, metadata);
+				return { content: [{ type: "text", text: `Message ${result.envelope.id}: recipients=${result.deliveries.length}, deduplicated=${result.deduplicated}` }], details: result };
+			}
+			const recipient = params.target ?? sender;
+			if (params.action === "poll") {
+				const messages = bus.poll(recipient);
+				const text = messages.length === 0 ? "No pending V2 messages." : messages.map(item =>
+					`${item.envelope.id} [${item.envelope.priority}] ${item.envelope.from}: ${item.envelope.content}`).join("\n");
+				return { content: [{ type: "text", text }], details: { messages } };
+			}
+			if (params.action === "ack") {
+				if (!params.messageId) throw new Error("ack requires messageId");
+				const delivery = bus.acknowledge(recipient, params.messageId);
+				return { content: [{ type: "text", text: `Acknowledged ${params.messageId} for ${recipient}` }], details: { delivery } };
+			}
+			const delivery = params.messageId ? bus.getDelivery(params.messageId, recipient) : null;
+			const status = delivery ?? { recipient, outstanding: bus.countOutstanding(recipient), cursor: bus.getCursor(recipient) };
+			return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }], details: status };
+		},
+	});
+
+	pi.registerTool({
+		name: "flux_capability_policy",
+		label: "Flux Capability Policy",
+		description: "Inspect or persist a registered-agent capability override. Overrides may only narrow the role template. Returns effective policy, provenance, revision, and cache-impact warnings.",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("get"), Type.Literal("set")]),
+			agent: Type.String(),
+			role: Type.String(),
+			expectedRevision: Type.Optional(Type.Number({ minimum: 0 })),
+			override: Type.Optional(Type.Object({
+				tools: Type.Optional(Type.Array(Type.String())),
+				skills: Type.Optional(Type.Array(Type.String())),
+				mcpServers: Type.Optional(Type.Array(Type.String())),
+				communication: Type.Optional(Type.Object({
+					enabled: Type.Optional(Type.Boolean()),
+					actions: Type.Optional(Type.Array(Type.Union([Type.Literal("send"), Type.Literal("poll"), Type.Literal("ack"), Type.Literal("status")]))),
+					allowedTargets: Type.Optional(Type.Array(Type.String())),
+					requiredSendTo: Type.Optional(Type.Array(Type.String())),
+					requireExplicitInboxAck: Type.Optional(Type.Boolean()),
+					maxMessagesPerRun: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
+				})),
+				workspace: Type.Optional(Type.Object({
+					roots: Type.Optional(Type.Array(Type.String())),
+					deniedPaths: Type.Optional(Type.Array(Type.String())),
+					blockDangerousCommands: Type.Optional(Type.Boolean()),
+				})),
+			})),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+			const roles = loadAllRoles(ctx.cwd, teamCtx?.modelsConfig);
+			const role = roles.get(params.role);
+			if (!role) throw new Error(`Unknown role template: ${params.role}`);
+			const template: CapabilityPolicyInput = {
+				tools: role.tools,
+				skills: [...new Set([...(teamCtx?.sharedSkills ?? []), ...(role.skills ?? [])])],
+				mcpServers: role.mcpServers,
+				communication: role.communication,
+				workspace: role.workspace,
+			};
+			let record = loadRegisteredCapabilityOverride(join(ctx.cwd, ".agentflux"), params.agent);
+			if (params.action === "set") {
+				if (!params.override) throw new Error("set requires override");
+				// Validate the complete effective policy before persisting anything.
+				resolveCapabilityPolicy({
+					cwd: ctx.cwd, agentName: params.agent, role: params.role, runId: "policy-preview",
+					template, registered: params.override,
+				});
+				record = saveRegisteredCapabilityOverride({
+					fluxDir: join(ctx.cwd, ".agentflux"), agentName: params.agent, role: params.role,
+					override: params.override, expectedRevision: params.expectedRevision,
+				});
+				telemetry?.writeCapabilityPolicy({
+					sessionId, runId: `policy:${params.agent}:${record.revision}`,
+					agent: params.agent, role: params.role, action: "set", result: "success",
+					revision: record.revision,
+					detail: `registered capability override revision ${record.revision}`,
+				});
+			}
+			const effective = resolveCapabilityPolicy({
+				cwd: ctx.cwd, agentName: params.agent, role: params.role, runId: "policy-preview",
+				template, registered: record?.override,
+			});
+			const pref = applyRuntimeOverride(loadConfig(ctx.cwd), loadPreference(ctx.cwd), runtimePreset).pref;
+			const changes = [
+				record?.override.tools ? "tool_schema" : null,
+				record?.override.skills ? "skill_set" : null,
+				record?.override.mcpServers ? "mcp_set" : null,
+				record?.override.communication || record?.override.workspace ? "runtime_policy_guard" : null,
+			].filter((item): item is "tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard" => !!item);
+			const cacheImpact = changes.map(change => assessCacheImpact(change, pref));
+			const text = [
+				`Capability policy ${params.agent} (${params.role}) revision=${record?.revision ?? 0}`,
+				JSON.stringify(effective, null, 2),
+				...cacheImpact.map(item => formatCacheImpactWarning(item)).filter(Boolean) as string[],
+			].join("\n\n");
+			return { content: [{ type: "text", text }], details: { record, effective, cacheImpact } };
+		},
+	});
 
 	pi.registerTool({
 		name: "flux_subagent",
@@ -451,30 +851,69 @@ export default function (pi: ExtensionAPI) {
 			persistent: Type.Optional(Type.Boolean({ description: "M2-2: 持久 session, 可跨调用续接 (默认 false)" })),
 			thinking: Type.Optional(Type.String({ description: "M2-4: reasoning effort (off/minimal/low/medium/high/xhigh), 默认跟随 agent 定义" })),
 			lockFiles: Type.Optional(Type.Array(Type.String(), { description: "该 agent 将编辑的文件路径列表, 用于文件锁防并行冲突" })),
+			communication: Type.Optional(Type.Object({
+				enabled: Type.Optional(Type.Boolean()),
+				actions: Type.Optional(Type.Array(Type.Union([Type.Literal("send"), Type.Literal("poll"), Type.Literal("ack"), Type.Literal("status")]))),
+				allowedTargets: Type.Optional(Type.Array(Type.String())),
+				requiredSendTo: Type.Optional(Type.Array(Type.String())),
+				requireExplicitInboxAck: Type.Optional(Type.Boolean()),
+				maxMessagesPerRun: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
+			}, { description: "单次运行的通信策略覆盖；在角色模板默认值之上生效" })),
+			capabilities: Type.Optional(Type.Object({
+				tools: Type.Optional(Type.Array(Type.String())),
+				skills: Type.Optional(Type.Array(Type.String())),
+				mcpServers: Type.Optional(Type.Array(Type.String())),
+				workspace: Type.Optional(Type.Object({
+					roots: Type.Optional(Type.Array(Type.String())),
+					deniedPaths: Type.Optional(Type.Array(Type.String())),
+					blockDangerousCommands: Type.Optional(Type.Boolean()),
+				})),
+			}, { description: "单次运行能力覆盖；只能进一步收窄角色模板和注册实例" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
-			const agent = loadSubagent(ctx.cwd, params.agent);
-			if (!agent) {
-				return { content: [{ type: "text", text: `AgentFlux: unknown subagent '${params.agent}'. 可用: reviewer (内建) 或 .agentflux/agents/*.md` }], details: {} };
+			const loadedAgent = loadSubagent(ctx.cwd, params.agent);
+			if (!loadedAgent) {
+				throw new Error(`AgentFlux: unknown subagent '${params.agent}'. 可用: reviewer (内建) 或 .agentflux/agents/*.md`);
 			}
+			const agent = withSharedSkills(loadedAgent, teamCtx?.sharedSkills);
 			const config = loadConfig(ctx.cwd);
 			// Resolve provider from config if not specified in agent definition
 			if (!agent.provider && agent.model) {
-				agent.provider = config.models?.models?.[agent.model]?.provider;
+				agent.provider = teamCtx?.modelsConfig?.models?.[agent.model]?.provider;
 			}
 			const validThinking = params.thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(params.thinking)
 				? params.thinking as any : undefined;
+			const pref = applyRuntimeOverride(config, loadPreference(ctx.cwd), runtimePreset).pref;
+			const capabilityWarnings = [
+				params.capabilities?.tools ? assessCacheImpact("tool_schema", pref) : null,
+				params.capabilities?.skills ? assessCacheImpact("skill_set", pref) : null,
+				params.capabilities?.mcpServers ? assessCacheImpact("mcp_set", pref) : null,
+			].filter((item): item is NonNullable<typeof item> => !!item)
+				.map(item => formatCacheImpactWarning(item)).filter((item): item is string => !!item);
+			if (ctx.hasUI) for (const warning of capabilityWarnings) ctx.ui.notify(warning, "warning");
 			const r = await runSubagent({
 				cwd: ctx.cwd, agent, task: params.task, sessionId,
 				telemetry, prefixLayout: config.cache.prefix_layout === "static_first",
 				pricing: pricingTable ?? undefined,
 				persistent: params.persistent ?? false,
 				thinking: validThinking,
-				timeoutMs: 180000,   // 3min
+				timeoutMs: Math.min(15 * 60_000, Math.max(60_000, config.budget.max_wall_clock_seconds * 1000)),
 				maxRetries: 2,       // 自动重试 2 次 (502/timeout 等)
+				enableModelFallback: Object.keys(teamCtx?.modelsConfig?.models ?? {}).length > 1,
+				modelsForFallback: teamCtx?.modelsConfig?.models,
+				roleRequirementForFallback: {
+					coding: params.agent === "implementer" ? 0.8 : 0.5,
+					reasoning: params.agent === "reviewer" ? 0.9 : 0.6,
+					speed: 0.6,
+					cost_eff: params.agent === "reviewer" ? 0.4 : 0.75,
+				},
 				lockFiles: params.lockFiles,
+				signal: _signal,
+				maxCostUsd: config.budget.max_cost_per_task,
+				communicationOverride: params.communication,
+				capabilityOverride: params.capabilities,
 			});
-			return { content: [{ type: "text", text: formatSubagentResult(r) }], details: {} };
+			return { content: [{ type: "text", text: [...capabilityWarnings, formatSubagentResult(r)].join("\n\n") }], details: r };
 		},
 	});
 
@@ -507,14 +946,15 @@ export default function (pi: ExtensionAPI) {
 			const fileOwner: Record<string, string> = {};  // file→label, 冲突检测
 
 			for (const a of params.agents) {
-				const agent = loadSubagent(ctx.cwd, a.agent);
-				if (!agent) {
+				const loadedAgent = loadSubagent(ctx.cwd, a.agent);
+				if (!loadedAgent) {
 					loadErrors.push(`unknown subagent '${a.agent}'`);
 					continue;
 				}
+				const agent = withSharedSkills(loadedAgent, teamCtx?.sharedSkills);
 				// Resolve provider from config if not specified in agent definition
 				if (!agent.provider && agent.model) {
-					agent.provider = config.models?.models?.[agent.model]?.provider;
+					agent.provider = teamCtx?.modelsConfig?.models?.[agent.model]?.provider;
 				}
 				const label = a.label ?? a.agent;
 				tasks.push({ agent, task: a.task, label });
@@ -543,6 +983,8 @@ export default function (pi: ExtensionAPI) {
 				timeoutMs: 180000,
 				maxRetries: 2,   // 502/timeout 自动重试
 				lockFiles: Object.keys(lockFilesMap).length > 0 ? lockFilesMap : undefined,
+				signal: _signal,
+				maxCostUsd: config.budget.max_cost_per_task,
 			});
 			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
 			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };
@@ -587,6 +1029,9 @@ export default function (pi: ExtensionAPI) {
 					prefixLayout: config.cache.prefix_layout === "static_first",
 					maxRounds: params.maxRounds ?? 2,
 					timeoutMs: 180000,
+					signal: _signal,
+					maxCostUsd: config.budget.max_cost_per_task,
+					sharedSkills: teamCtx?.sharedSkills,
 				},
 			);
 
@@ -607,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/cache/mode/fork/self-maintenance. subcommands: why | mode <preset> | preference | project | fork | complexity | team | compact | agents | chat | groups | status | health | restart | upgrade [pull]",
+		description: "AgentFlux: routing/execution/cache/self-maintenance. subcommands: work [--mode M1|M2|M5] <task> | cancel [runId|all] | gc [dry-run] | why | mode <preset> | preference | project | fork | complexity | team | compact | agents | chat | groups | status | health | restart | upgrade [pull]",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -666,11 +1111,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// ─── MA-5: /flux work <task> — 多 agent DAG 执行 ───
+			// ─── Task → RoutePlan → M1/M2/M5 执行 ───
 			if (sub === "work") {
-				const taskText = parts.slice(1).join(" ").trim();
+				const parsedWork = parseWorkCommand(parts.slice(1));
+				if (parsedWork.error) {
+					const msg = parsedWork.error;
+					if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
+					return;
+				}
+				const taskText = parsedWork.task;
 				if (!taskText) {
-					const msg = "Usage: /flux work <task description>\n  Decomposes task into DAG, executes with persistent agents, quality gates, and retry.\n  Example: /flux work Implement a preference radar chart in the Desktop control panel";
+					const msg = "Usage: /flux work [--mode M1|M2|M5] <task description>\n  Without --mode, AgentFlux returns/applies the configured route recommendation.\n  Example: /flux work --mode M2 Implement a preference radar chart";
 					if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
 					return;
 				}
@@ -680,65 +1131,110 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				// 异步执行 DAG, 不阻塞 pi 事件循环
+				const config = loadConfig(ctx.cwd);
+				const runtime = applyRuntimeOverride(config, loadPreference(ctx.cwd), runtimePreset);
+				const plan = buildTaskRoutePlan({ cwd: ctx.cwd, task: taskText, stage: state.stage, config: runtime.config, pref: runtime.pref, requestedMode: parsedWork.mode ?? explicitRuntimeMode });
+				currentTaskPlan = plan;
+				state.mode = plan.effectiveMode;
+				telemetry.writeRoutingDecision({
+					sessionId, taskId: plan.taskId, decisionId: plan.decisionId,
+					mode: plan.effectiveMode, actualMode: plan.effectiveMode,
+					preset: state.preset, stage: state.stage, role: state.role,
+					reason: [...plan.decision.reason, "explicit:/flux work"], confidence: plan.decision.confidence,
+					fallback: plan.decision.fallback, biasSources: plan.decision.biasSources, expected: plan.decision.expected,
+					taskType: plan.signal.classification.type, complexityTier: plan.signal.complexity.tier,
+					fileCount: plan.signal.complexity.fileCount, diffLines: plan.signal.scope.diffLines,
+					overrideMode: runtime.config.routing.override_mode, applied: true,
+				});
+				if (plan.blockedReason) {
+					const msg = `[flux work] ${formatTaskRoutePlan(plan)}`;
+					if (ctx.hasUI) ctx.ui.notify(msg, "error"); else console.error(msg);
+					return;
+				}
+
+				// M1/M2 的执行 owner 是当前 main agent；把原任务重新送入 agent loop，并绑定已确认计划。
+				if (plan.executor !== "dag") {
+					pendingExplicitPlan = plan;
+					const msg = `[flux work] Applied\n${formatTaskRoutePlan(plan)}`;
+					if (ctx.hasUI) ctx.ui.notify(msg, "info"); else console.log(msg);
+					pi.sendUserMessage(taskText);
+					// In print mode the slash command itself is the only top-level input.  If
+					// the handler returns immediately, pi may dispose the session before the
+					// asynchronously queued user turn starts, invalidating every extension
+					// context.  Yield once so sendUserMessage can enter the agent loop, then
+					// keep the command alive until that turn settles.  TUI/RPC callers retain
+					// their existing non-blocking command behaviour.
+					if (ctx.mode === "print") {
+						const previousTurn = state.turnIndex;
+						const startDeadline = Date.now() + 5_000;
+						while (ctx.isIdle() && state.turnIndex === previousTurn && Date.now() < startDeadline) {
+							await new Promise<void>((resolve) => setTimeout(resolve, 10));
+						}
+						if (!ctx.isIdle()) await ctx.waitForIdle();
+						else if (state.turnIndex === previousTurn) {
+							throw new Error("/flux work could not start its delegated turn in print mode");
+						}
+					}
+					return;
+				}
+
+				const controller = new AbortController();
+				activeRuns.set(plan.taskId, { controller, startedAt: Date.now(), task: taskText });
+				// DAG 在后台执行，但保留可取消句柄和稳定 run id。
 				const execDag = async () => {
 					try {
-						if (ctx.hasUI) ctx.ui.notify(`[flux work] Decomposing task: ${taskText.slice(0, 80)}...`, "info");
-						else console.log(`[flux work] Decomposing task: ${taskText.slice(0, 80)}...`);
-
-						// Step 1: 生成 DAG
-						const dag = await generateTaskDAG(taskText, {
-							cwd: ctx.cwd,
-							model: teamCtx.modelsConfig?.models?.["oa/glm-5.2"] ? "oa/glm-5.2" : undefined,
-							pricing: teamCtx.pricing,
-							telemetry,
-							sessionId,
-							prefixLayout: teamCtx.prefixLayout,
-						});
-
-						const dagStr = formatDAG(dag);
-						if (ctx.hasUI) ctx.ui.notify(`[flux work] DAG generated:\n${dagStr}`, "info");
-						else console.log(dagStr);
-
-						// Step 2: 执行 DAG
-						const result = await executeDAG(dag, {
-							cwd: ctx.cwd,
-							fluxDir,
-							modelsConfig: teamCtx.modelsConfig,
-							telemetry,
-							prefixLayout: teamCtx.prefixLayout,
-							pricing: teamCtx.pricing,
-							sessionId,
-							sharedSkills: teamCtx.sharedSkills,
-							persistent: true,       // MA-1: 默认持久 session
-							enableQualityGate: true,
-							maxRetries: 2,
-							timeoutMs: 300000,      // 5min per node (生产任务可能较复杂)
-						});
-
-						// Step 3: 输出结果
+						if (ctx.hasUI) ctx.ui.notify(`[flux work] ${formatTaskRoutePlan(plan)}\nDecomposing...`, "info");
+						else console.log(`[flux work]\n${formatTaskRoutePlan(plan)}\nDecomposing...`);
+						const result = await dispatchDagPlan(plan, ctx, controller.signal);
 						const resultStr = formatDAGResult(result);
 						if (ctx.hasUI) ctx.ui.notify(`[flux work] Done!\n${resultStr}`, "info");
 						else console.log(resultStr);
-
-						// Step 4: 更新 footer
 						refreshCache(ctx);
-						installFooter(ctx, buildFluxSummary(state));
 					} catch (e: any) {
 						const errMsg = `[flux work] Error: ${e?.message ?? e}`;
 						if (ctx.hasUI) ctx.ui.notify(errMsg, "error"); else console.error(errMsg);
+					} finally {
+						activeRuns.delete(plan.taskId);
 					}
 				};
 
-				execDag(); // fire-and-forget
-				if (ctx.hasUI) ctx.ui.notify("[flux work] Task dispatched. Use /flux agents to monitor progress.", "info");
-				else console.log("[flux work] Task dispatched. Use /flux agents to monitor progress.");
+				void execDag();
+				if (ctx.hasUI) ctx.ui.notify(`[flux work] Dispatched ${plan.taskId}. Use /flux cancel ${plan.taskId} to stop.`, "info");
+				else console.log(`[flux work] Dispatched ${plan.taskId}. Use /flux cancel ${plan.taskId} to stop.`);
+				return;
+			}
+
+			if (sub === "cancel") {
+				const target = parts[1];
+				const runs = target && target !== "all"
+					? [...activeRuns.entries()].filter(([id]) => id === target)
+					: [...activeRuns.entries()];
+				for (const [, run] of runs) run.controller.abort(`cancelled by /flux cancel ${target ?? "all"}`);
+				const msg = runs.length > 0 ? `Cancellation requested for ${runs.map(([id]) => id).join(", ")}` : "No matching active AgentFlux run";
+				if (ctx.hasUI) ctx.ui.notify(msg, runs.length > 0 ? "info" : "warn"); else console.log(msg);
+				return;
+			}
+
+			if (sub === "gc") {
+				const config = loadConfig(ctx.cwd);
+				const dryRun = ["dry-run", "--dry-run"].includes(parts[1]);
+				const activeRunIds = [...new Set([...activeRuns.keys(), ...getActiveSubagentRunIds()])];
+				const report = runLifecycleGc(fluxDir, config.retention, { dryRun, activeRunIds });
+				const text = formatLifecycleGcReport(report);
+				if (ctx.hasUI) ctx.ui.notify(text, report.blockedReason ? "warn" : "info"); else console.log(text);
 				return;
 			}
 
 			if (sub === "agents") {
 				const lines: string[] = ["AgentFlux Active Agents", "═".repeat(60)];
 				let count = 0;
+				if (activeRuns.size > 0) {
+					lines.push("Active Runs:");
+					for (const [id, run] of activeRuns) {
+						lines.push(`  ● ${id} | ${Math.round((Date.now() - run.startedAt) / 1000)}s | ${run.task.slice(0, 60)}`);
+						count++;
+					}
+				}
 				// Agent registry (new: from SharedBoard agents/)
 				try {
 					const board = new SharedBoard(fluxDir);
@@ -758,8 +1254,8 @@ export default function (pi: ExtensionAPI) {
 					if (existsSync(regPath)) {
 						const reg = JSON.parse(readFileSync(regPath, "utf-8"));
 						lines.push("Persistent Agents:");
-						for (const [name, info] of Object.entries(reg)) {
-							const a = info as any;
+						for (const a of (Array.isArray(reg) ? reg : reg.agents ?? [])) {
+							const name = a.name ?? "unknown";
 							const statusIcon = a.status === "running" ? "●" : a.status === "done" ? "✓" : a.status === "failed" ? "✗" : "○";
 							lines.push(`  ${statusIcon} ${name.padEnd(20)} ${a.role ?? "?"} | ${a.status ?? "?"} | calls=${a.callCount ?? 0} | $${(a.totalCost ?? 0).toFixed(4)}`);
 							count++;
@@ -768,10 +1264,10 @@ export default function (pi: ExtensionAPI) {
 				} catch {}
 				// SharedBoard agents (DAG/M6)
 				try {
-					const bbPath = join(fluxDir, "blackboard.json");
-					if (existsSync(bbPath)) {
-						const bb = JSON.parse(readFileSync(bbPath, "utf-8"));
-						const agents = bb.agents ?? {};
+					const board = new SharedBoard(fluxDir);
+					const bb = board.getBlackboard();
+					{
+						const agents = bb.agentStatuses ?? {};
 						const entries = Object.entries(agents);
 						if (entries.length > 0) {
 							if (count > 0) lines.push("");
@@ -859,6 +1355,14 @@ export default function (pi: ExtensionAPI) {
 						: c.name === "Telemetry" ? telemetry?.path
 						: undefined,
 				}));
+				const pumpStats = rpcInboxPump?.getStats();
+				subsystems.push({
+					name: "RPC Inbox Pump",
+					healthy: !pumpStats || !pumpStats.lastError,
+					detail: pumpStats
+						? `running recipient=${pumpStats.recipient}; instance=${rpcRuntimeInstanceId ?? "unknown"}; in-flight=${pumpStats.inFlightMessageIds.length}; delivered=${pumpStats.delivered}; ack=${pumpStats.acknowledged}; failed=${pumpStats.failed}; heartbeat=${pumpStats.lastHeartbeatAt ?? "pending"}${pumpStats.lastError ? `; error=${pumpStats.lastError}` : ""}`
+						: "disabled",
+				});
 
 				// Read persistent agents
 				const activeAgents: AgentInfo[] = [];
@@ -866,8 +1370,8 @@ export default function (pi: ExtensionAPI) {
 					const regPath = join(fluxDir, "runtime", "persistent-agents.json");
 					if (existsSync(regPath)) {
 						const reg = JSON.parse(readFileSync(regPath, "utf-8"));
-						for (const [name, info] of Object.entries(reg)) {
-							const a = info as any;
+						for (const a of (Array.isArray(reg) ? reg : reg.agents ?? [])) {
+							const name = a.name ?? "unknown";
 							activeAgents.push({ name, role: a.role ?? "?", status: a.status ?? "?", model: a.model, callCount: a.callCount, totalCost: a.totalCost });
 						}
 					}
@@ -875,10 +1379,10 @@ export default function (pi: ExtensionAPI) {
 
 				// Read SharedBoard agents (DAG/M6 temporary agents)
 				try {
-					const bbPath = join(fluxDir, "blackboard.json");
-					if (existsSync(bbPath)) {
-						const bb = JSON.parse(readFileSync(bbPath, "utf-8"));
-						const agents = bb.agents ?? {};
+					const board = new SharedBoard(fluxDir);
+					const bb = board.getBlackboard();
+					{
+						const agents = bb.agentStatuses ?? {};
 						for (const [name, info] of Object.entries(agents)) {
 							const a = info as any;
 							// 跳过已从 persistent-agents.json 加载的
@@ -1096,7 +1600,7 @@ export default function (pi: ExtensionAPI) {
 		if (complexitySignal) parts.push(formatComplexitySignal(complexitySignal));
 		const text = parts.join("\n\n");
 		if (ctx.mode !== "tui") { ctx.ui.notify(text, "info"); return; }
-		await ctx.ui.custom<void>((tui: any, theme: any, _kb: any, done: () => void) => {
+		await ctx.ui.custom((tui: any, theme: any, _kb: any, done: () => void) => {
 			const lines = text.split("\n");
 			let closed = false;
 			const close = () => { if (!closed) { closed = true; done(); } };

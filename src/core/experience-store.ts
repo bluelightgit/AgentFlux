@@ -12,16 +12,25 @@
  * 参考: EvoRoute (ACL 2026) 经验路由 -80% 成本; BAMAS ILP+RL -86% 成本
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { Mode } from "./types";
+import type { TelemetryEvidence, TelemetryOutcomeStatus } from "../telemetry/events";
 
 // ─── 类型定义 ───
 
 export interface ExperienceRecord {
 	id: string;
 	timestamp: string;
+	/** 与 telemetry 的因果链保持一致；旧记录可缺省。 */
+	taskId?: string;
+	runId?: string;
+	decisionId?: string;
+	stepId?: string;
+	attemptId?: string;
+	startedAt?: number;
+	finishedAt?: number;
 	/** 任务签名 */
 	signature: TaskSignature;
 	/** 路由推荐的模式 */
@@ -53,7 +62,10 @@ export interface TaskSignature {
 
 export interface TaskOutcome {
 	success: boolean;
+	status?: TelemetryOutcomeStatus;
+	/** `cost` 是旧字段；`costUsd` 是 telemetry 统一字段，两者存储同一数值。 */
 	cost: number;
+	costUsd?: number;
 	latencyMs: number;
 	turns: number;
 	cacheHitRate: number;
@@ -61,6 +73,8 @@ export interface TaskOutcome {
 	gatePassed?: boolean;
 	/** 重试次数 */
 	retryCount?: number;
+	/** 任务完成的可验证证据。 */
+	evidence?: TelemetryEvidence[];
 }
 
 export interface ModeRecommendation {
@@ -111,11 +125,22 @@ export class ExperienceStore {
 
 		const record: ExperienceRecord = {
 			id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			timestamp: new Date().toISOString(),
+			timestamp: new Date(entry.finishedAt ?? Date.now()).toISOString(),
+			taskId: entry.taskId,
+			runId: entry.runId,
+			decisionId: entry.decisionId,
+			stepId: entry.stepId,
+			attemptId: entry.attemptId,
+			startedAt: entry.startedAt,
+			finishedAt: entry.finishedAt,
 			signature,
 			routedMode: entry.routedMode,
 			actualMode: entry.actualMode,
-			outcome: entry.outcome,
+			outcome: {
+				...entry.outcome,
+				cost: finiteNumber(entry.outcome.costUsd) ?? entry.outcome.cost,
+				costUsd: finiteNumber(entry.outcome.costUsd) ?? entry.outcome.cost,
+			},
 			context: entry.context,
 		};
 
@@ -237,49 +262,79 @@ export class ExperienceStore {
 	/**
 	 * 从 telemetry events.jsonl 导入历史数据.
 	 *
-	 * 匹配 routing.decision 事件, 关联同 session 的 subagent.run 事件获取实际成本.
+	 * 兼容当前 TelemetryWriter 的扁平 schema 与旧 `{ payload: ... }` schema。
+	 * 关联优先级: decisionId > runId > taskId > 同 session 时序窗口。
+	 * 没有可判定 outcome/exitCode 的真实 run 时不生成经验，避免 `every([]) === true`
+	 * 将未执行的决策污染为“成功且零成本”。
 	 */
 	importFromTelemetry(eventsFile: string): number {
 		if (!existsSync(eventsFile)) return 0;
 		try {
 			const content = readFileSync(eventsFile, "utf-8");
-			const events = content.split("\n").filter(Boolean).map(l => JSON.parse(l));
+			const events: Array<Record<string, any>> = content.split("\n")
+				.map(line => line.trim())
+				.filter(Boolean)
+				.flatMap((line, index) => {
+					try { return [{ ...normalizeTelemetryEvent(JSON.parse(line)), _index: index }]; }
+					catch { return []; }
+				});
 			let imported = 0;
 
-			// 按 session 分组 subagent.run 事件
-			const subagentRuns = new Map<string, any[]>();
-			for (const e of events) {
-				if (e.type === "subagent.run") {
-					const sid = e.sessionId || e.payload?.sessionId || "";
-					if (!subagentRuns.has(sid)) subagentRuns.set(sid, []);
-					subagentRuns.get(sid)!.push(e);
-				}
-			}
+			const decisions = events.filter(e => e.type === "routing.decision");
+			const allRuns = events.filter(e => e.type === "subagent.run");
 
-			for (const e of events) {
-				if (e.type !== "routing.decision") continue;
-				const p = e.payload || e;
-				const sessionId = e.sessionId || p.sessionId || "";
-				const runs = subagentRuns.get(sessionId) || [];
+			for (let i = 0; i < decisions.length; i++) {
+				const p = decisions[i];
+				const nextDecisionIndex = decisions
+					.slice(i + 1)
+					.find(d => d.sessionId === p.sessionId)?._index ?? Number.POSITIVE_INFINITY;
+				const runs = correlateRuns(p, allRuns, nextDecisionIndex)
+					.map(event => ({ event, success: resolveRunSuccess(event) }))
+					.filter((run): run is { event: Record<string, any>; success: boolean } => run.success !== null);
 
-				// 从 subagent.run 聚合实际成本
-				const totalCost = runs.reduce((s, r) => s + (r.payload?.cost || r.cost || 0), 0);
-				const totalLatency = runs.reduce((s, r) => s + (r.payload?.latencyMs || 0), 0);
-				const success = runs.every(r => (r.payload?.exitCode || 0) === 0);
+				// 没有真实完成 run 的决策不是训练样本。
+				if (runs.length === 0) continue;
+
+				const runEvents = runs.map(run => run.event);
+				const totalCost = runEvents.reduce((sum, run) => sum + readCostUsd(run), 0);
+				const totalLatency = aggregateLatency(runEvents);
+				const success = runs.every(run => run.success);
+				const status: TelemetryOutcomeStatus = success
+					? "success"
+					: runs.some(run => run.success) ? "partial" : aggregateFailureStatus(runEvents);
+				const evidence = collectEvidence(p, runEvents);
+				const startedAt = minTimestamp(runEvents.map(readStartedAt));
+				const finishedAt = maxTimestamp(runEvents.map(readFinishedAt));
+				const firstRun = runEvents[0];
+				const gateValues = runEvents
+					.map(run => run.outcome?.gatePassed ?? run.gatePassed)
+					.filter((value): value is boolean => typeof value === "boolean");
 
 				this.record({
-					taskType: p.taskType || "unknown",
-					complexityTier: p.complexityTier || 0,
-					fileCount: p.fileCount || 0,
-					diffLines: p.diffLines || 0,
-					routedMode: p.mode || "M1",
-					actualMode: p.mode || "M1",
+					taskId: p.taskId ?? firstRun.taskId,
+					runId: p.runId ?? firstRun.runId,
+					decisionId: p.decisionId ?? firstRun.decisionId,
+					stepId: p.stepId ?? firstRun.stepId,
+					attemptId: p.attemptId ?? firstRun.attemptId,
+					startedAt,
+					finishedAt,
+					taskType: p.taskType ?? p.task?.type ?? "unknown",
+					complexityTier: finiteNumber(p.complexityTier ?? p.task?.complexityTier) ?? 0,
+					fileCount: finiteNumber(p.fileCount ?? p.task?.fileCount) ?? 0,
+					diffLines: finiteNumber(p.diffLines ?? p.task?.diffLines) ?? 0,
+					routedMode: p.mode ?? "M1",
+					actualMode: p.actualMode ?? firstRun.actualMode ?? firstRun.mode ?? p.mode ?? "M1",
 					outcome: {
+						status,
 						success,
 						cost: totalCost,
+						costUsd: totalCost,
 						latencyMs: totalLatency,
-						turns: runs.length,
-						cacheHitRate: runs.reduce((s, r) => s + (r.payload?.cacheHitRate || 0), 0) / (runs.length || 1),
+						turns: runEvents.reduce((sum, run) => sum + (finiteNumber(run.turns) ?? 1), 0),
+						cacheHitRate: average(runEvents.map(run => finiteNumber(run.cacheHitRate) ?? 0)),
+						gatePassed: gateValues.length > 0 ? gateValues.every(Boolean) : undefined,
+						retryCount: runEvents.reduce((sum, run) => sum + (finiteNumber(run.retryCount ?? run.outcome?.retryCount) ?? 0), 0),
+						evidence,
 					},
 					context: { stage: p.stage, preset: p.preset },
 				});
@@ -297,6 +352,126 @@ export class ExperienceStore {
 		const bucket = fileCount === 0 ? 0 : fileCount <= 3 ? 1 : fileCount <= 10 ? 2 : fileCount <= 30 ? 3 : 4;
 		return createHash("md5").update(`${taskType}:${tier}:${bucket}`).digest("hex").slice(0, 8);
 	}
+}
+
+function normalizeTelemetryEvent(raw: any): Record<string, any> {
+	const payload = raw && typeof raw.payload === "object" && raw.payload !== null ? raw.payload : {};
+	const normalized = { ...payload, ...raw };
+	delete normalized.payload;
+	normalized.type = raw?.type ?? payload.type;
+	normalized.sessionId = raw?.sessionId ?? payload.sessionId ?? "";
+	return normalized;
+}
+
+function correlateRuns(
+	decision: Record<string, any>,
+	allRuns: Record<string, any>[],
+	nextDecisionIndex: number,
+): Record<string, any>[] {
+	const byDecision = decision.decisionId
+		? allRuns.filter(run => run.decisionId === decision.decisionId)
+		: [];
+	if (byDecision.length > 0) return byDecision;
+
+	const inWindow = allRuns.filter(run =>
+		run._index > decision._index &&
+		run._index < nextDecisionIndex &&
+		run.sessionId === decision.sessionId
+	);
+	if (decision.runId) {
+		const byRun = inWindow.filter(run => run.runId === decision.runId);
+		if (byRun.length > 0) return byRun;
+	}
+	if (decision.taskId) {
+		const byTask = inWindow.filter(run => run.taskId === decision.taskId);
+		if (byTask.length > 0) return byTask;
+	}
+	return inWindow;
+}
+
+function resolveRunSuccess(run: Record<string, any>): boolean | null {
+	if (typeof run.outcome?.success === "boolean") return run.outcome.success;
+	if (typeof run.success === "boolean") return run.success;
+	const status = String(run.outcome?.status ?? run.status ?? "").toLowerCase();
+	if (status === "success" || status === "succeeded" || status === "passed" || status === "done") return true;
+	if (["failure", "failed", "partial", "cancelled", "canceled", "timeout", "timed_out"].includes(status)) return false;
+	const exitCode = finiteNumber(run.exitCode ?? run.outcome?.exitCode);
+	return exitCode === undefined ? null : exitCode === 0;
+}
+
+function readCostUsd(run: Record<string, any>): number {
+	return finiteNumber(run.costUsd ?? run.cost ?? run.outcome?.costUsd ?? run.outcome?.cost ?? run.usage?.cost) ?? 0;
+}
+
+function readStartedAt(run: Record<string, any>): number | undefined {
+	const explicit = timestampNumber(run.startedAt);
+	if (explicit !== undefined) return explicit;
+	const finishedAt = timestampNumber(run.finishedAt ?? run.ts);
+	const latencyMs = finiteNumber(run.latencyMs);
+	return finishedAt !== undefined && latencyMs !== undefined ? Math.max(0, finishedAt - latencyMs) : undefined;
+}
+
+function readFinishedAt(run: Record<string, any>): number | undefined {
+	return timestampNumber(run.finishedAt ?? run.ts);
+}
+
+function readLatency(run: Record<string, any>): number {
+	const explicit = finiteNumber(run.latencyMs ?? run.outcome?.latencyMs);
+	if (explicit !== undefined) return Math.max(0, explicit);
+	const startedAt = readStartedAt(run);
+	const finishedAt = readFinishedAt(run);
+	return startedAt !== undefined && finishedAt !== undefined ? Math.max(0, finishedAt - startedAt) : 0;
+}
+
+function aggregateLatency(runs: Record<string, any>[]): number {
+	const starts = runs.map(readStartedAt).filter((value): value is number => value !== undefined);
+	const finishes = runs.map(readFinishedAt).filter((value): value is number => value !== undefined);
+	if (starts.length === runs.length && finishes.length === runs.length && runs.length > 0) {
+		return Math.max(0, Math.max(...finishes) - Math.min(...starts));
+	}
+	return runs.reduce((sum, run) => sum + readLatency(run), 0);
+}
+
+function aggregateFailureStatus(runs: Record<string, any>[]): TelemetryOutcomeStatus {
+	const statuses = runs.map(run => String(run.outcome?.status ?? run.status ?? "").toLowerCase());
+	if (statuses.some(status => status === "timeout" || status === "timed_out")) return "timeout";
+	if (statuses.some(status => status === "cancelled" || status === "canceled")) return "cancelled";
+	return "failure";
+}
+
+function collectEvidence(decision: Record<string, any>, runs: Record<string, any>[]): TelemetryEvidence[] | undefined {
+	const evidence = [decision, ...runs]
+		.flatMap(event => [event.evidence, event.outcome?.evidence])
+		.filter(Array.isArray)
+		.flat()
+		.filter(item => item && typeof item === "object") as TelemetryEvidence[];
+	return evidence.length > 0 ? evidence : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function timestampNumber(value: unknown): number | undefined {
+	const numeric = finiteNumber(value);
+	if (numeric !== undefined) return numeric;
+	if (typeof value !== "string" || value.trim() === "") return undefined;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function minTimestamp(values: Array<number | undefined>): number | undefined {
+	const present = values.filter((value): value is number => value !== undefined);
+	return present.length > 0 ? Math.min(...present) : undefined;
+}
+
+function maxTimestamp(values: Array<number | undefined>): number | undefined {
+	const present = values.filter((value): value is number => value !== undefined);
+	return present.length > 0 ? Math.max(...present) : undefined;
+}
+
+function average(values: number[]): number {
+	return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
 // ─── 格式化 ───

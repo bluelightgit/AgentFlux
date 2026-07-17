@@ -6,20 +6,30 @@ import { useDashboardStore } from '../store/dashboard-store';
 import { Card, Icon, MetricCard, DataTable, Badge, EmptyState } from './ui';
 import { SummaryCards } from './SummaryCards';
 import { RouteMap } from './RouteMap';
-import { CostTrendChart } from './CostTrendChart';
 import { InsightsCard, type InsightItem } from './InsightsCard';
 import { generateInsights } from '../lib/insights-generator';
 import { CostBudgetPanel } from './CostBudgetPanel';
 import { SubsystemHealthPanel } from './SubsystemHealthPanel';
-import { QuickActions } from './QuickActions';
 import { RecentFilesPanel } from './RecentFilesPanel';
-import { AgentDispatchForm } from './AgentDispatchForm';
 import { ErrorLogPanel } from './ErrorLogPanel';
 import { WorkflowStats } from './WorkflowStats';
 import { ModelHealthDashboard } from './ModelHealthDashboard';
 import { AgentActivityHeatmap } from './AgentActivityHeatmap';
 import { CostForecastChart } from './CostForecastChart';
 import { BudgetTrendChart } from './BudgetTrendChart';
+
+/** Context link — navigates to a target page without full import. */
+function contextLink(page: string, label: string): React.ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={() => useDashboardStore.getState().setPage(page as any)}
+      className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 underline underline-offset-2"
+    >
+      {label} →
+    </button>
+  );
+}
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('en-US', {
@@ -60,13 +70,46 @@ export const OverviewPage: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // If no project loaded, show empty state for whole page
+  // If no project loaded, show empty state with add-workspace action
   if (!project) {
+    const addWorkspacePath = useDashboardStore.getState().addWorkspacePath;
+
+    let action: React.ReactNode;
+
+    if (typeof window !== 'undefined' && window.api?.showFolderDialog) {
+      // Electron: button that opens native folder dialog
+      action = (
+        <button
+          type="button"
+          onClick={async () => {
+            const path = await window.api.showFolderDialog!();
+            if (path) {
+              await addWorkspacePath(path);
+            }
+          }}
+          className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm text-white transition-colors hover:bg-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:bg-blue-600 dark:hover:bg-blue-700"
+        >
+          <Icon name="Plus" size={16} />
+          Add Workspace
+        </button>
+      );
+    } else {
+      // Non-Electron: read-only prompt — folder selection only available in desktop app
+      action = (
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-500 dark:text-slate-400">
+            Folder selection is only available in the desktop app
+          </span>
+        </div>
+      );
+    }
+
     return (
       <div className="p-6">
         <EmptyState
           icon="FolderOpen"
           message="No project loaded. Select or add a workspace to get started."
+          action={action}
         />
       </div>
     );
@@ -144,27 +187,44 @@ export const OverviewPage: React.FC = () => {
       {/* 5. Route Map */}
       <RouteMap />
 
-      {/* 6. Cost Trend & Insights */}
-      <div className='mt-4 grid gap-6'>
-        <CostTrendChart />
-        <InsightsCard insights={insights} />
-        <CostBudgetPanel />
-      </div>
+      {/* 6. Cost Trend — summary card linking to Telemetry for full chart */}
+      <Card>
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Cost Trend</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              View detailed cost trends, breakdowns, and forecasts in Telemetry.
+            </p>
+          </div>
+          {contextLink('telemetry', 'Open Telemetry')}
+        </div>
+      </Card>
+
+      <InsightsCard insights={insights} />
+      <CostBudgetPanel />
 
       <div className="mt-4">
         <SubsystemHealthPanel />
       </div>
 
-      <div className="mt-4">
-        <QuickActions />
-      </div>
+      {/* Context navigation: Control Room is the only dispatch entry */}
+      <Card>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Icon name="Layers" size={20} className="text-blue-500" />
+            <div>
+              <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Task Dispatch</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Create and dispatch tasks exclusively from Control Room — this view is read-only.
+              </p>
+            </div>
+          </div>
+          {contextLink('workbench', 'Open Control Room')}
+        </div>
+      </Card>
 
       <div className="mt-4">
         <RecentFilesPanel />
-      </div>
-
-      <div className="mt-4">
-        <AgentDispatchForm />
       </div>
 
       <div className="mt-4">

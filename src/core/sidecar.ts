@@ -66,7 +66,7 @@ export class SidecarClient {
 		try {
 			this.startProcess(sidecarScript);
 			const resp = await this.send("ping", {});
-			this.available = resp.result === "pong";
+			this.available = resp === "pong";
 			return this.available;
 		} catch {
 			this.available = false;
@@ -85,7 +85,7 @@ export class SidecarClient {
 		if (this.available) {
 			try {
 				const resp = await this.send("optimize_budget", { agents, ...opts });
-				if (resp.result) return resp.result as BudgetPlan;
+				if (resp) return resp as BudgetPlan;
 			} catch (e) {
 				console.error(`[flux sidecar] ILP failed, falling back to TS heuristic: ${e}`);
 			}
@@ -107,7 +107,7 @@ export class SidecarClient {
 		if (this.available) {
 			try {
 				const resp = await this.send("suggest_mode", { taskType, complexityTier, fileCount });
-				if (resp.result) return resp.result as ModeRecommendation;
+				if (resp) return resp as ModeRecommendation;
 			} catch (e) {
 				console.error(`[flux sidecar] RL suggest failed, falling back to TS statistics: ${e}`);
 			}
