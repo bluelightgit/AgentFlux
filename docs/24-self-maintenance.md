@@ -151,6 +151,7 @@ To upgrade now:
 - `health` → checkHealth()
 - `gc dry-run` → 预览终态 registry、V1 已读点对点消息、全接收者终态的 V2 消息和孤儿 session 的归档
 - `gc` → 执行安全 GC；有活跃子进程时拒绝执行
+- `gc legacy dry-run <agent-name...>` / `gc legacy <agent-name...>` → 预览/归档显式点名、超过 TTL、无实例身份且无 PID 的旧版非终态记录；不会扩大为自动猜测
 - `restart` → performRestart()
 - `upgrade` → checkUpgrade()
 

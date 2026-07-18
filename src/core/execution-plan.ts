@@ -58,6 +58,28 @@ export interface TaskRoutePlan {
 	blockedReason?: string;
 }
 
+export interface MainTaskBudgetState {
+	taskId: string;
+	startedAt: number;
+	iterationsStarted: number;
+}
+
+/** 在下一次 main-agent provider turn 开始前执行硬边界检查。 */
+export function evaluateMainTaskBudget(
+	plan: TaskRoutePlan,
+	state: MainTaskBudgetState,
+	nowMs = Date.now(),
+): { allowed: true; nextState: MainTaskBudgetState } | { allowed: false; reason: "max_iterations" | "max_wall_clock"; nextState: MainTaskBudgetState } {
+	const nextState = { ...state, iterationsStarted: state.iterationsStarted + 1 };
+	if (nowMs - state.startedAt >= plan.budget.maxWallClockMs) {
+		return { allowed: false, reason: "max_wall_clock", nextState };
+	}
+	if (nextState.iterationsStarted > plan.budget.maxIterations) {
+		return { allowed: false, reason: "max_iterations", nextState };
+	}
+	return { allowed: true, nextState };
+}
+
 /** planner 消耗后的任务剩余墙钟预算；节点不得再被隐藏的固定上限截短。 */
 export function remainingTaskWallClock(maxWallClockMs: number, elapsedMs: number): number {
 	return Math.max(1, maxWallClockMs - Math.max(0, elapsedMs));

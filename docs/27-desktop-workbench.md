@@ -1,6 +1,6 @@
 # 27 - Desktop 多 Agent 工作台
 
-更新日期：2026-07-16。
+更新日期：2026-07-18。
 
 ## 产品定位
 
@@ -117,24 +117,42 @@ Runtime 单元测试至少验证：
 3. Prompt、Steer、Follow-up 和 Abort 操作。
 4. roster 选择与真实事件渲染。
 
-发布前必须通过 Desktop 的 Vitest、Vite build、Electron compile，以及 1024/1280 布局验收。2026-07-16 最新证据为 13 files / 157 tests、runtime/start/preload/Control Room 定向 103/103、build、Electron compile、diff-check 全通过；Communication Lanes 另以 64 Agent、55 条方向关系验证 Top 12、scope-first、每次 +50、collapse、零边、group directory、可见方向与 ARIA。三栏专项覆盖容器门槛、联合 clamp、pointer/键盘、持久化、Reset 与窄屏无 separator；既有 1024×720 和 1280×800 页面证据均 `scrollWidth=clientWidth`，浏览器控制台 0 error/warning。真实 provider/live smoke 另列，不用 mock 测试冒充。
+发布前必须通过 Desktop 的 Vitest、Vite build、Electron compile，以及 1280/1024/800 布局验收。2026-07-18 本轮复跑为 13 files / 164 tests、production build 与 Electron compile 全通过；根工程另有 Desktop→core 六模式闭集矩阵 13/13。零成本 runtime 测试已证明 AUTO/M1/M2/M5 与 M1–M6 fallback 契约。真实 provider 测试 `test:desktop-deepseek-live` 使用隔离 fixture：DeepSeek Pro 完成 M1，DeepSeek Flash 完成 M2+真实 flash 子 Agent，M5 完成 Pro planner/lead + Flash 节点 DAG 并返回 PASSED，三个独立 Desktop PID 均 exit 0。Communication Lanes 另以 64 Agent、55 条方向关系验证 Top 12、scope-first、增量展开、collapse、零边、group directory、可见方向与 ARIA。
 
 2026-07-16 live smoke 已通过：独立 runtime 唯一名称/PID、Stop Selected、graceful done、normal V2 follow-up、critical steer、abort→cancelled、crash 后同名租约冲突，以及租约到期后的 idle prompt redelivery→acknowledged（attempts=2）。控制恢复 smoke 总耗时 73.082 秒、成本 $0.002016、extension error 0、残留 PID 0。
 
-Extension UI 已实现 confirm/select/input 的 pending request、Workbench 交互卡和原生 response 回写，超时/取消/abort/stop/exit 均会清理。2026-07-16 受控真实 pi RPC smoke 使用项目 CLI + `D:\Nodejs\node.exe` v24.11.1，验证 3 次响应 `true`/`beta`/`smoke-value`、7 个有效 RPC，状态完整经历 blocked/running 并最终 done，exitCode 0、3.105 秒，stderr 无 `markAsUncloneable`；该 smoke 不发送模型 prompt，token/cost 为 0，残留进程为 0。Runtime history 使用 schema v1 原子持久化，最多保留 100 个 runtime、每条 1000 events；恢复记录强制 pid=null、pending 清空、旧在线状态降为 aborted，并标记 historical 只读。missing/ready/corrupt/unsupported 现在均可诊断，损坏或未来 schema 会安全忽略并显示非阻塞提示；跨 schema 迁移和新 DAG live 仍待完成。
+Extension UI 已实现 confirm/select/input 的 pending request、Workbench 交互卡和原生 response 回写，超时/取消/abort/stop/exit 均会清理。2026-07-16 受控真实 pi RPC smoke 使用项目 CLI + `D:\Nodejs\node.exe` v24.11.1，验证 3 次响应 `true`/`beta`/`smoke-value`、7 个有效 RPC，状态完整经历 blocked/running 并最终 done，exitCode 0、3.105 秒，stderr 无 `markAsUncloneable`；该 smoke 不发送模型 prompt，token/cost 为 0，残留进程为 0。Runtime history 使用 schema v1 原子持久化，最多保留 100 个 runtime、每条 1000 events；恢复记录强制 pid=null、pending 清空、旧在线状态降为 aborted，并标记 historical 只读。missing/ready/corrupt/unsupported 现在均可诊断，损坏或未来 schema 会安全忽略并显示非阻塞提示；跨 schema 迁移仍待完成，DeepSeek M5 DAG live 已补齐。
 
-失败恢复专项 smoke 已验证：受控 runtime 先 exit 23 形成可选失败记录，再由 main 语义创建新 run，保留 retry lineage，接收 4 个有效 RPC 后 done；成本 0、旧失败记录保留、残留进程 0。Copy diagnostics 仅序列化白名单字段，并集中遮蔽 Authorization、Cookie、Bearer、token/API key、password、secret、credential、session/private/access key 等敏感值。
+失败恢复专项 smoke 于 2026-07-18 重新验证：core 已增加 instanceId 绑定与异常进程退出 presence 收敛；`sendJson` 现异步等待 write callback，永久监听 stdin error，并把 EPIPE 归一化为 `RPC_STDIN_WRITE_FAILED`/`rpc_stdin_error`。失败写入不移除 pending、不伪造 response；stop/abort/shutdown 仍执行 best-effort cleanup。runtime 单测 53/53，`test:desktop-retry-zero-cost` 完成 exit23→新 PID Retry→confirm→done，lineage 正确、cost 0、无 EPIPE。Retry 仍需长时间 soak 后再从 experimental 提升。
 
 Workbench 已通过专用只读 IPC 接入 core capability schema v1：选中 Agent 可查看 effective tools/skills/MCP、communication、workspace enforcement、provenance/source layer 和 narrowed。覆盖编辑区只生成绑定 agent/role/expectedRevision 的 `flux_capability_policy set` JSON 草稿并支持复制，不直接改写 override；因此不会绕过 core 的逐层收窄、revision、cache-impact 和 MCP fail-closed。当前尚无受控 set IPC，外部策略变化后需要重新选择或刷新 runtime 才会重读。
 
+2026-07-18 已完成 Desktop telemetry parser 的 `taskId`/扩展 outcome schema与严格 taskId Execution family 聚合器，并接入 Execution Inspector。界面展示 nested/DAG runs、success/failed/cancelled/timeout、成本与最近活动；缺失/空 taskId 时 fail-closed。Workbench/helper 定向测试 42/42。Message V2 与 artifact provenance 尚未并入 family。provider error 即使底层 CLI 退出 0 也会在 core 归一化为失败。
+
 ## 后续阶段
 
-- 将 core task/execution 事件关联到 Desktop lead runtime，并聚合 M2 nested subagent、M5 DAG node、消息、成本和 artifact；关联前不得在 UI 伪装成完整团队拓扑。
+### 2026-07-18 真实渲染审计与 UI 收敛门
+
+本轮使用真实 Electron renderer + CDP 布局探针检查 1280×800、1024×720 和 800×600，覆盖 Control Room、Agents Roster/Activity/Capabilities、Sessions 共 15 个状态，均满足 `document.scrollWidth === clientWidth`。已完成：
+
+1. **单一 onboarding**：Control Room 使用紧凑的 workspace-required 面板，明确指向顶部项目选择；已移出主导航的旧页面不再争夺 onboarding 入口。
+2. **Sidebar 响应式收敛**：常规宽度约 208px，800px 窗口约 168px并隐藏 note；主标签不再被右侧说明挤压。
+3. **Agents 任务化**：主面拆分为 Roster、Activity、Capabilities 三视图，不再一次铺开全部分析组件；Registered Agents 的共享宽表格在窄屏内局部滚动。
+4. **通信入口单一语义**：`Agent Channels` 当前顶部标记 `READ-ONLY / EXPERIMENTAL`，同页底部却存在 `Send Message` 表单。未接类型化 operator/Message V2 mutation 前必须删除或明确禁用发送区；接入后则移除 read-only 声明，并把 task-scoped communication composer 放入 Control Room，观察页只保留 traffic/history。
+5. **入口精简**：主导航与 Command Palette 统一为 8 个入口；Overview、Issue drafts、Settings 从主信息架构移除，Configuration 成为项目配置入口；顶部只保留一个命令搜索入口。
+6. **状态视觉可信**：disabled `New Task`/Send/Export 不得继续使用可执行主按钮的高强调色；read-only、experimental、diagnostics、draft 使用同一 Badge 体系，不能依靠 8–9px 低对比 note 表达关键状态。
+7. **空态尺寸合理**：Control Room 无 workspace 时不使用接近整页的空白画布；空态保持紧凑并让 workspace 操作位于首屏。三栏只在有 workspace/bridge 和任务数据时出现。
+
+验收必须包含 DOM 尺寸证据、1280/1024/800 截图、键盘导航、控制台日志以及 no-workspace/empty-data/live-runtime 三种状态；单纯 `scrollWidth` 无溢出不能关闭 UI 任务。
+
+- 在已完成的 taskId→nested/DAG run 与 cost family 上继续聚合消息 delivery/ACK 和 artifact provenance；关联前不得在 UI 伪装成完整团队拓扑。
 - 用类型化 operator IPC 替换 legacy Messages 和 Issue draft mutation，Message V2 保留 commit/delivery/ACK；补固定 M2/M5 的 Desktop live。
 - 为 capability policy 增加受控 set IPC 和变更订阅；保持 core 为唯一写入/校验入口。
 - 支持任务模板、批量分发、agent group 和共享上下文。
 - 将 cost、quality gate、artifact 与每个 runtime/task 建立 provenance 链。
-- 为 runtime history 增加跨 schema 迁移，并补新 DAG live 与长时 crash/recovery soak。
+- 为 runtime history 增加跨 schema 迁移，并补长时 crash/recovery soak。
 - 为名称和消息增加长度上限、控制字符过滤与超大 RPC frame 防护。
 - 为 readiness、retry 和 layout 增加更长时间 soak，并继续观察 provider 首帧超过当前 timeout 的真实分布；若需要调整阈值必须保留稳定错误语义。
+- 对 RPC stdin `EPIPE` 与 Retry 做更长时间 soak，并采集首帧/退出 race 分布；功能修复与单次 live 已完成。
+- 修正 Dashboard store 的静态/动态混合导入，使 production build 真正拆分工作台与观察型图表；当前主业务包约 555 kB、图表包约 569 kB，此项在信息架构和组件收敛后执行，避免提前优化随后被删除的重复页面。
 - 为 packaged Desktop 随附受支持的 Node runtime，避免最终用户必须依赖 PATH 或 operator override；明确 Windows `.cmd`/`.bat` native override 语义。

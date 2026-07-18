@@ -190,6 +190,20 @@ describe("IT-7: SummaryCards renders metric cards", () => {
 // IT-8: AppShell — Live indicator states
 // ---------------------------------------------------------------------------
 describe("IT-8: AppShell renders with correct Live indicator states", () => {
+  it("exposes the current navigation labels exactly once", () => {
+    render(React.createElement(AppShell, null, React.createElement("div", null, "child")));
+
+    const navigation = screen.getByRole("navigation");
+    ["Control Room", "Agents", "Agent Channels", "Activity & Cost", "DAG Inspector", "Configuration"].forEach((label) => {
+      expect(screen.getAllByText(label, { selector: "nav button span" })).toHaveLength(1);
+    });
+    expect(navigation).not.toHaveTextContent("Tasks/Agents");
+    expect(navigation).not.toHaveTextContent("Activity / Costs");
+    expect(navigation).not.toHaveTextContent("Overview");
+    expect(navigation).not.toHaveTextContent("Issue drafts");
+    expect(navigation).not.toHaveTextContent("Settings");
+  });
+
   it("shows amber dot + 'Local data' when events exist", () => {
     setStoreState({
       project: { fluxDir: "/test", eventsPath: "/test/events.jsonl", projectName: "test", projectRoot: "/test" },

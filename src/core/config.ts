@@ -153,6 +153,7 @@ export function validateConfig(config: FluxConfig): string[] {
 	}
 	if (config.retention.enabled) {
 		for (const [name, value] of Object.entries({
+			stale_runtime_ttl_hours: config.retention.stale_runtime_ttl_hours,
 			terminal_agent_ttl_hours: config.retention.terminal_agent_ttl_hours,
 			read_message_ttl_hours: config.retention.read_message_ttl_hours,
 			orphan_session_ttl_hours: config.retention.orphan_session_ttl_hours,

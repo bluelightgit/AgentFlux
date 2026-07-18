@@ -8,7 +8,15 @@
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { FluxRuntimeState } from "../core/types";
+import { resolveExecutableMode } from "../core/execution-plan";
 import { fmt, fmtCost, pct } from "./cache-monitor";
+
+function formatModeExecution(mode: FluxRuntimeState["mode"]): string {
+	const resolved = resolveExecutableMode(mode);
+	return mode === resolved.effectiveMode
+		? `${mode}  (direct)`
+		: `${mode}  (fallback ${resolved.effectiveMode})`;
+}
 
 export function installFooter(ctx: any, getState: () => FluxRuntimeState, getRouteHint?: () => string | null): void {
 	if (ctx.mode !== "tui") return;
@@ -53,7 +61,7 @@ export function setFluxStatus(ctx: any, getState: () => FluxRuntimeState): void 
 export function buildFluxSummary(s: FluxRuntimeState, telemetryPath: string, branch: string | null): string {
 	return [
 		`AgentFlux`,
-		`  mode      ${s.mode}  (fallback ${s.mode === "M1" ? "M1" : "M1"})`,
+		`  mode      ${formatModeExecution(s.mode)}`,
 		`  stage     ${s.stage}  /  role ${s.role}`,
 		`  preset    ${s.preset}  ->  expected ${s.expectedMode}`,
 		`  branch    ${branch ?? "-"}`,
@@ -82,7 +90,7 @@ export function buildInspectorText(
 ): string {
 	const lines: string[] = [
 		`Current Mode`,
-		`  ${s.mode}  ·  fallback M1`,
+		`  ${formatModeExecution(s.mode)}`,
 		``,
 		`Route Reason`,
 	];

@@ -249,6 +249,7 @@ export class AgentRuntime extends EventEmitter {
   private historyCap = DEFAULT_HISTORY_CAP;
   private persistenceTimer: NodeJS.Timeout | null = null;
   private uiTimers = new Map<string, NodeJS.Timeout>();
+  private observedStdinErrors = new WeakSet<object>();
   private diagnostics: RuntimeDiagnostics = { persistence: { status: 'disabled' } };
 
   constructor(private readonly testHooks: AgentRuntimeTestHooks = {}) {
@@ -359,7 +360,7 @@ export class AgentRuntime extends EventEmitter {
 
     // initialTask 非空时发送初始 prompt，为空时不发送
     if (initialTask && typeof initialTask === 'string' && initialTask.trim().length > 0) {
-      this.sendJson(runId, {
+      await this.sendJson(runId, {
         id: runId,
         type: 'prompt',
         message: initialTask,
@@ -685,6 +686,13 @@ export class AgentRuntime extends EventEmitter {
       this.emit(AgentRuntime.EVENT_RECORD_UPDATE, this.getSnapshot(runId));
     });
 
+    // Writable streams emit `error` even when write() also reports the same
+    // failure through its callback. Keep a permanent listener so an exit/write
+    // race can never become an uncaught EPIPE in Electron's main process.
+    proc.stdin?.on('error', (error: Error) => {
+      this.recordStdinFailure(runId, error);
+    });
+
     // ── exit / error ──
     proc.on('exit', (code, signal) => {
       const current = this.records.get(runId);
@@ -695,7 +703,7 @@ export class AgentRuntime extends EventEmitter {
       const duplicateTerminal = current.errorCode === 'SPAWN_FAILED';
       if (code === 0 && current.validRpcCount === 0) current.errorCode = 'RPC_EXIT_ZERO_WITHOUT_PROTOCOL';
       else if (current.validRpcCount === 0 && current.errorCode === null) current.errorCode = 'RPC_EXIT_BEFORE_READY';
-      this.cancelPendingUiRequests(current, 'process_exit', false);
+      void this.cancelPendingUiRequests(current, 'process_exit', false);
       // 如果已经 aborted/failed，保持当前状态不变
       if (current.status !== 'aborted' && current.status !== 'failed') {
         current.status = code === 0 && current.validRpcCount > 0 ? 'done' : 'failed';
@@ -728,7 +736,7 @@ export class AgentRuntime extends EventEmitter {
 
       current.status = 'failed';
       current.errorCode = 'SPAWN_FAILED';
-      this.cancelPendingUiRequests(current, 'process_error', false);
+      void this.cancelPendingUiRequests(current, 'process_error', false);
       current.lastActivity = Date.now();
       current.events.push({
         type: 'process_error',
@@ -823,7 +831,7 @@ export class AgentRuntime extends EventEmitter {
       if (!current?.pendingUiRequests.delete(request.id)) return;
       // pi 自带 timeout 时会自行 resolve；Desktop 默认 timeout 则主动取消以防永久阻塞。
       if (!(Number.isFinite(msg.timeout) && (msg.timeout ?? 0) > 0)) {
-        try { this.sendJson(record.runId, { type: 'extension_ui_response', id: request.id, cancelled: true }); } catch { /* process may have exited */ }
+        void this.sendJson(record.runId, { type: 'extension_ui_response', id: request.id, cancelled: true }).catch(() => { /* process may have exited */ });
       }
       this.pushEvent(current, 'extension_ui_timeout', { id: request.id, method });
       this.emit(AgentRuntime.EVENT_RECORD_UPDATE, this.getSnapshot(record.runId));
@@ -854,7 +862,7 @@ export class AgentRuntime extends EventEmitter {
         throw new Error(`select 响应不在允许选项中: ${response.value}`);
       }
     }
-    this.sendJson(runId, { type: 'extension_ui_response', ...response });
+    await this.sendJson(runId, { type: 'extension_ui_response', ...response });
     this.clearUiTimer(runId, response.id);
     record.pendingUiRequests.delete(response.id);
     if (record.status === 'blocked') record.status = 'running';
@@ -871,15 +879,31 @@ export class AgentRuntime extends EventEmitter {
     this.uiTimers.delete(key);
   }
 
-  private cancelPendingUiRequests(record: RuntimeRecord, reason: string, writeResponse: boolean): void {
-    for (const request of record.pendingUiRequests.values()) {
-      this.clearUiTimer(record.runId, request.id);
-      if (writeResponse) {
-        try { this.sendJson(record.runId, { type: 'extension_ui_response', id: request.id, cancelled: true }); } catch { /* stopping */ }
+  private cancelPendingUiRequests(record: RuntimeRecord, reason: string, writeResponse: boolean): Promise<void> | void {
+    const requests = [...record.pendingUiRequests.values()];
+    if (requests.length === 0) return;
+    if (!writeResponse) {
+      for (const request of requests) {
+        this.clearUiTimer(record.runId, request.id);
+        this.pushEvent(record, 'extension_ui_cancelled', { id: request.id, method: request.method, reason });
       }
-      this.pushEvent(record, 'extension_ui_cancelled', { id: request.id, method: request.method, reason });
+      record.pendingUiRequests.clear();
+      return;
     }
-    record.pendingUiRequests.clear();
+    return (async () => {
+      for (const request of requests) {
+        this.clearUiTimer(record.runId, request.id);
+        try {
+          await this.sendJson(record.runId, { type: 'extension_ui_response', id: request.id, cancelled: true });
+        } catch {
+          // Stop/abort/shutdown are best-effort cancellation paths. sendJson
+          // already records the transport diagnostic; lifecycle cleanup must
+          // continue and remove the local pending request.
+        }
+        this.pushEvent(record, 'extension_ui_cancelled', { id: request.id, method: request.method, reason });
+      }
+      record.pendingUiRequests.clear();
+    })();
   }
 
   /** 向 record 添加事件，缓冲上限 1000 条 */
@@ -897,16 +921,60 @@ export class AgentRuntime extends EventEmitter {
 
   // ── 发送 JSONL 到 stdin ────────────────────────────────────────────────
 
-  private sendJson(runId: string, msg: Record<string, unknown>): void {
+  private recordStdinFailure(runId: string, rawError: unknown): Error {
+    const error = rawError instanceof Error ? rawError : new Error(String(rawError));
+    if (typeof error === 'object' && this.observedStdinErrors.has(error)) return error;
+    if (typeof error === 'object') this.observedStdinErrors.add(error);
+    const record = this.records.get(runId);
+    if (!record) return error;
+    const active = !['done', 'failed', 'aborted'].includes(record.status)
+      && record.exitCode === null && record.exitSignal === null;
+    if (active) {
+      record.status = 'failed';
+      record.errorCode = 'RPC_STDIN_WRITE_FAILED';
+    }
+    record.lastActivity = Date.now();
+    const data = {
+      message: error.message,
+      code: typeof (error as NodeJS.ErrnoException).code === 'string' ? (error as NodeJS.ErrnoException).code : null,
+      errorCode: 'RPC_STDIN_WRITE_FAILED',
+    };
+    this.pushEvent(record, 'rpc_stdin_error', data);
+    this.emit(AgentRuntime.EVENT_RUNTIME_EVENT, { runId, event: { type: 'rpc_stdin_error', data } });
+    this.emit(AgentRuntime.EVENT_RECORD_UPDATE, this.getSnapshot(runId));
+    this.schedulePersistence();
+    return error;
+  }
+
+  private async sendJson(runId: string, msg: Record<string, unknown>): Promise<void> {
     const record = this.records.get(runId);
     if (!record) {
       throw new Error(`Runtime 记录不存在: ${runId}`);
     }
-    if (!record.proc.stdin || record.proc.killed) {
-      throw new Error(`子进程已终止: ${runId}`);
+    const stdin = record.proc.stdin;
+    if (
+      !stdin || record.proc.killed || record.exitCode !== null || record.exitSignal !== null
+      || stdin.destroyed || stdin.writableEnded || stdin.writableFinished
+    ) {
+      const error = new Error(`RPC stdin 不可写: ${runId}`) as NodeJS.ErrnoException;
+      error.code = 'RPC_STDIN_CLOSED';
+      throw this.recordStdinFailure(runId, error);
     }
     const line = JSON.stringify(msg) + '\n';
-    record.proc.stdin.write(line, 'utf-8');
+    await new Promise<void>((resolveDone, reject) => {
+      let settled = false;
+      const finish = (error?: Error | null) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(this.recordStdinFailure(runId, error));
+        else resolveDone();
+      };
+      try {
+        stdin.write(line, 'utf-8', finish);
+      } catch (error) {
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   // ── 进程终止 ──────────────────────────────────────────────────────────────
@@ -1031,7 +1099,7 @@ export class AgentRuntime extends EventEmitter {
     record.lastActivity = now;
     this.pushEvent(record, 'prompt', { prompt });
 
-    this.sendJson(runId, {
+    await this.sendJson(runId, {
       id: runId,
       type: 'prompt',
       message: prompt,
@@ -1052,7 +1120,7 @@ export class AgentRuntime extends EventEmitter {
     record.lastActivity = now;
     this.pushEvent(record, 'steer', { prompt });
 
-    this.sendJson(runId, {
+    await this.sendJson(runId, {
       id: runId,
       type: 'steer',
       message: prompt,
@@ -1073,7 +1141,7 @@ export class AgentRuntime extends EventEmitter {
     record.lastActivity = now;
     this.pushEvent(record, 'followUp', { prompt });
 
-    this.sendJson(runId, {
+    await this.sendJson(runId, {
       id: runId,
       type: 'follow_up',
       message: prompt,
@@ -1095,10 +1163,11 @@ export class AgentRuntime extends EventEmitter {
     record.status = 'aborted';
     record.lastActivity = now;
     this.pushEvent(record, 'abort', null);
-    this.cancelPendingUiRequests(record, 'runtime_abort', true);
+    const pendingCancellation = this.cancelPendingUiRequests(record, 'runtime_abort', true);
+    if (pendingCancellation) await pendingCancellation;
 
     // 发送 RPC abort 消息（不含 message 字段），不杀死子进程
-    this.sendJson(runId, {
+    await this.sendJson(runId, {
       id: runId,
       type: 'abort',
     });
@@ -1118,7 +1187,8 @@ export class AgentRuntime extends EventEmitter {
     record.status = 'aborted';
     record.lastActivity = now;
     this.pushEvent(record, 'stop', null);
-    this.cancelPendingUiRequests(record, 'runtime_stop', true);
+    const pendingCancellation = this.cancelPendingUiRequests(record, 'runtime_stop', true);
+    if (pendingCancellation) await pendingCancellation;
 
     await this.stopProcessGracefully(record.proc);
     this.emit(AgentRuntime.EVENT_RECORD_UPDATE, this.getSnapshot(runId));
@@ -1147,7 +1217,8 @@ export class AgentRuntime extends EventEmitter {
     }
     const entries = Array.from(this.records.entries());
     const killPromises = entries.map(async ([runId, record]) => {
-      this.cancelPendingUiRequests(record, 'runtime_shutdown', true);
+      const pendingCancellation = this.cancelPendingUiRequests(record, 'runtime_shutdown', true);
+      if (pendingCancellation) await pendingCancellation;
       await this.stopProcessGracefully(record.proc);
       this.emit(AgentRuntime.EVENT_RECORD_REMOVED, runId);
     });

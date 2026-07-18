@@ -742,6 +742,60 @@ export class SharedBoard {
 		});
 	}
 
+	/**
+	 * Remove only fenced RPC runtimes whose heartbeat is older than the supplied
+	 * cutoff. Ordinary agents and legacy records without instance identity are
+	 * deliberately preserved.
+	 */
+	pruneStaleRuntimeAgents(names: string[], staleBefore: Date, dryRun = false): AgentInfo[] {
+		const requested = new Set(names);
+		const cutoff = staleBefore.getTime();
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const removed = registry.filter(agent => {
+				if (!requested.has(agent.name) || agent.role !== "rpc-runtime" || !agent.instanceId || !agent.heartbeatAt) return false;
+				if (!["idle", "running", "blocked"].includes(agent.status)) return false;
+				const heartbeat = Date.parse(agent.heartbeatAt);
+				return Number.isFinite(heartbeat) && heartbeat <= cutoff;
+			});
+			if (!dryRun && removed.length > 0) {
+				const removedNames = new Set(removed.map(agent => agent.name));
+				this.writeJsonAtomic(
+					join(this.sharedDir, "agents", "_registry.json"),
+					registry.filter(agent => !removedNames.has(agent.name)),
+				);
+			}
+			return removed;
+		});
+	}
+
+	/**
+	 * Explicit operator cleanup for pre-identity records. Automatic GC must not
+	 * guess that these are dead, so a name allowlist is mandatory. Records with
+	 * an instanceId or runtimePid remain fenced out and use the runtime path.
+	 */
+	pruneExplicitStaleLegacyAgents(names: string[], staleBefore: Date, dryRun = false): AgentInfo[] {
+		const requested = new Set(names.filter(name => name.trim().length > 0));
+		const cutoff = staleBefore.getTime();
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const removed = registry.filter(agent => {
+				if (!requested.has(agent.name) || agent.instanceId || agent.runtimePid != null) return false;
+				if (!["idle", "running", "blocked"].includes(agent.status)) return false;
+				const lastSeen = Date.parse(agent.lastSeen ?? agent.registeredAt);
+				return Number.isFinite(lastSeen) && lastSeen <= cutoff;
+			});
+			if (!dryRun && removed.length > 0) {
+				const removedNames = new Set(removed.map(agent => agent.name));
+				this.writeJsonAtomic(
+					join(this.sharedDir, "agents", "_registry.json"),
+					registry.filter(agent => !removedNames.has(agent.name)),
+				);
+			}
+			return removed;
+		});
+	}
+
 	/** 更新 agent 状态/在线信息 */
 	updateAgentPresence(name: string, updates: Partial<AgentInfo>, expectedInstanceId?: string): boolean {
 		return this.withMutex("registry-agents", () => {
@@ -750,6 +804,23 @@ export class SharedBoard {
 			if (!agent) return false;
 			if (expectedInstanceId && agent.instanceId !== expectedInstanceId) return false;
 			Object.assign(agent, updates, { lastSeen: new Date().toISOString() });
+			this.writeJsonAtomic(join(this.sharedDir, "agents", "_registry.json"), registry);
+			return true;
+		});
+	}
+
+	/**
+	 * Atomically converge a runtime lease when its process/session exits. Existing
+	 * failure/cancellation terminal states win over a later zero process exit.
+	 */
+	finalizeRuntimeAgentPresence(name: string, expectedInstanceId: string, exitCode: number): boolean {
+		return this.withMutex("registry-agents", () => {
+			const registry = this.listAgents();
+			const agent = registry.find(item => item.name === name);
+			if (!agent || agent.instanceId !== expectedInstanceId) return false;
+			const preserved = agent.status === "failed" || agent.status === "cancelled";
+			agent.status = preserved ? agent.status : exitCode === 0 ? "done" : "failed";
+			agent.lastSeen = new Date().toISOString();
 			this.writeJsonAtomic(join(this.sharedDir, "agents", "_registry.json"), registry);
 			return true;
 		});

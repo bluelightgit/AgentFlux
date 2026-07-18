@@ -13,14 +13,14 @@
  *   - < 1280px: vertical flex-col (single column)
  *   - ≥ 1280px: three-column grid (240px / 1fr / 320px)
  */
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 import { useWorkbenchStore, type WorkbenchStreamEvent, type WorkbenchEventType } from "../store/workbench-store";
 import { Icon } from "./ui";
 import type { AgentSession, ModePolicy, PendingExtensionUIRequest, SessionStatus, TaskPriority } from "../lib/agent-runtime";
 import { formatTime } from "../lib/format";
 import { CapabilityPolicyPanel } from './CapabilityPolicyPanel';
-import { buildRuntimeDiagnostics, clampColumns } from '../lib/workbench-p1';
+import { aggregateExecutionFamily, buildRuntimeDiagnostics, clampColumns, type ExecutionFamilyAggregate } from '../lib/workbench-p1';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -445,8 +445,43 @@ function ConversationPanel({ disabled }: { disabled: boolean }): React.ReactElem
 // Composer
 // ---------------------------------------------------------------------------
 
+function ExecutionFamilyPanel({ family }: { family: ExecutionFamilyAggregate }): React.ReactElement {
+  return (
+    <section className="border-b border-[var(--af-line)] bg-[var(--af-panel-subtle)] px-3 py-3" aria-label="Execution family">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">Execution family</p>
+          <p className="mt-0.5 text-xs text-slate-500">Child and DAG runs linked by task ID</p>
+        </div>
+        <span className="font-mono text-sm font-semibold text-slate-900 dark:text-white">{family.totalRuns}</span>
+      </div>
+      {family.totalRuns === 0 ? (
+        <p className="mt-3 border-l-2 border-slate-300 pl-2 text-xs text-slate-500">No linked child runs recorded for this task.</p>
+      ) : (
+        <>
+          <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden border border-[var(--af-line)] bg-[var(--af-line)] text-center text-[10px]">
+            <div className="bg-[var(--af-panel)] px-1 py-2"><b className="block font-mono text-emerald-600">{family.success}</b><span className="text-slate-500">Success</span></div>
+            <div className="bg-[var(--af-panel)] px-1 py-2"><b className="block font-mono text-red-600">{family.failed}</b><span className="text-slate-500">Failed</span></div>
+            <div className="bg-[var(--af-panel)] px-1 py-2"><b className="block font-mono text-slate-800 dark:text-slate-100">${family.totalCostUsd.toFixed(4)}</b><span className="text-slate-500">Cost</span></div>
+          </div>
+          {(family.cancelled > 0 || family.timeout > 0) && <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-500">Cancelled {family.cancelled} · Timeout {family.timeout}</p>}
+          <div className="mt-2 max-h-40 divide-y divide-[var(--af-line-soft)] overflow-y-auto border-t border-[var(--af-line)]">
+            {family.details.map((detail, index) => (
+              <div key={`${detail.runId ?? detail.agent}:${detail.finishedAt}:${index}`} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 py-2 text-xs">
+                <div className="min-w-0"><p className="truncate font-medium text-slate-800 dark:text-slate-100" title={detail.agent}>{detail.agent}</p><p className="truncate font-mono text-[10px] text-slate-500" title={detail.model}>{detail.model}{detail.isDagRole ? ' · DAG' : ''}</p></div>
+                <div className="text-right"><p className={`font-mono text-[10px] uppercase ${detail.status === 'success' ? 'text-emerald-600' : detail.status === 'failed' ? 'text-red-600' : 'text-amber-600'}`}>{detail.status}</p><p className="font-mono text-[10px] text-slate-500">${detail.costUsd.toFixed(4)}</p></div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function ComposerPanel({ disabled }: { disabled: boolean }): React.ReactElement {
   const project = useDashboardStore((state) => state.project);
+  const telemetryEvents = useDashboardStore((state) => state.events);
   const selectedRunId = useWorkbenchStore((s) => s.selectedRunId);
   const composerInput = useWorkbenchStore((s) => s.composerInput);
   const setComposerInput = useWorkbenchStore((s) => s.setComposerInput);
@@ -462,6 +497,10 @@ function ComposerPanel({ disabled }: { disabled: boolean }): React.ReactElement 
   const clearEventStream = useWorkbenchStore((s) => s.clearEventStream);
   const selectRuntime = useWorkbenchStore((s) => s.selectRuntime);
   const selectedRuntime = useWorkbenchStore((s) => s.runtimes.find((runtime) => runtime.runId === s.selectedRunId));
+  const executionFamily = useMemo(
+    () => aggregateExecutionFamily(telemetryEvents, selectedRuntime?.taskId),
+    [telemetryEvents, selectedRuntime?.taskId],
+  );
 
   const isNewMode = !selectedRunId;
   const runtimeReadOnly = Boolean(selectedRuntime?.historical);
@@ -540,6 +579,8 @@ function ComposerPanel({ disabled }: { disabled: boolean }): React.ReactElement 
           </>}
         </dl>
       ) : <p className="border-b border-slate-200 px-3 py-4 text-xs text-slate-500 dark:border-slate-700">Select a task run to inspect execution controls and identifiers.</p>}
+
+      {selectedRuntime && <ExecutionFamilyPanel family={executionFamily} />}
 
       {project && selectedRuntime && (
         <details className="border-b border-slate-200 dark:border-slate-700">
@@ -728,25 +769,22 @@ function NewTaskDialog({ open, onClose }: { open: boolean; onClose: () => void }
 
 function OnboardingOverlay(): React.ReactElement {
   return (
-    <div className="flex flex-col items-center justify-center py-16 text-center">
-      <Icon name="Bot" size={64} className="mb-4 text-slate-300 dark:text-slate-600" />
-      <h2 className="mb-2 text-xl font-bold text-slate-800 dark:text-slate-100">
-        Agent Runtime Workbench
-      </h2>
-      <p className="mb-6 max-w-md text-sm text-slate-500 dark:text-slate-400">
-        The workbench lets you create and interact with agent runtime sessions.
-        To get started, select or add a workspace with an active AgentFlux project,
-        or run inside Electron where the agent runtime bridge is available.
-      </p>
-      <div className="flex flex-col gap-2 text-left text-xs text-slate-400 dark:text-slate-500">
+    <div className="mx-auto my-8 grid w-[min(620px,calc(100%-32px))] grid-cols-[40px_minmax(0,1fr)] gap-4 border border-[var(--af-line)] bg-[var(--af-panel-subtle)] p-5 text-left">
+      <div className="af-icon-plate"><Icon name="Workflow" size={18} /></div>
+      <div className="min-w-0">
+      <p className="af-kicker">Workspace required</p>
+      <h2 className="mt-1 text-base font-semibold text-slate-800 dark:text-slate-100">Connect an AgentFlux project</h2>
+      <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500 dark:text-slate-400">Select or add a workspace in the top bar. Control Room will then create lead runtimes, surface agent requests, and keep task execution in one place.</p>
+      <div className="mt-4 flex flex-col gap-2 text-left text-xs text-slate-500">
         <div className="flex items-center gap-2">
           <span className="inline-block h-2 w-2 rounded-full bg-red-400" />
-          <span>Bridge: {typeof window !== "undefined" && window.agentRuntime ? "✅ Available" : "❌ Not available"}</span>
+          <span>Runtime bridge: {typeof window !== "undefined" && window.agentRuntime ? "available" : "not available"}</span>
         </div>
         <div className="flex items-center gap-2">
           <span className="inline-block h-2 w-2 rounded-full bg-red-400" />
-          <span>Workspace: check Settings or use the workspace dropdown in the top bar</span>
+          <span>Workspace: use the selector in the top bar</span>
         </div>
+      </div>
       </div>
     </div>
   );
@@ -814,7 +852,7 @@ export const WorkbenchPage: React.FC = () => {
         {threeCol && <button type="button" onClick={() => updateColumns(DEFAULT_COLUMNS)} className="text-xs text-slate-500 hover:text-cyan-700">Reset layout</button>}
       </header>
       <div className={`flex items-center gap-2 border-b px-4 py-2 text-xs ${attentionCount ? 'border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100' : 'border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-950'}`} role="status">
-        <Icon name={attentionCount ? 'AlertTriangle' : 'CheckCircle'} size={14} />
+        <Icon name={attentionCount ? 'AlertTriangle' : 'CheckCircle2'} size={14} />
         <strong>{attentionCount ? `${attentionCount} run${attentionCount === 1 ? '' : 's'} need${attentionCount === 1 ? 's' : ''} attention.` : 'No operator action required.'}</strong>
         <span>{attentionCount ? 'Select a blocked or failed runtime to respond or inspect.' : 'Live lead runtimes will surface decisions here.'}</span>
       </div>

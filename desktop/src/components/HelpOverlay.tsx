@@ -16,7 +16,7 @@ const SHORTCUTS: ShortcutRow[] = [
 const TIPS: string[] = [
   'Click an agent in the Agents page to see details',
   'Use the Chat page to view agent conversations',
-  'Set a budget in Overview to track spending',
+  'Review budgets and spend in Activity & Cost',
   'Use Quick Actions to control routing mode',
 ];
 

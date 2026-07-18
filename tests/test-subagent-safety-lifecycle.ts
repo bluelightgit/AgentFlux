@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SharedBoard } from "../src/core/shared-board";
-import { formatSubagentResult, getActiveSubagentRunIds, loadSubagent, runSubagent, type SubagentDef } from "../src/extension/subagent";
+import { formatSubagentResult, getActiveSubagentRunIds, isProviderQuotaError, loadSubagent, runSubagent, selectFallbackModel, type SubagentDef } from "../src/extension/subagent";
 import { TelemetryWriter } from "../src/telemetry/events";
 
 const root = mkdtempSync(join(tmpdir(), "agentflux-subagent-safe-"));
@@ -25,12 +25,33 @@ try {
 		errorMessage: "provider compatibility: 406",
 	});
 	check("failed subagent result is explicit", failedSummary.includes("FAILED (exit=1)") && failedSummary.includes("error: provider compatibility: 406"), failedSummary.split("\n").slice(0, 3).join(" | "));
+	check("failed subagent result gives a bounded next action", failedSummary.includes("do not repeat the same failed delegation"), failedSummary.split("\n").slice(0, 5).join(" | "));
+	check("provider quota errors are terminal rather than generic rate limits",
+		isProviderQuotaError('402 {"message":"Insufficient Balance"}')
+		&& isProviderQuotaError("Monthly usage limit reached. Resets in 8 days")
+		&& !isProviderQuotaError("429 rate limit, retry after 2 seconds"),
+		"402/monthly=true, transient 429=false");
+	const zeroExitProviderFailure = await runSubagent({
+		cwd: root, agent, task: "provider failure with zero process exit", sessionId: "test-session", telemetry,
+		prefixLayout: false, maxRetries: 0,
+		invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "provider-error-exit-zero.cjs")] },
+	});
+	check("provider error message cannot be reported as exit-code zero success",
+		zeroExitProviderFailure.exitCode !== 0 && zeroExitProviderFailure.errorMessage?.includes("Monthly usage limit") === true,
+		`exit=${zeroExitProviderFailure.exitCode} error=${zeroExitProviderFailure.errorMessage}`);
+	const fallbackModels = {
+		primary: { provider: "provider-a", capability: { coding: 0.9, reasoning: 0.9, speed: 0.8 } },
+		sameChannel: { provider: "provider-a", capability: { coding: 0.85, reasoning: 0.85, speed: 0.8 } },
+		crossChannel: { provider: "provider-b", capability: { coding: 0.7, reasoning: 0.7, speed: 0.7 } },
+	} as any;
+	const crossProvider = selectFallbackModel("primary", "provider-a", ["primary"], fallbackModels, { coding: 0.8, reasoning: 0.8 }, true);
+	check("quota fallback skips models on the failed provider", crossProvider === "crossChannel", `fallback=${crossProvider}`);
 
 	const aborted = new AbortController();
 	aborted.abort("test cancellation");
 	const cancelled = await runSubagent({
 		cwd: root, agent, task: "must never spawn", sessionId: "test-session", telemetry,
-		prefixLayout: false, signal: aborted.signal,
+		prefixLayout: false, signal: aborted.signal, taskId: "task-correlation-test",
 	});
 	check("pre-aborted run returns cancelled", cancelled.exitCode === 130 && cancelled.errorMessage?.includes("cancelled") === true, `exit=${cancelled.exitCode}`);
 	check("pre-aborted run leaves no process", getActiveSubagentRunIds().length === 0, `active=${getActiveSubagentRunIds().length}`);
@@ -84,6 +105,7 @@ try {
 
 	const events = readFileSync(telemetry.path, "utf-8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 	check("cancel outcome is observable", events.some(event => event.outcome?.status === "cancelled" && event.runId), `${events.length} telemetry events`);
+	check("subagent telemetry preserves parent task correlation", events.some(event => event.type === "subagent.run" && event.taskId === "task-correlation-test"), `${events.length} telemetry events`);
 	check("lock failure outcome is observable", events.some(event => event.exitCode === 73 && event.outcome?.status === "failure"), `${events.length} telemetry events`);
 } finally {
 	rmSync(root, { recursive: true, force: true });

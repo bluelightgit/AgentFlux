@@ -2,7 +2,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
+	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, normalizeRuntimeCapabilityOverride,
+	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
 } from "../src/core/capability-policy";
 import { runSubagent } from "../src/extension/subagent";
@@ -33,6 +34,25 @@ async function main() {
 			},
 			workspace: { roots: [root], deniedPaths: [join(root, ".env")], blockDangerousCommands: true },
 		};
+		check("empty structured-output capability shells inherit the role template",
+			normalizeRuntimeCapabilityOverride({
+				tools: [], skills: [], mcpServers: [],
+				workspace: { roots: [], deniedPaths: [], blockDangerousCommands: false },
+			}) === undefined,
+			"empty arrays are omission, not deny-all");
+		const explicitDeny = normalizeRuntimeCapabilityOverride({ tools: [], denyAllTools: true });
+		check("deny-all run narrowing requires an explicit flag",
+			Array.isArray(explicitDeny?.tools) && explicitDeny.tools.length === 0,
+			JSON.stringify(explicitDeny));
+		check("empty structured-output communication shells inherit the role template",
+			normalizeRuntimeCommunicationOverride({
+				enabled: false, actions: [], allowedTargets: [], requiredSendTo: [],
+				requireExplicitInboxAck: false, maxMessagesPerRun: 100,
+			}) === undefined,
+			"default-filled communication object ignored");
+		check("communication disable requires an explicit flag",
+			normalizeRuntimeCommunicationOverride({ disable: true })?.enabled === false,
+			"disable=true maps to enabled=false");
 		const policy = resolveCapabilityPolicy({
 			cwd: root, agentName: "reviewer-1", role: "reviewer", runId: "run-1",
 			template,
@@ -151,6 +171,18 @@ async function main() {
 			typeof sessionArg === "string" && /-cap-[a-f0-9]{12}$/.test(sessionArg)
 				&& run.capability?.cacheBreakingChanges.includes("tool_schema") === true,
 			`session=${sessionArg}`);
+		const templateAgent = { name: "template-cache", role: "implementer", description: "template cache", tools: ["read"], skills: ["base"], systemPrompt: "x" };
+		await runSubagent({
+			cwd: root, agent: templateAgent, task: "baseline", sessionId: "test", prefixLayout: true,
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
+		});
+		const changedTemplateRun = await runSubagent({
+			cwd: root, agent: { ...templateAgent, skills: ["base", "frontend-design"] }, task: "changed", sessionId: "test", prefixLayout: true,
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
+		});
+		check("role-template capability changes report cache impact against the previous run",
+			changedTemplateRun.capability?.cacheBreakingChanges.includes("skill_set") === true,
+			JSON.stringify(changedTemplateRun.capability?.cacheBreakingChanges));
 		const capabilityEvents = readFileSync(join(fluxDir, "events.jsonl"), "utf-8").trim().split(/\r?\n/)
 			.map(line => JSON.parse(line)).filter(event => event.type === "capability.policy");
 		check("capability resolution emits an auditable telemetry event",

@@ -25,6 +25,7 @@ const fresh = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
 const secondFresh = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
 const policy: RetentionConfig = {
 	enabled: true,
+	stale_runtime_ttl_hours: 2,
 	terminal_agent_ttl_hours: 24,
 	max_terminal_agents: 1,
 	read_message_ttl_hours: 24,
@@ -67,6 +68,11 @@ try {
 	const board = new SharedBoard(fluxDir);
 	writeJson(join(fluxDir, "shared", "agents", "_registry.json"), [
 		{ name: "shared-running", role: "worker", status: "running", registeredAt: old, lastSeen: old },
+		{ name: "legacy-stale-explicit", role: "worker", status: "running", registeredAt: old, lastSeen: old },
+		{ name: "legacy-fresh-explicit", role: "worker", status: "idle", registeredAt: fresh, lastSeen: fresh },
+		{ name: "legacy-pid-explicit", role: "rpc-runtime", status: "idle", runtimePid: 333, registeredAt: old, lastSeen: old },
+		{ name: "runtime-stale", role: "rpc-runtime", status: "idle", instanceId: "stale-instance", runtimePid: 111, registeredAt: old, lastSeen: old, heartbeatAt: old },
+		{ name: "runtime-fresh", role: "rpc-runtime", status: "idle", instanceId: "fresh-instance", runtimePid: 222, registeredAt: fresh, lastSeen: fresh, heartbeatAt: fresh },
 		{ name: "shared-old", role: "worker", status: "done", registeredAt: old, lastSeen: old },
 		{ name: "shared-cancelled-old", role: "worker", status: "cancelled", registeredAt: old, lastSeen: old },
 		{ name: "shared-fresh", role: "worker", status: "done", registeredAt: fresh, lastSeen: fresh },
@@ -135,6 +141,16 @@ try {
 			&& JSON.stringify(readFileSync(join(runtimeDir, "persistent-agents.json"), "utf-8")).includes("persist-running")
 			&& board.listAgents().some(agent => agent.name === "shared-running"),
 		`nonTerminal=${report.preserved.nonTerminalAgents}`);
+	check("stale fenced RPC runtime is archived while fresh runtime is preserved",
+		report.removed.sharedAgents.includes("runtime-stale")
+			&& !report.removed.sharedAgents.includes("runtime-fresh")
+			&& board.listAgents().some(agent => agent.name === "runtime-fresh"),
+		`removed=${report.removed.sharedAgents.join(",")}`);
+	check("automatic GC preserves pre-identity non-terminal records",
+		["legacy-stale-explicit", "legacy-fresh-explicit", "legacy-pid-explicit"]
+			.every(name => board.listAgents().some(agent => agent.name === name))
+			&& report.removed.explicitLegacyAgents.length === 0,
+		`explicit=${report.removed.explicitLegacyAgents.join(",")}`);
 	check("blackboard only removes timestamped expired terminal state",
 		!board.getBlackboard().agentStatuses["board-old"]
 			&& !!board.getBlackboard().agentStatuses["board-legacy"]
@@ -175,8 +191,28 @@ try {
 			&& existsSync(join(report.archivePath, "messages-v2", v2Old.envelope.id, "envelope.json")),
 		report.archivePath ?? "no archive");
 	check("formatted report exposes preservation counts",
-		formatLifecycleGcReport(report).includes("preserved non-terminal=") && formatLifecycleGcReport(report).includes("archive="),
+		formatLifecycleGcReport(report).includes("preserved non-terminal=")
+			&& formatLifecycleGcReport(report).includes("explicit-legacy=0")
+			&& formatLifecycleGcReport(report).includes("archive="),
 		formatLifecycleGcReport(report).split("\n")[0]);
+
+	const explicitNames = ["legacy-stale-explicit", "legacy-fresh-explicit", "legacy-pid-explicit"];
+	const explicitDryRun = runLifecycleGc(fluxDir, policy, {
+		now, dryRun: true, explicitLegacyAgentNames: explicitNames,
+	});
+	check("explicit legacy dry-run selects only stale identity-less pid-less records",
+		JSON.stringify(explicitDryRun.removed.explicitLegacyAgents) === JSON.stringify(["legacy-stale-explicit"])
+			&& explicitNames.every(name => board.listAgents().some(agent => agent.name === name)),
+		JSON.stringify(explicitDryRun.removed.explicitLegacyAgents));
+	const explicitRun = runLifecycleGc(fluxDir, policy, { now, explicitLegacyAgentNames: explicitNames });
+	check("explicit legacy cleanup is archived and keeps fresh/fenced records",
+		explicitRun.removed.explicitLegacyAgents.includes("legacy-stale-explicit")
+			&& !board.listAgents().some(agent => agent.name === "legacy-stale-explicit")
+			&& board.listAgents().some(agent => agent.name === "legacy-fresh-explicit")
+			&& board.listAgents().some(agent => agent.name === "legacy-pid-explicit")
+			&& !!explicitRun.archivePath
+			&& existsSync(join(explicitRun.archivePath, "manifest.json")),
+		explicitRun.archivePath ?? "no archive");
 
 	const beforeDryRun = readFileSync(join(runtimeDir, "persistent-agents.json"), "utf-8");
 	const dryRun = runLifecycleGc(fluxDir, policy, { now: new Date("2026-08-16T12:00:00.000Z"), dryRun: true });
@@ -202,10 +238,11 @@ try {
 
 	const invalidWarnings = validateConfig({
 		...DEFAULT_CONFIG,
-		retention: { ...DEFAULT_CONFIG.retention, orphan_session_ttl_hours: 0, max_read_messages: -1 },
+		retention: { ...DEFAULT_CONFIG.retention, stale_runtime_ttl_hours: 0, orphan_session_ttl_hours: 0, max_read_messages: -1 },
 	});
 	check("invalid retention policy is observable in config validation",
-		invalidWarnings.some(warning => warning.includes("orphan_session_ttl_hours"))
+		invalidWarnings.some(warning => warning.includes("stale_runtime_ttl_hours"))
+			&& invalidWarnings.some(warning => warning.includes("orphan_session_ttl_hours"))
 			&& invalidWarnings.some(warning => warning.includes("max_read_messages")),
 		invalidWarnings.join(" | "));
 } finally {

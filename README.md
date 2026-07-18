@@ -40,8 +40,10 @@ After installation, AgentFlux loads automatically in any pi session.
 | `/flux` | Open control panel menu (mode/preference/team/info) |
 | `/flux work [--mode M1\|M2\|M5] <task>` | Execute with a user/main-Agent-selected mode, or omit `--mode` to use the configured route decision |
 | `/flux cancel [runId\|all]` | Cancel active AgentFlux DAG runs and their child processes |
-| `/flux gc dry-run` | Preview terminal agent/message/session retention cleanup |
-| `/flux gc` | Archive eligible terminal state; refuses while subagents are active |
+| `/flux gc dry-run` | Preview terminal/stale-runtime/message/session retention cleanup |
+| `/flux gc` | Archive eligible terminal or stale RPC runtime state; refuses while subagents are active |
+| `/flux gc legacy dry-run <names...>` | Preview TTL-gated cleanup for explicitly named pre-instance records |
+| `/flux gc legacy <names...>` | Archive named stale legacy records only when they have no instance/PID and no AgentFlux run is active |
 | `/flux why` | Route inspector — why this mode was chosen |
 | `/flux mode <preset>` | Switch mode preset (eco/fast/balanced/accurate/custom) |
 | `/flux preference` | 5-dimension routing preference tuner |
@@ -87,6 +89,10 @@ See `docs/` for 27 design/status documents. Start with [`docs/26-implementation-
 
 ```bash
 npm run verify       # offline typecheck + deterministic regression suite
+npm run test:desktop-modes-zero-cost # AUTO/M1/M2/M5 through Desktop AgentRuntime; no model prompt
+npm run test:all-modes-zero-cost     # M1-M6 runtime/fallback contract through Desktop workspace; no model prompt
+npm run test:desktop-deepseek-live   # paid: DeepSeek Pro M1/M5 + DeepSeek Flash M2/subagent/DAG in an isolated fixture
+npm run test:desktop-retry-zero-cost # failed -> Retry -> Extension UI -> done; no model prompt
 npm run test:live    # opt-in live-model tests; may incur cost
 ```
 

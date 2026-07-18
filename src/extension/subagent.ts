@@ -14,7 +14,7 @@
  *   - 两者 LLM 工具列表完全一致 (都是内置工具), 行为可公平对比
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -83,6 +83,7 @@ export async function runSubagentsParallel(
 		lockFiles?: Record<string, string[]>;  // per-label 文件锁: {label: [file paths]}
 		signal?: AbortSignal;               // 调用方取消时终止所有子进程
 		maxCostUsd?: number;                // attempt 之间的实际成本硬停止
+		taskId?: string;                   // 父任务关联；每个并行 child 共享 taskId
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
@@ -112,6 +113,7 @@ export async function runSubagentsParallel(
 				lockFiles: t.label ? common.lockFiles?.[t.label] : undefined,
 				signal: common.signal,
 				maxCostUsd: common.maxCostUsd,
+				taskId: common.taskId,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -393,6 +395,33 @@ function isProviderCompatibilityError(msg?: string): boolean {
 	return !!msg && /406(?: status code)?|not acceptable/i.test(msg);
 }
 
+/**
+ * Provider 额度/计费错误不会通过等待或重试同一 provider 恢复。
+ * 与普通 429 rate-limit 分开，避免把月额度耗尽当成瞬时抖动。
+ */
+export function isProviderQuotaError(msg?: string, output?: string): boolean {
+	const text = `${msg ?? ""} ${output ?? ""}`;
+	return /\b402\b|insufficient balance|monthly usage limit|usage limit reached|quota (?:exceeded|exhausted)|billing (?:error|limit)|payment required|available balance|额度(?:不足|耗尽)|余额不足/i.test(text);
+}
+
+/** 为不可恢复的 provider 故障选择不同 provider 的候选，避免同通道循环。 */
+export function selectFallbackModel(
+	currentModel: string,
+	currentProvider: string | undefined,
+	tried: readonly string[],
+	models: Record<string, ModelEntry>,
+	requirement: RoleRequirement,
+	avoidCurrentProvider = false,
+): string | undefined {
+	return rankModels(requirement, models)
+		.map(candidate => candidate.model)
+		.find(candidate => {
+			if (candidate === currentModel || tried.includes(candidate)) return false;
+			if (!avoidCurrentProvider || !currentProvider) return true;
+			return models[candidate]?.provider !== currentProvider;
+		});
+}
+
 /** 注册 agent 到 SharedBoard agent 注册表 */
 function registerAgentInBoard(agent: SubagentDef, task: string, cwd: string, model?: string, provider?: string): void {
 	try {
@@ -429,13 +458,16 @@ export function getActiveSubagentRunIds(): string[] {
 async function terminateProcessTree(proc: ChildProcess): Promise<void> {
 	if (!proc.pid) return;
 	if (process.platform === "win32") {
-		await new Promise<void>((resolveDone) => {
-			const killer = spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
-				shell: false, stdio: "ignore", windowsHide: true,
-			});
-			killer.once("close", () => resolveDone());
-			killer.once("error", () => resolveDone());
+		// Synchronously wait for taskkill to finish its /T traversal. An async
+		// taskkill child can outlive the run's parent-close event and keep the
+		// fixture/workspace locked even after cancellation was reported.
+		const killed = spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
+			shell: false, stdio: "ignore", windowsHide: true, timeout: 7000,
 		});
+		if (killed.error) {
+			try { proc.kill(); } catch { /* process already exited */ }
+		}
+		await new Promise(resolveDone => setTimeout(resolveDone, 500));
 		return;
 	}
 	// POSIX 下子进程以独立 process group 启动，负 PID 可终止其整个后代树。
@@ -516,6 +548,7 @@ export async function runSubagent(opts: {
 		: undefined;
 	let capabilityPolicy;
 	let capabilitySnapshotPath = "";
+	let previousEffectiveCapability: any = null;
 	try {
 		capabilityPolicy = resolveCapabilityPolicy({
 			cwd, agentName: agent.name, role: capabilityRole, runId: processRunId, instanceId: agentInstanceId,
@@ -527,6 +560,10 @@ export async function runSubagent(opts: {
 			run: runCapability,
 		});
 		if (!prefixLayout) capabilityPolicy.effective.workspace.enforcement = "unavailable";
+		const previousSnapshotPath = join(cwd, ".agentflux", "runtime", "capability-effective", `${agent.name}.json`);
+		if (existsSync(previousSnapshotPath)) {
+			try { previousEffectiveCapability = JSON.parse(readFileSync(previousSnapshotPath, "utf-8")).effective; } catch {}
+		}
 		capabilitySnapshotPath = writeEffectiveCapabilitySnapshot(join(cwd, ".agentflux"), capabilityPolicy);
 	} catch (error: any) {
 		telemetry?.writeCapabilityPolicy({
@@ -541,12 +578,19 @@ export async function runSubagent(opts: {
 		};
 	}
 	const communicationPolicy = capabilityPolicy.effective.communication;
+	const shapeChanged = (key: "tools" | "skills" | "mcpServers" | "communication" | "workspace") =>
+		previousEffectiveCapability != null
+		&& JSON.stringify(previousEffectiveCapability[key]) !== JSON.stringify(capabilityPolicy.effective[key]);
 	const capabilityCacheChanges = [...new Set([
 		registeredCapability?.tools || runCapability?.tools ? "tool_schema" : null,
 		registeredCapability?.skills || runCapability?.skills ? "skill_set" : null,
 		registeredCapability?.mcpServers || runCapability?.mcpServers ? "mcp_set" : null,
 		registeredCapability?.communication || registeredCapability?.workspace
 			|| runCapability?.communication || runCapability?.workspace ? "runtime_policy_guard" : null,
+		shapeChanged("tools") ? "tool_schema" : null,
+		shapeChanged("skills") ? "skill_set" : null,
+		shapeChanged("mcpServers") ? "mcp_set" : null,
+		shapeChanged("communication") || shapeChanged("workspace") ? "runtime_policy_guard" : null,
 	].filter((item): item is "tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard" => !!item))];
 	const capabilityGeneration = createHash("sha256").update(JSON.stringify({
 		tools: capabilityPolicy.effective.tools,
@@ -721,6 +765,7 @@ export async function runSubagent(opts: {
 				let buffer = "";
 				let settled = false;
 				let forcedExitCode: number | null = null;
+				let terminationPromise: Promise<void> | null = null;
 				let killGraceTimer: NodeJS.Timeout | undefined;
 				const done = (code: number) => {
 					if (!settled) {
@@ -734,9 +779,14 @@ export async function runSubagent(opts: {
 				const requestTermination = (exitCode: number) => {
 					if (forcedExitCode !== null) return;
 					forcedExitCode = exitCode;
-					void terminateProcessTree(proc);
-					// 正常情况下等待 close；极端卡死时 5 秒后解除调用方等待。
-					killGraceTimer = setTimeout(() => done(exitCode), 5000);
+					// A Windows parent may emit close before taskkill /T has finished
+					// reaping its descendants. Keep the caller blocked on the tree-kill
+					// command so a cancelled run cannot report completion while child
+					// processes still hold files or consume resources.
+					terminationPromise = terminateProcessTree(proc);
+					// 正常情况下等待 close + tree reaping；极端卡死时 10 秒后解除调用方等待。
+					// Windows taskkill can close the parent before descendant handles disappear.
+					killGraceTimer = setTimeout(() => done(exitCode), 10_000);
 				};
 				const onAbort = () => requestTermination(130);
 				activeSubagentProcesses.set(processRunId, proc);
@@ -782,12 +832,17 @@ export async function runSubagent(opts: {
 				proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(forcedExitCode ?? 1); });
 				proc.on("close", (code, signal) => {
 					clearTimeout(timer);
-					done(forcedExitCode ?? (code ?? (signal ? 130 : 1)));
+					const resolvedCode = forcedExitCode ?? (code ?? (signal ? 130 : 1));
+					if (terminationPromise) void terminationPromise.finally(() => done(resolvedCode));
+					else done(resolvedCode);
 				});
 			});
 
 			result.exitCode = exitCode;
 			result.output = outputParts.join("\n").slice(0, 50 * 1024);
+			// pi may surface a provider failure in message_end but still let its CLI
+			// process exit 0. A result with errorMessage is never a successful run.
+			if (result.exitCode === 0 && result.errorMessage) result.exitCode = 1;
 			if (stderrBuf.trim() && exitCode !== 0) result.errorMessage = (result.errorMessage ?? "") + ` stderr: ${stderrBuf.slice(0, 500)}`;
 		} finally {
 			if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ } }
@@ -814,14 +869,17 @@ export async function runSubagent(opts: {
 		const modelErr = isModelError(result.errorMessage);
 		const transientErr = isTransientError(result.errorMessage, result.output);
 		const providerCompatibilityErr = isProviderCompatibilityError(result.errorMessage);
+		const providerQuotaErr = isProviderQuotaError(result.errorMessage, result.output);
 
-		const tryModelFallback = (): boolean => {
+		const tryModelFallback = (avoidCurrentProvider = false): boolean => {
 			if (!opts.enableModelFallback || !opts.modelsForFallback || !opts.roleRequirementForFallback) return false;
 			const currentModel = opts.model ?? agent.model ?? "";
+			const currentProvider = opts.provider ?? agent.provider ?? opts.modelsForFallback[currentModel]?.provider;
 			const tried = opts.fallbackHistory ?? [currentModel];
-			const fallback = rankModels(opts.roleRequirementForFallback, opts.modelsForFallback)
-				.map(candidate => candidate.model)
-				.find(candidate => !tried.includes(candidate));
+			const fallback = selectFallbackModel(
+				currentModel, currentProvider, tried, opts.modelsForFallback,
+				opts.roleRequirementForFallback, avoidCurrentProvider,
+			);
 			if (!fallback || tried.includes(fallback)) return false;
 
 			console.error(`[flux subagent] ${agent.name} model/provider "${currentModel}" unavailable, degrading to "${fallback}"...`);
@@ -832,6 +890,13 @@ export async function runSubagent(opts: {
 			}
 			return true;
 		};
+
+		// 余额、月额度和计费错误只能跨 provider 降级；没有健康通道时立即失败。
+		// 不能落入 isProcessError 的同 provider 重试分支。
+		if (providerQuotaErr) {
+			if (tryModelFallback(true)) continue;
+			break;
+		}
 
 		// 明确的模型或 provider 不兼容错误无需重复相同请求，直接降级。
 		if ((modelErr || providerCompatibilityErr) && tryModelFallback()) continue;
@@ -904,7 +969,7 @@ export async function runSubagent(opts: {
 
 	const hitRate = finalResult.usage.cacheRead / (finalResult.usage.cacheRead + finalResult.usage.input + 1e-9);
 	telemetry?.writeSubagentRun({
-		sessionId, agent: agent.name, task: opts.task.slice(0, 200), model: finalResult.model,
+		sessionId, taskId: opts.taskId, agent: agent.name, task: opts.task.slice(0, 200), model: finalResult.model,
 		runId: processRunId,
 		startedAt: runStartedAt,
 		finishedAt: Date.now(),
@@ -956,7 +1021,10 @@ export function formatSubagentResult(r: SubagentRunResult): string {
 		`[AgentFlux subagent: ${r.agent}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
 		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}`,
 		...(r.errorMessage ? [`error: ${r.errorMessage}`] : []),
-		...(r.capability?.narrowed.length ? [`capability: ${r.capability.narrowed.join(", ")}${r.capability.cacheBreakingChanges.length ? ` · cache-impact=${r.capability.cacheBreakingChanges.join("|")}` : ""}`] : []),
+		...(!succeeded ? ["next: choose one bounded action — continue directly without this delegation, select a healthy provider, or stop and report; do not repeat the same failed delegation without a new plan"] : []),
+		...(r.capability && (r.capability.narrowed.length || r.capability.cacheBreakingChanges.length)
+			? [`capability: ${r.capability.narrowed.join(", ") || "template changed"}${r.capability.cacheBreakingChanges.length ? ` · cache-impact=${r.capability.cacheBreakingChanges.join("|")}` : ""}`]
+			: []),
 		``,
 		r.output || "(no output)",
 	].join("\n");

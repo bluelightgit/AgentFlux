@@ -394,7 +394,7 @@ describe("IT-WB-1: Onboarding — no bridge or no workspace", () => {
     render(<WorkbenchPage />);
     await flushMicrotasks();
 
-    expect(screen.getByText("Agent Runtime Workbench")).toBeInTheDocument();
+    expect(screen.getByText("Connect an AgentFlux project")).toBeInTheDocument();
     expect(screen.getByText(/bridge.*not available/i)).toBeInTheDocument();
   });
 
@@ -404,7 +404,7 @@ describe("IT-WB-1: Onboarding — no bridge or no workspace", () => {
     render(<WorkbenchPage />);
     await flushMicrotasks();
 
-    expect(screen.getByText("Agent Runtime Workbench")).toBeInTheDocument();
+    expect(screen.getByText("Connect an AgentFlux project")).toBeInTheDocument();
   });
 
   it("shows the runtime panel when bridge and workspace are both available", async () => {

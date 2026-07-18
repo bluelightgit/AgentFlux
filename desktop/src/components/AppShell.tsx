@@ -7,7 +7,6 @@ import { useCommandPalette } from '../hooks/useCommandPalette';
 
 import { CommandPalette } from './CommandPalette';
 import { RealTimeCostCounter } from './RealTimeCostCounter';
-import { GlobalSearchBar } from './GlobalSearchBar';
 import TitleBar from './TitleBar';
 
 // ---------------------------------------------------------------------------
@@ -15,21 +14,18 @@ import TitleBar from './TitleBar';
 // ---------------------------------------------------------------------------
 const NAV_GROUPS: { label: string; items: { id: PageName; label: string; icon: string; note?: string }[] }[] = [
   { label: 'OPERATE', items: [
-    { id: 'workbench', label: 'Control Room', icon: 'Layers', note: 'create & run tasks' },
+    { id: 'workbench', label: 'Control Room', icon: 'Workflow', note: 'create & run tasks' },
     { id: 'agents', label: 'Agents', icon: 'Users', note: 'identities & caps' },
-    { id: 'chat', label: 'Messages', icon: 'MessageCircle', note: 'read-only' },
+    { id: 'chat', label: 'Agent Channels', icon: 'MessageCircle', note: 'read-only' },
   ] },
-  { label: 'OBSERVE', items: [
-    { id: 'telemetry', label: 'Activity / Costs', icon: 'Activity', note: 'read-only' },
-    { id: 'overview', label: 'Overview', icon: 'LayoutDashboard', note: 'read-only' },
+  { label: 'REVIEW', items: [
+    { id: 'telemetry', label: 'Activity & Cost', icon: 'Activity', note: 'read-only' },
     { id: 'sessions', label: 'Sessions', icon: 'MessageSquare', note: 'read-only' },
+    { id: 'dag', label: 'DAG Inspector', icon: 'Workflow', note: 'diagnostics' },
   ] },
-  { label: 'ADVANCED', items: [
+  { label: 'SYSTEM', items: [
     { id: 'routing', label: 'Routing', icon: 'Route' },
-    { id: 'dag', label: 'DAG', icon: 'Workflow', note: 'diagnostics' },
-    { id: 'config', label: 'Config', icon: 'Settings2' },
-    { id: 'issues', label: 'Issue drafts', icon: 'ClipboardList', note: 'draft' },
-    { id: 'settings', label: 'Settings', icon: 'Settings' },
+    { id: 'config', label: 'Configuration', icon: 'Settings2' },
   ] },
 ];
 
@@ -100,7 +96,7 @@ const TopBar: React.FC = () => {
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-700 dark:text-slate-300 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
         >
           <Icon name="FolderOpen" size={18} className="text-slate-500" />
-          <span className="font-medium truncate max-w-[180px]">{currentName}</span>
+          <span className="max-w-[112px] truncate font-medium sm:max-w-[180px]">{currentName}</span>
           <Icon name="ChevronDown" size={16} className="text-slate-400" />
         </button>
 
@@ -190,10 +186,6 @@ const TopBar: React.FC = () => {
             </div>
           );
         })()}
-
-        <div className="hidden xl:block">
-          <GlobalSearchBar />
-        </div>
 
         <div className="hidden xl:block">
           <RealTimeCostCounter />
@@ -305,7 +297,7 @@ const Sidebar: React.FC = () => {
 // MainContent
 // ---------------------------------------------------------------------------
 const MainContent: React.FC<{ children: React.ReactNode; compact?: boolean }> = ({ children, compact }) => (
-  <main className={`af-main ${compact ? 'p-2' : 'p-5 lg:p-7'}`}>{children}</main>
+  <main className={`af-main min-w-0 ${compact ? 'p-2' : 'p-3 lg:p-5'}`}>{children}</main>
 );
 
 // ---------------------------------------------------------------------------

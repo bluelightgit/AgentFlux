@@ -272,7 +272,7 @@ tools、skills、MCP、通信与 workspace 使用统一的三层策略：角色�
 当前生产策略：
 
 - `session_start` 按 `retention` 配置自动执行安全 GC；也可用 `/flux gc dry-run` 预览或 `/flux gc` 手动执行。
-- 只处理带有效时间戳的终态 Agent；运行中存在子进程时正式 GC fail-closed。
+- 处理带有效时间戳的终态 Agent；具备 `rpc-runtime` role、instanceId 和 heartbeat 的 runtime 超过 `stale_runtime_ttl_hours` 也会归档。普通非终态与无身份 legacy 记录仍自动保留；操作员可用 `/flux gc legacy dry-run <names...>` 与 `/flux gc legacy <names...>` 显式处理超过 TTL、无 instanceId、无 runtimePid 的旧记录。运行中存在子进程时正式 GC fail-closed。
 - V1 已读点对点消息可归档；V1 未读、广播和群组消息保留。V2 只有在所有接收者的 Delivery 均为 `acknowledged/rejected/expired` 后，才按 `read_message_ttl_hours` 和 `max_read_messages` 归档 envelope 与逐成员 delivery；任何 pending/delivered Delivery 都会保留。
 - 被活跃 Agent 引用的 session 永远保留；移除终态 Agent 后的 session 和超过 TTL 的孤儿 session 移入审计归档。
 - 归档目录为 `.agentflux/archive/lifecycle/<run-id>/`，包含 manifest、V1/V2 消息和 session。Retention health 同时报告 V2 terminal/outstanding delivery 和活跃消息字节数。当前 GC 收缩活跃状态集，但归档本身的磁盘 TTL/总容量上限尚未实现。

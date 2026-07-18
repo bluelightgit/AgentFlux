@@ -15,6 +15,7 @@
  *   /flux team status|plan|build|review|abort|roles|models|affinity|pipeline
  *   /flux work <task>                      # MA-5: multi-agent DAG execution (persistent agents + quality gates)
  *   /flux gc [dry-run]                     # archive terminal agent/message/session state
+ *   /flux gc legacy [dry-run] <names...>   # archive explicitly named stale pre-identity records
  *   /flux compact                           # compaction advice (B-dimension adaptive)
  *   /flux status                            # full status report (version, mode, subsystems, issues)
  *   /flux health                            # health check (8 subsystem diagnostics)
@@ -51,15 +52,16 @@ import { handleFluxAgentsCommand, handleFluxBackCommand, getAgentSystemPromptOve
 import type { PreferenceConfig } from "./core/types";
 import { Type } from "typebox";
 import { getVersionInfo, checkHealth, formatHealthReport, scanRecentIssues, checkUpgrade, formatUpgradeInfo, formatStatusReport, formatIssues, type SubsystemStatus, type AgentInfo } from "./extension/health-monitor";
-import { generateTaskDAG, executeDAG, formatDAGResult, type DAGExecutionResult } from "./extension/dag-executor";
-import { buildTaskRoutePlan, formatTaskRoutePlan, remainingTaskWallClock, resolveExecutableMode, type TaskRoutePlan } from "./core/execution-plan";
+import { generateTaskDAG, executeDAG, formatDAGResult, resolveDAGRoleModel, type DAGExecutionResult } from "./extension/dag-executor";
+import { buildTaskRoutePlan, evaluateMainTaskBudget, formatTaskRoutePlan, remainingTaskWallClock, resolveExecutableMode, type MainTaskBudgetState, type TaskRoutePlan } from "./core/execution-plan";
 import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
 import { MessageBus } from "./core/message-bus";
 import { assessCacheImpact, diffRuntimeCacheShape, formatCacheImpactWarning, type RuntimeCacheShape } from "./core/cache-impact";
 import { loadAllRoles } from "./core/role-manager";
 import { RpcInboxPump } from "./extension/rpc-inbox-pump";
 import {
-	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
+	loadRegisteredCapabilityOverride, normalizeRuntimeCapabilityOverride,
+	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	type CapabilityPolicyInput,
 } from "./core/capability-policy";
 
@@ -103,10 +105,12 @@ export default function (pi: ExtensionAPI) {
 	let teamCtx: TeamContext | null = null;
 	let currentTaskPlan: TaskRoutePlan | null = null;
 	let pendingExplicitPlan: TaskRoutePlan | null = null;
+	let mainTaskBudgetState: MainTaskBudgetState | null = null;
 	let runtimeCacheShape: RuntimeCacheShape | null = null;
 	let rpcInboxPump: RpcInboxPump | null = null;
 	let rpcRuntimeAgentName: string | null = null;
 	let rpcRuntimeInstanceId: string | null = null;
+	let runtimeExitPresenceHookInstalled = false;
 
 	function configureRpcInboxPump(ctx: any, config = loadConfig(ctx.cwd)): void {
 		rpcInboxPump?.stop();
@@ -136,6 +140,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		rpcRuntimeAgentName = recipient;
 		rpcRuntimeInstanceId = instanceId;
+		if (!runtimeExitPresenceHookInstalled) {
+			runtimeExitPresenceHookInstalled = true;
+			process.once("exit", code => {
+				const name = rpcRuntimeAgentName;
+				const owner = rpcRuntimeInstanceId;
+				if (!name || !owner) return;
+				try { new SharedBoard(fluxDir).finalizeRuntimeAgentPresence(name, owner, code); } catch {}
+			});
+		}
 		rpcInboxPump = new RpcInboxPump({
 			fluxDir, recipient,
 			pollIntervalMs: config.communication.poll_interval_ms,
@@ -246,8 +259,10 @@ export default function (pi: ExtensionAPI) {
 				taskSignal: complexitySignal ?? undefined,
 				overrideMode: ov.config.routing.override_mode,
 			});
-			const resolved = resolveExecutableMode(decision.mode);
+			const requestedMode = explicitRuntimeMode ?? decision.mode;
+			const resolved = resolveExecutableMode(requestedMode);
 			state.mode = resolved.effectiveMode;
+			if (explicitRuntimeMode) decision.reason.push(`explicit-mode:${explicitRuntimeMode}`);
 			if (resolved.fallbackReason) decision.reason.push(`capability:${resolved.fallbackReason}`);
 		}
 		state.expectedMode = decision.biasSources.preference ?? state.mode;
@@ -257,7 +272,10 @@ export default function (pi: ExtensionAPI) {
 		for (const w of warnings) decision.reason.push(`warn:${w}`);
 
 		// F2-10: override_mode suggest — non-intrusive footer hint (no popup)
-		if (config.routing.override_mode === "suggest" && decision.confidence >= 0.7) {
+		if (explicitRuntimeMode) {
+			const recommended = resolveExecutableMode(decision.mode).effectiveMode;
+			routeHint = `user fixed ${explicitRuntimeMode}${explicitRuntimeMode === state.mode ? "" : `→${state.mode}`} | router suggests ${decision.mode}${decision.mode === recommended ? "" : `→${recommended}`}`;
+		} else if (config.routing.override_mode === "suggest" && decision.confidence >= 0.7) {
 			const expected = presetToExpectedMode(state.preset);
 			if (state.mode !== expected) {
 			routeHint = `router suggests ${decision.mode}${decision.mode === state.mode ? "" : `→${state.mode}`} (${(decision.confidence*100).toFixed(0)}%) | preset ${state.preset} expects ${expected}`;
@@ -277,7 +295,9 @@ export default function (pi: ExtensionAPI) {
 			complexityTier: currentTaskPlan?.signal.complexity.tier,
 			fileCount: currentTaskPlan?.signal.complexity.fileCount,
 			diffLines: currentTaskPlan?.signal.scope.diffLines,
-			actualMode: currentTaskPlan && !currentTaskPlan.requiresConfirmation ? currentTaskPlan.effectiveMode : undefined,
+			actualMode: currentTaskPlan && !currentTaskPlan.requiresConfirmation
+				? currentTaskPlan.effectiveMode
+				: explicitRuntimeMode ? state.mode : undefined,
 			overrideMode: config.routing.override_mode,
 			applied: decision.applied,
 		});
@@ -561,13 +581,20 @@ export default function (pi: ExtensionAPI) {
 		refreshCache(ctx);
 		emitSample(ctx);
 		if (profile) bumpSessionHistory(ctx.cwd, profile);
+		// Do not clear the task budget here. `/flux work` queues a second user
+		// turn from inside the slash-command lifecycle, and the outer command's
+		// agent_end can arrive while that queued turn is still active. The next
+		// before_agent_start replaces this state atomically for the next plan;
+		// turn_start also requires an exact taskId match.
 	});
 
 	pi.on("session_shutdown", async () => {
 		rpcInboxPump?.stop();
 		rpcInboxPump = null;
 		if (rpcRuntimeAgentName) {
-			try { new SharedBoard(fluxDir).updateAgentPresence(rpcRuntimeAgentName, { status: "done" }, rpcRuntimeInstanceId ?? undefined); } catch {}
+			try {
+				if (rpcRuntimeInstanceId) new SharedBoard(fluxDir).finalizeRuntimeAgentPresence(rpcRuntimeAgentName, rpcRuntimeInstanceId, 0);
+			} catch {}
 		}
 		rpcRuntimeAgentName = null;
 		rpcRuntimeInstanceId = null;
@@ -619,6 +646,9 @@ export default function (pi: ExtensionAPI) {
 		if (explicitlyApplied) pendingExplicitPlan = null;
 		if (plan && (explicitlyApplied || !plan.requiresConfirmation)) {
 			state.mode = plan.effectiveMode;
+			if (plan.executor !== "dag") {
+				mainTaskBudgetState = { taskId: plan.taskId, startedAt: Date.now(), iterationsStarted: 0 };
+			}
 			setFluxStatus(ctx, getState);
 		}
 		const rolePrompt = getAgentSystemPromptOverride(ctx.cwd);
@@ -628,7 +658,7 @@ export default function (pi: ExtensionAPI) {
 			plan.blockedReason
 				? `Do not execute this task: ${plan.blockedReason}. Explain the configuration problem.`
 				: plan.effectiveMode === "M2" && (explicitlyApplied || !plan.requiresConfirmation)
-					? "Apply M2: the main agent owns implementation and final verification; delegate only bounded independent research/review/test work through flux_subagent or flux_subagent_parallel. Do not delegate overlapping file edits."
+					? "Apply M2: the main agent owns implementation and final verification; delegate only bounded independent research/review/test work through flux_subagent or flux_subagent_parallel. Do not delegate overlapping file edits. If a delegation fails, choose exactly one bounded recovery: continue directly, select a healthy provider once, or stop and report. Do not repeat failed delegation or tool calls without a new plan and observable progress."
 					: plan.effectiveMode === "M5" && (explicitlyApplied || !plan.requiresConfirmation)
 						? "Apply M5: call flux_execute_plan exactly once with the user's task before editing; use its DAG artifacts and report the verified outcome. Do not duplicate the DAG's file edits in parallel."
 						: plan.effectiveMode === "M1"
@@ -639,6 +669,22 @@ export default function (pi: ExtensionAPI) {
 		const additions = [rolePrompt, routingPrompt].filter(Boolean);
 		if (additions.length === 0) return undefined;
 		return { systemPrompt: event.systemPrompt + "\n\n" + additions.join("\n\n") };
+	});
+
+	// M1/M2 的 provider-turn 与墙钟预算在下一 turn 开始前硬停止。
+	// M5 由 DAG executor 自己控制节点/attempt 预算。
+	pi.on("turn_start", async (_event: any, ctx: any) => {
+		if (!currentTaskPlan || currentTaskPlan.executor === "dag" || !mainTaskBudgetState) return;
+		if (mainTaskBudgetState.taskId !== currentTaskPlan.taskId) return;
+		const evaluated = evaluateMainTaskBudget(currentTaskPlan, mainTaskBudgetState);
+		mainTaskBudgetState = evaluated.nextState;
+		if (evaluated.allowed) return;
+		const detail = evaluated.reason === "max_iterations"
+			? `${currentTaskPlan.budget.maxIterations} provider turns`
+			: `${Math.round(currentTaskPlan.budget.maxWallClockMs / 1000)}s wall clock`;
+		routeHint = `BLOCKED task budget exhausted: ${evaluated.reason} (${detail})`;
+		console.error(`[flux] ${routeHint}`);
+		ctx.abort();
 	});
 
 	// ---------- M3 fork 事件 (Phase 2) ----------
@@ -654,9 +700,12 @@ export default function (pi: ExtensionAPI) {
 		if (plan.executor !== "dag") throw new Error(`plan ${plan.effectiveMode} uses ${plan.executor}, not DAG`);
 		const startedAt = Date.now();
 		const plannerBudget = plan.budget.maxCostUsd;
+		const plannerRuntime = resolveDAGRoleModel(ctx.cwd, teamCtx.modelsConfig, "planner");
 		const dag = await generateTaskDAG(plan.task, {
 			cwd: ctx.cwd,
-			model: teamCtx.modelsConfig?.models?.["oa/glm-5.2"] ? "oa/glm-5.2" : undefined,
+			model: plannerRuntime.model,
+			provider: plannerRuntime.provider,
+			thinking: plannerRuntime.thinking,
 			models: teamCtx.modelsConfig?.models,
 			pricing: teamCtx.pricing,
 			telemetry,
@@ -664,6 +713,7 @@ export default function (pi: ExtensionAPI) {
 			prefixLayout: teamCtx.prefixLayout,
 			signal,
 			maxCostUsd: plannerBudget,
+			taskId: plan.taskId,
 			// planner 可能需要完成 provider 降级；保留任务总 deadline，避免隐藏的 120s 截断。
 			timeoutMs: Math.min(240_000, plan.budget.maxWallClockMs),
 		});
@@ -690,6 +740,7 @@ export default function (pi: ExtensionAPI) {
 			maxParallel: 3,
 			signal,
 			executionId: plan.taskId,
+			taskId: plan.taskId,
 		});
 	}
 
@@ -850,8 +901,10 @@ export default function (pi: ExtensionAPI) {
 			task: Type.String({ description: "任务描述" }),
 			persistent: Type.Optional(Type.Boolean({ description: "M2-2: 持久 session, 可跨调用续接 (默认 false)" })),
 			thinking: Type.Optional(Type.String({ description: "M2-4: reasoning effort (off/minimal/low/medium/high/xhigh), 默认跟随 agent 定义" })),
+			timeoutSeconds: Type.Optional(Type.Number({ minimum: 30, maximum: 900, description: "本次子 Agent 总时限；默认 min(180s, 任务墙钟上限)" })),
 			lockFiles: Type.Optional(Type.Array(Type.String(), { description: "该 agent 将编辑的文件路径列表, 用于文件锁防并行冲突" })),
 			communication: Type.Optional(Type.Object({
+				disable: Type.Optional(Type.Boolean({ description: "Explicitly disable messaging for this run. Empty/default objects are ignored." })),
 				enabled: Type.Optional(Type.Boolean()),
 				actions: Type.Optional(Type.Array(Type.Union([Type.Literal("send"), Type.Literal("poll"), Type.Literal("ack"), Type.Literal("status")]))),
 				allowedTargets: Type.Optional(Type.Array(Type.String())),
@@ -860,6 +913,9 @@ export default function (pi: ExtensionAPI) {
 				maxMessagesPerRun: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
 			}, { description: "单次运行的通信策略覆盖；在角色模板默认值之上生效" })),
 			capabilities: Type.Optional(Type.Object({
+				denyAllTools: Type.Optional(Type.Boolean({ description: "Explicitly remove every tool. tools: [] alone is treated as omitted." })),
+				denyAllSkills: Type.Optional(Type.Boolean({ description: "Explicitly remove every skill. skills: [] alone is treated as omitted." })),
+				denyAllMcpServers: Type.Optional(Type.Boolean({ description: "Explicitly remove every MCP server. mcpServers: [] alone is treated as omitted." })),
 				tools: Type.Optional(Type.Array(Type.String())),
 				skills: Type.Optional(Type.Array(Type.String())),
 				mcpServers: Type.Optional(Type.Array(Type.String())),
@@ -883,11 +939,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			const validThinking = params.thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(params.thinking)
 				? params.thinking as any : undefined;
+			const runtimeCapabilities = normalizeRuntimeCapabilityOverride(params.capabilities);
+			const runtimeCommunication = normalizeRuntimeCommunicationOverride(params.communication);
 			const pref = applyRuntimeOverride(config, loadPreference(ctx.cwd), runtimePreset).pref;
 			const capabilityWarnings = [
-				params.capabilities?.tools ? assessCacheImpact("tool_schema", pref) : null,
-				params.capabilities?.skills ? assessCacheImpact("skill_set", pref) : null,
-				params.capabilities?.mcpServers ? assessCacheImpact("mcp_set", pref) : null,
+				runtimeCapabilities?.tools ? assessCacheImpact("tool_schema", pref) : null,
+				runtimeCapabilities?.skills ? assessCacheImpact("skill_set", pref) : null,
+				runtimeCapabilities?.mcpServers ? assessCacheImpact("mcp_set", pref) : null,
 			].filter((item): item is NonNullable<typeof item> => !!item)
 				.map(item => formatCacheImpactWarning(item)).filter((item): item is string => !!item);
 			if (ctx.hasUI) for (const warning of capabilityWarnings) ctx.ui.notify(warning, "warning");
@@ -897,7 +955,10 @@ export default function (pi: ExtensionAPI) {
 				pricing: pricingTable ?? undefined,
 				persistent: params.persistent ?? false,
 				thinking: validThinking,
-				timeoutMs: Math.min(15 * 60_000, Math.max(60_000, config.budget.max_wall_clock_seconds * 1000)),
+				timeoutMs: Math.min(
+					Math.max(30_000, config.budget.max_wall_clock_seconds * 1000),
+					Math.max(30_000, Math.min(900_000, (params.timeoutSeconds ?? 180) * 1000)),
+				),
 				maxRetries: 2,       // 自动重试 2 次 (502/timeout 等)
 				enableModelFallback: Object.keys(teamCtx?.modelsConfig?.models ?? {}).length > 1,
 				modelsForFallback: teamCtx?.modelsConfig?.models,
@@ -910,10 +971,18 @@ export default function (pi: ExtensionAPI) {
 				lockFiles: params.lockFiles,
 				signal: _signal,
 				maxCostUsd: config.budget.max_cost_per_task,
-				communicationOverride: params.communication,
-				capabilityOverride: params.capabilities,
+				taskId: currentTaskPlan?.taskId,
+				communicationOverride: runtimeCommunication,
+				capabilityOverride: runtimeCapabilities,
 			});
-			return { content: [{ type: "text", text: [...capabilityWarnings, formatSubagentResult(r)].join("\n\n") }], details: r };
+			const observedCapabilityWarnings = (r.capability?.cacheBreakingChanges ?? [])
+				.map(change => formatCacheImpactWarning(assessCacheImpact(change, pref)))
+				.filter((item): item is string => !!item);
+			const resultWarnings = [...new Set([...capabilityWarnings, ...observedCapabilityWarnings])];
+			if (ctx.hasUI) for (const warning of observedCapabilityWarnings) {
+				if (!capabilityWarnings.includes(warning)) ctx.ui.notify(warning, "warning");
+			}
+			return { content: [{ type: "text", text: [...resultWarnings, formatSubagentResult(r)].join("\n\n") }], details: r };
 		},
 	});
 
@@ -985,6 +1054,7 @@ export default function (pi: ExtensionAPI) {
 				lockFiles: Object.keys(lockFilesMap).length > 0 ? lockFilesMap : undefined,
 				signal: _signal,
 				maxCostUsd: config.budget.max_cost_per_task,
+				taskId: currentTaskPlan?.taskId,
 			});
 			console.error(`[flux] parallel subagent done: wall ${(result.wallClockMs / 1000).toFixed(1)}s, speedup ${result.speedupRatio.toFixed(2)}x`);
 			return { content: [{ type: "text", text: formatParallelResults(result) }], details: {} };
@@ -1052,7 +1122,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("flux", {
-		description: "AgentFlux: routing/execution/cache/self-maintenance. subcommands: work [--mode M1|M2|M5] <task> | cancel [runId|all] | gc [dry-run] | why | mode <preset> | preference | project | fork | complexity | team | compact | agents | chat | groups | status | health | restart | upgrade [pull]",
+		description: "AgentFlux: routing/execution/cache/self-maintenance. subcommands: work [--mode M1|M2|M5] <task> | cancel [runId|all] | gc [dry-run] | gc legacy [dry-run] <names...> | why | mode <preset> | preference | project | fork | complexity | team | compact | agents | chat | groups | status | health | restart | upgrade [pull]",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0];
@@ -1217,9 +1287,18 @@ export default function (pi: ExtensionAPI) {
 
 			if (sub === "gc") {
 				const config = loadConfig(ctx.cwd);
-				const dryRun = ["dry-run", "--dry-run"].includes(parts[1]);
+				const legacy = parts[1] === "legacy";
+				const dryRun = parts.includes("dry-run") || parts.includes("--dry-run");
+				const explicitLegacyAgentNames = legacy
+					? parts.slice(2).filter(part => !["dry-run", "--dry-run"].includes(part))
+					: undefined;
+				if (legacy && explicitLegacyAgentNames!.length === 0) {
+					const usage = "Usage: /flux gc legacy [dry-run] <agent-name> [agent-name...]";
+					if (ctx.hasUI) ctx.ui.notify(usage, "warn"); else console.log(usage);
+					return;
+				}
 				const activeRunIds = [...new Set([...activeRuns.keys(), ...getActiveSubagentRunIds()])];
-				const report = runLifecycleGc(fluxDir, config.retention, { dryRun, activeRunIds });
+				const report = runLifecycleGc(fluxDir, config.retention, { dryRun, activeRunIds, explicitLegacyAgentNames });
 				const text = formatLifecycleGcReport(report);
 				if (ctx.hasUI) ctx.ui.notify(text, report.blockedReason ? "warn" : "info"); else console.log(text);
 				return;

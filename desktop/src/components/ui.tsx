@@ -281,7 +281,8 @@ export function DataTable({
   rowClassName,
 }: DataTableProps): React.ReactElement {
   return (
-    <table className="af-data-table w-full text-sm">
+    <div className="max-w-full overflow-x-auto">
+    <table className="af-data-table min-w-full text-sm">
       <thead>
         <tr>
           {columns.map((col) => (
@@ -311,6 +312,7 @@ export function DataTable({
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 

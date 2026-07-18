@@ -57,6 +57,7 @@ export interface SubagentRunEvent {
   ts: number;
   type: "subagent.run";
   sessionId: string;
+  taskId?: string;
   agent: string;
   task: string;
   model: string;
@@ -82,9 +83,9 @@ export interface SubagentRunEvent {
     unacknowledgedInbox: string[];
   };
   outcome?: {
-    status: "success" | "cancelled" | "timeout" | "failure";
-    success: boolean;
-    exitCode: number;
+    status: "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
+    success?: boolean;
+    exitCode?: number;
     retryCount?: number;
     error?: string;
   };

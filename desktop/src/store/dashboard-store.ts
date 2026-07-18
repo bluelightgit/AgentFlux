@@ -100,13 +100,13 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   init: async (fallbackPath?: string) => {
     const candidate = discoverProject(fallbackPath);
     if (!candidate) {
-      set({ error: "AgentFlux project not found. Set AGENTFLUX_PROJECT_ROOT env var or configure path in Settings." });
+      set({ error: "AgentFlux project not found. Set AGENTFLUX_PROJECT_ROOT or choose a project from Configuration." });
       return;
     }
     // Async validate that .agentflux directory actually exists
     const project = await validateProjectPath(candidate.projectRoot);
     if (!project) {
-      set({ error: `AgentFlux directory not found at ${candidate.fluxDir}. Check path in Settings.` });
+      set({ error: `AgentFlux directory not found at ${candidate.fluxDir}. Check the project path in Configuration.` });
       return;
     }
     set({ project, loading: true });

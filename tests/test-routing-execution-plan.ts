@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyRuntimeOverride } from "../src/core/config";
-import { buildTaskRoutePlan, MODE_CAPABILITIES, remainingTaskWallClock, resolveExecutableMode } from "../src/core/execution-plan";
+import { buildTaskRoutePlan, evaluateMainTaskBudget, MODE_CAPABILITIES, remainingTaskWallClock, resolveExecutableMode } from "../src/core/execution-plan";
 import { classifyTask } from "../src/core/task-router";
 import { DEFAULT_CONFIG, DEFAULT_PREFERENCE } from "../src/core/types";
+import { buildFluxSummary, buildInspectorText } from "../src/extension/footer";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
@@ -54,9 +55,32 @@ try {
 	check("explicit mode overrides router without confirmation", explicitM2.requestedMode === "M2" && explicitM2.effectiveMode === "M2" && !explicitM2.requiresConfirmation, `${explicitM2.requestedMode}/${explicitM2.selectionSource}`);
 	check("explicit mode remains observable", explicitM2.selectionSource === "explicit" && explicitM2.decision.reason.includes("explicit-mode:M2"), explicitM2.decision.reason.join(" | "));
 
-	const m6 = resolveExecutableMode("M6");
-	check("M6 falls back to M5", m6.effectiveMode === "M5" && m6.executor === "dag", JSON.stringify(m6));
+	const expectedModes = {
+		M1: { effectiveMode: "M1", executor: "main", status: "available" },
+		M2: { effectiveMode: "M2", executor: "main_with_subagent", status: "available" },
+		M3: { effectiveMode: "M2", executor: "main_with_subagent", status: "experimental" },
+		M4: { effectiveMode: "M5", executor: "dag", status: "experimental" },
+		M5: { effectiveMode: "M5", executor: "dag", status: "available" },
+		M6: { effectiveMode: "M5", executor: "dag", status: "experimental" },
+	} as const;
+	for (const [mode, expected] of Object.entries(expectedModes)) {
+		const resolved = resolveExecutableMode(mode as keyof typeof expectedModes);
+		check(`${mode} executable contract`, resolved.effectiveMode === expected.effectiveMode
+			&& resolved.executor === expected.executor && resolved.capability.status === expected.status,
+			`${mode}→${resolved.effectiveMode}/${resolved.executor}/${resolved.capability.status}`);
+	}
 	check("capability manifest marks M3/M4/M6 experimental", ["M3", "M4", "M6"].every(mode => MODE_CAPABILITIES[mode as "M3" | "M4" | "M6"].status === "experimental"), "manifest checked");
+	const displayState = {
+		mode: "M4" as const,
+		preset: "balanced" as const,
+		stage: "Established" as const,
+		role: "coordinator" as const,
+		expectedMode: "M4" as const,
+		cache: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, cacheHitRate: 0, contextTokens: 0, contextWindow: 0, contextPercent: 0 },
+		turnIndex: 0,
+	};
+	check("summary shows the executable fallback instead of hard-coded M1", buildFluxSummary(displayState, "events.jsonl", null).includes("M4  (fallback M5)"), buildFluxSummary(displayState, "events.jsonl", null).split("\n")[1]);
+	check("inspector shows the executable fallback instead of hard-coded M1", buildInspectorText(displayState, null, { fileCount: 0, commitCount: 0 }, "events.jsonl").includes("M4  (fallback M5)"), buildInspectorText(displayState, null, { fileCount: 0, commitCount: 0 }, "events.jsonl").split("\n")[1]);
 
 	const blocked = buildTaskRoutePlan({
 		cwd: root,
@@ -67,6 +91,16 @@ try {
 	});
 	check("invalid budget blocks execution", !!blocked.blockedReason, blocked.blockedReason ?? "not blocked");
 	check("configured wall clock is not silently capped at 300s", remainingTaskWallClock(600_000, 25_000) === 575_000, `${remainingTaskWallClock(600_000, 25_000)}ms`);
+	let budgetState = { taskId: explicitM2.taskId, startedAt: 1_000, iterationsStarted: 0 };
+	for (let i = 0; i < explicitM2.budget.maxIterations; i++) {
+		const result = evaluateMainTaskBudget(explicitM2, budgetState, 1_001 + i);
+		check(`main task budget allows configured iteration ${i + 1}`, result.allowed, JSON.stringify(result));
+		budgetState = result.nextState;
+	}
+	const iterationStop = evaluateMainTaskBudget(explicitM2, budgetState, 2_000);
+	check("main task budget blocks the first excess provider turn", !iterationStop.allowed && iterationStop.reason === "max_iterations", JSON.stringify(iterationStop));
+	const wallStop = evaluateMainTaskBudget(explicitM2, { taskId: explicitM2.taskId, startedAt: 1_000, iterationsStarted: 0 }, 1_000 + explicitM2.budget.maxWallClockMs);
+	check("main task budget blocks at wall-clock deadline", !wallStop.allowed && wallStop.reason === "max_wall_clock", JSON.stringify(wallStop));
 } finally {
 	rmSync(root, { recursive: true, force: true });
 }

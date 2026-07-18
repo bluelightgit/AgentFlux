@@ -24,6 +24,67 @@ export interface CapabilityPolicyInput {
 	workspace?: WorkspaceCapabilityInput;
 }
 
+/**
+ * Tool-call models sometimes materialize every optional array as `[]`. At the
+ * run layer that must not silently mean "remove every capability". Explicit
+ * deny-all flags keep that narrowing available without making an empty schema
+ * shell destructive.
+ */
+export interface RuntimeCapabilityOverrideInput extends CapabilityPolicyInput {
+	denyAllTools?: boolean;
+	denyAllSkills?: boolean;
+	denyAllMcpServers?: boolean;
+}
+
+export interface RuntimeCommunicationOverrideInput extends CommunicationPolicyInput {
+	disable?: boolean;
+}
+
+function nonEmptyList(value: unknown): string[] | undefined {
+	return Array.isArray(value) && value.length > 0 ? value as string[] : undefined;
+}
+
+/** Collapse provider-generated empty/default shells to an omitted run override. */
+export function normalizeRuntimeCapabilityOverride(
+	input?: RuntimeCapabilityOverrideInput,
+): CapabilityPolicyInput | undefined {
+	if (!input) return undefined;
+	const tools = input.denyAllTools === true ? [] : nonEmptyList(input.tools);
+	const skills = input.denyAllSkills === true ? [] : nonEmptyList(input.skills);
+	const mcpServers = input.denyAllMcpServers === true ? [] : nonEmptyList(input.mcpServers);
+	const roots = nonEmptyList(input.workspace?.roots);
+	const deniedPaths = nonEmptyList(input.workspace?.deniedPaths);
+	const workspace = roots || deniedPaths || input.workspace?.blockDangerousCommands === true
+		? { roots, deniedPaths, blockDangerousCommands: input.workspace?.blockDangerousCommands === true ? true : undefined }
+		: undefined;
+	const result: CapabilityPolicyInput = { tools, skills, mcpServers, workspace };
+	return Object.values(result).some(value => value !== undefined) ? result : undefined;
+}
+
+/**
+ * Ignore the common false/empty/1 object produced for an omitted communication
+ * override. `disable: true` is the unambiguous way to turn messaging off.
+ */
+export function normalizeRuntimeCommunicationOverride(
+	input?: RuntimeCommunicationOverrideInput,
+): CommunicationPolicyInput | undefined {
+	if (!input) return undefined;
+	const actions = nonEmptyList(input.actions) as CommunicationPolicyInput["actions"];
+	const allowedTargets = nonEmptyList(input.allowedTargets);
+	const requiredSendTo = nonEmptyList(input.requiredSendTo);
+	const meaningful = input.disable === true || actions || allowedTargets || requiredSendTo
+		|| input.requireExplicitInboxAck === true;
+	if (!meaningful) return undefined;
+	return {
+		enabled: input.disable === true ? false : (input.enabled === true ? true : undefined),
+		actions,
+		allowedTargets,
+		requiredSendTo,
+		requireExplicitInboxAck: input.requireExplicitInboxAck === true ? true : undefined,
+		maxMessagesPerRun: input.maxMessagesPerRun,
+	};
+}
+
 export interface EffectiveCapabilityPolicy {
 	tools: string[];
 	skills: string[];

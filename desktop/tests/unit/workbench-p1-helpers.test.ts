@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildRuntimeDiagnostics, clampColumns, redactDiagnosticsText } from '../../src/lib/workbench-p1';
+import type { SubagentRunEvent } from '../../src/lib/events-parser';
+import { aggregateExecutionFamily, buildRuntimeDiagnostics, clampColumns, redactDiagnosticsText } from '../../src/lib/workbench-p1';
+
+function run(overrides: Partial<SubagentRunEvent> = {}): SubagentRunEvent {
+  return {
+    ts: 100, type: 'subagent.run', sessionId: 'session', taskId: 'task-a', agent: 'implementer', task: 'work', model: 'deepseek-v4-pro',
+    turns: 1, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, costUsd: 0.002, contextTokens: 15, cacheHitRate: 0,
+    exitCode: 0, startedAt: 90, finishedAt: 100, outcome: { status: 'success', success: true, exitCode: 0 },
+    ...overrides,
+  };
+}
 
 describe('Control Room P1 helpers', () => {
   it('clamps panel widths and always reserves the 400px center lane', () => {
@@ -27,5 +37,35 @@ describe('Control Room P1 helpers', () => {
     expect(output).not.toContain('TOP SECRET PROMPT');
     expect(output).not.toContain('abc123');
     expect(output).toContain('RPC_EXIT_BEFORE_READY');
+  });
+
+  it('aggregates only the exact taskId and sorts newest child run first', () => {
+    const family = aggregateExecutionFamily([
+      run({ runId: 'old', agent: 'implementer', finishedAt: 120, costUsd: 0.002 }),
+      run({ runId: 'other', taskId: 'task-b', finishedAt: 999, costUsd: 99 }),
+      run({ runId: 'new', agent: 'dag-review', finishedAt: 180, costUsd: 0.003 }),
+    ], 'task-a');
+    expect(family).toMatchObject({ totalRuns: 2, success: 2, failed: 0, totalCostUsd: 0.005, lastActivity: 180 });
+    expect(family.details.map((detail) => detail.runId)).toEqual(['new', 'old']);
+    expect(family.details[0]).toMatchObject({ isDagRole: true, status: 'success' });
+  });
+
+  it('normalizes failure-like outcomes without losing cancelled and timeout counts', () => {
+    const family = aggregateExecutionFamily([
+      run({ outcome: { status: 'failure' }, exitCode: 1 }),
+      run({ outcome: { status: 'partial' }, exitCode: 0 }),
+      run({ outcome: { status: 'unknown' }, exitCode: 0 }),
+      run({ outcome: { status: 'cancelled' }, exitCode: 130 }),
+      run({ outcome: { status: 'timeout' }, exitCode: 124 }),
+      run({ outcome: undefined, exitCode: 0 }),
+      run({ outcome: undefined, exitCode: 2 }),
+    ], 'task-a');
+    expect(family).toMatchObject({ totalRuns: 7, success: 1, failed: 4, cancelled: 1, timeout: 1 });
+    expect(family.details.map((detail) => detail.status)).toEqual(expect.arrayContaining(['success', 'failed', 'cancelled', 'timeout']));
+  });
+
+  it('fails closed to an empty family when taskId is missing', () => {
+    expect(aggregateExecutionFamily([run()], undefined)).toMatchObject({ totalRuns: 0, totalCostUsd: 0, details: [] });
+    expect(aggregateExecutionFamily([run()], '')).toMatchObject({ totalRuns: 0, details: [] });
   });
 });

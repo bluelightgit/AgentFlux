@@ -1,10 +1,10 @@
 import { useEffect, useCallback } from 'react';
 import type { PageName } from '../store/dashboard-store';
 
-const PAGE_ORDER: PageName[] = ['overview', 'sessions', 'agents', 'routing', 'telemetry', 'dag', 'config', 'settings'];
+const PAGE_ORDER: PageName[] = ['workbench', 'agents', 'chat', 'telemetry', 'sessions', 'dag', 'routing', 'config'];
 const PAGE_KEYS: Record<string, PageName> = {
-  '1': 'overview', '2': 'sessions', '3': 'agents', '4': 'routing',
-  '5': 'telemetry', '6': 'dag', '7': 'config', '8': 'settings',
+  '1': 'workbench', '2': 'agents', '3': 'chat', '4': 'telemetry',
+  '5': 'sessions', '6': 'dag', '7': 'routing', '8': 'config',
 };
 
 export function useKeyboardNav(currentPage: PageName, setPage: (p: PageName) => void) {

@@ -85,6 +85,30 @@ const ROLE_FALLBACK_REQUIREMENTS: Record<string, RoleRequirement> = {
 	tester: { coding: 0.7, reasoning: 0.5, speed: 0.5, cost_eff: 0.6 },
 };
 
+export interface ResolvedDAGRoleModel {
+	model: string;
+	provider?: string;
+	thinking?: RoleDefinition["thinking"];
+	source: "model" | "affinity" | "single";
+}
+
+/** Resolve a DAG role through the same MD > models.json > builtin precedence as node execution. */
+export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: string): ResolvedDAGRoleModel {
+	const role = loadAllRoles(cwd, modelsConfig).get(roleName);
+	if (!role) throw new Error(`DAG role not found: ${roleName}`);
+	const models = modelsConfig?.models ?? {};
+	const requirement = (role.requirement as RoleRequirement | undefined)
+		?? ROLE_FALLBACK_REQUIREMENTS[roleName]
+		?? { coding: 0.5, reasoning: 0.5, cost_eff: 0.5 };
+	const assigned = assignModel(roleName, { model: role.model, requirement }, models);
+	return {
+		model: assigned.model,
+		provider: models[assigned.model]?.provider,
+		thinking: role.thinking,
+		source: assigned.source,
+	};
+}
+
 // ─── M5-1: 动态任务分解 ───
 
 /**
@@ -99,6 +123,7 @@ export async function generateTaskDAG(
 		cwd: string;
 		model?: string;
 		provider?: string;
+		thinking?: RoleDefinition["thinking"];
 		pricing?: PricingTable;
 		models?: Record<string, ModelEntry>;
 		telemetry?: TelemetryWriter;
@@ -107,6 +132,7 @@ export async function generateTaskDAG(
 		signal?: AbortSignal;
 		maxCostUsd?: number;
 		timeoutMs?: number;
+		taskId?: string;
 	},
 ): Promise<TaskDAG> {
 	const plannerAgent: SubagentDef = {
@@ -143,7 +169,7 @@ Rules:
 - Use forward slashes in every file path, including on Windows
 - Keep it minimal: 2-5 nodes for most tasks
 - The last node should usually be a "reviewer" or "tester" that validates the work`,
-		thinking: "high",
+		thinking: opts.thinking ?? "high",
 	};
 
 	const result = await runSubagent({
@@ -156,7 +182,7 @@ Rules:
 		model: opts.model,
 		provider: opts.provider,
 		pricing: opts.pricing,
-		thinking: "high",
+		thinking: opts.thinking ?? "high",
 		maxRetries: 1,
 		retryDelayMs: 2000,
 		enableModelFallback: !!opts.models && Object.keys(opts.models).length > 1,
@@ -164,6 +190,7 @@ Rules:
 		roleRequirementForFallback: ROLE_FALLBACK_REQUIREMENTS.planner,
 		signal: opts.signal,
 		maxCostUsd: opts.maxCostUsd,
+		taskId: opts.taskId,
 		timeoutMs: opts.timeoutMs,
 	});
 
@@ -291,6 +318,7 @@ export interface DAGExecutorOptions {
 	maxIterations?: number;    // 全局节点执行批次数上限
 	maxParallel?: number;      // 并发节点上限
 	executionId?: string;      // 显式 run id；也用于断点文件
+	taskId?: string;           // 父 TaskRoutePlan id，贯穿 planner/node telemetry
 	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
 }
 
@@ -623,6 +651,7 @@ async function executeNodeWithGate(
 			signal: opts.signal,
 			runId: `${executionId}:${node.id}`,
 			maxCostUsd: maxCostUsd === undefined ? undefined : Math.max(0, maxCostUsd - totalNodeCost),
+			taskId: opts.taskId,
 			lockFiles: node.files,
 		});
 

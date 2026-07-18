@@ -56,7 +56,15 @@ vi.mock('fs', () => ({
 
 interface MockChildProcess {
   pid: number;
-  stdin: { write: ReturnType<typeof vi.fn>; end: ReturnType<typeof vi.fn> };
+  stdin: {
+    write: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
+    emit: (event: string, ...args: unknown[]) => void;
+    destroyed: boolean;
+    writableEnded: boolean;
+    writableFinished: boolean;
+  };
   stdout: { on: ReturnType<typeof vi.fn> };
   stderr: { on: ReturnType<typeof vi.fn> };
   on: ReturnType<typeof vi.fn>;
@@ -74,12 +82,28 @@ const { spawnMock, spawnSyncMock, mockProcesses } = vi.hoisted(() => {
       const pid = 1000 + processList.length;
       const eventHandlers: Record<string, Array<(...args: unknown[]) => void>> =
         {};
+      const stdinHandlers: Record<string, Array<(...args: unknown[]) => void>> = {};
 
       const proc: MockChildProcess = {
         pid,
         stdin: {
-          write: vi.fn(),
+          write: vi.fn((_line: string, _encoding: string, callback?: (error?: Error | null) => void) => {
+            callback?.();
+            return true;
+          }),
           end: vi.fn(),
+          on: vi.fn(
+            (event: string, handler: (...args: unknown[]) => void) => {
+              if (!stdinHandlers[event]) stdinHandlers[event] = [];
+              stdinHandlers[event].push(handler);
+            },
+          ),
+          emit: (event: string, ...args: unknown[]) => {
+            for (const handler of stdinHandlers[event] ?? []) handler(...args);
+          },
+          destroyed: false,
+          writableEnded: false,
+          writableFinished: false,
         },
         stdout: {
           on: vi.fn(
@@ -1289,6 +1313,50 @@ describe('AgentRuntime — Doc 27 测试门', () => {
       { id: runId, type: 'abort' },
     ]);
     expect(runtime.list().find((item) => item.runId === runId)!.pendingUiRequests).toEqual([]);
+  });
+
+  it('Extension UI: write callback EPIPE 保留 pending 并收敛为可诊断失败', async () => {
+    const runId = await runtime.start({ projectRoot: '/test', name: 'ui-epipe', initialTask: '' });
+    feedStdout(0, JSON.stringify({ type: 'extension_ui_request', id: 'confirm-epipe', method: 'confirm', title: 'Wait' }));
+    const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    mockProcesses[0].stdin.write.mockImplementationOnce((_line: string, _encoding: string, callback?: (error?: Error | null) => void) => {
+      callback?.(error);
+      return false;
+    });
+
+    await expect(runtime.respondToExtensionUI(runId, { id: 'confirm-epipe', confirmed: true })).rejects.toThrow('EPIPE');
+    const snapshot = runtime.list().find((item) => item.runId === runId)!;
+    expect(snapshot).toMatchObject({ status: 'failed', errorCode: 'RPC_STDIN_WRITE_FAILED' });
+    expect(snapshot.pendingUiRequests).toEqual([expect.objectContaining({ id: 'confirm-epipe' })]);
+    expect(snapshot.events).toContainEqual(expect.objectContaining({
+      type: 'rpc_stdin_error', data: expect.objectContaining({ code: 'EPIPE', errorCode: 'RPC_STDIN_WRITE_FAILED' }),
+    }));
+    expect(snapshot.events.some((event) => event.type === 'extension_ui_response')).toBe(false);
+  });
+
+  it('RPC stdin: stream error 有监听器且同一错误只记录一次', async () => {
+    const runId = await runtime.start({ projectRoot: '/test', name: 'stdin-error', initialTask: '' });
+    const error = Object.assign(new Error('stream EPIPE'), { code: 'EPIPE' });
+    mockProcesses[0].stdin.emit('error', error);
+    mockProcesses[0].stdin.emit('error', error);
+    const snapshot = runtime.list().find((item) => item.runId === runId)!;
+    expect(snapshot).toMatchObject({ status: 'failed', errorCode: 'RPC_STDIN_WRITE_FAILED' });
+    expect(snapshot.events.filter((event) => event.type === 'rpc_stdin_error')).toHaveLength(1);
+  });
+
+  it('RPC stdin: writableEnded/destroyed 与已退出进程均拒绝写入', async () => {
+    const endedRunId = await runtime.start({ projectRoot: '/test', name: 'stdin-ended', initialTask: '' });
+    mockProcesses[0].stdin.writableEnded = true;
+    await expect(runtime.prompt(endedRunId, 'late')).rejects.toThrow('RPC stdin 不可写');
+    expect(runtime.list().find((item) => item.runId === endedRunId)).toMatchObject({ status: 'failed', errorCode: 'RPC_STDIN_WRITE_FAILED' });
+
+    const destroyedRunId = await runtime.start({ projectRoot: '/test', name: 'stdin-destroyed', initialTask: '' });
+    mockProcesses[1].stdin.destroyed = true;
+    await expect(runtime.steer(destroyedRunId, 'late')).rejects.toThrow('RPC stdin 不可写');
+
+    const exitedRunId = await runtime.start({ projectRoot: '/test', name: 'stdin-exited', initialTask: '' });
+    mockProcesses[2].emit('exit', 0, null);
+    await expect(runtime.followUp(exitedRunId, 'late')).rejects.toThrow('RPC stdin 不可写');
   });
 
   it('Persistence MVP: 恢复历史时清空 PID/pending，并将旧在线状态降级为 aborted', () => {

@@ -66,6 +66,7 @@ communication:
 
 retention:
   enabled: true                   # session_start 自动清理；也可用 /flux gc
+  stale_runtime_ttl_hours: 1      # 有 instanceId+heartbeat 的失联 RPC runtime 1 小时后归档
   terminal_agent_ttl_hours: 168   # 终态 Agent 活跃记录保留 7 天
   max_terminal_agents: 100        # 每类 registry 最多保留的终态记录
   read_message_ttl_hours: 72      # 已读点对点消息活跃保留时间
@@ -115,6 +116,7 @@ communication:
 
 retention:
   enabled: true
+  stale_runtime_ttl_hours: 1
   terminal_agent_ttl_hours: 168
   max_terminal_agents: 100
   read_message_ttl_hours: 72
@@ -122,7 +124,7 @@ retention:
   orphan_session_ttl_hours: 168
 ```
 
-生命周期清理只处理 `done`、`failed`、`cancelled` 等终态。未读消息、广播消息、群组历史、运行中/阻塞/等待重试的 Agent 和被活跃 Agent 引用的 session 不会自动清理。被处理的消息、session 与终态元数据会写入 `.agentflux/archive/lifecycle/<run-id>/` 的审计 manifest；`/flux gc dry-run` 不创建目录、不修改文件。
+生命周期清理处理 `done`、`failed`、`cancelled` 等终态，也会归档超过 `stale_runtime_ttl_hours`、同时具备 `role=rpc-runtime`、`instanceId` 与有效 `heartbeatAt` 的失联 runtime。普通运行中/阻塞/等待重试 Agent、没有实例身份的 legacy 记录、未读消息、广播消息、群组历史和被活跃 Agent 引用的 session 不会自动清理。旧版 legacy 记录只能用 `/flux gc legacy dry-run <agent-name...>` 预览，再以 `/flux gc legacy <agent-name...>` 显式清理；仍要求超过同一 TTL、无 instanceId、无 runtimePid，且有活跃 AgentFlux run 时 fail-closed。被处理的消息、session 与 Agent 元数据会写入 `.agentflux/archive/lifecycle/<run-id>/` 的审计 manifest；dry-run 不创建目录、不修改文件。
 
 `communication.rpc_inbox_pump` 默认关闭，避免普通 TUI 会话在未声明稳定身份时意外消费信箱。Desktop/Persistent RPC runtime 可通过配置开启，或由受控启动器设置 `AGENTFLUX_RPC_INBOX_PUMP=1`、`AGENTFLUX_AGENT_NAME` 与 `AGENTFLUX_RUNTIME_INSTANCE_ID`。首轮 poll 会等待 `session_start` 返回，避免初始化重入。空闲消息转换为 `prompt`；忙碌时 high/critical 或 `steer` 消息转换为 `steer`，普通消息转换为 `follow_up`。Delivery 只有在对应注入轮次产生成功 assistant 结果后才 ACK；pi 会在同一 lifecycle 内 drain follow-up，因此 ACK 绑定下一次 assistant 结果而不等待第二个 `agent_start`。
 

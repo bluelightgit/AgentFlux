@@ -8,14 +8,14 @@ import { SearchIndex, type SearchResult } from '../lib/SearchIndex';
 // Navigation page entries (mirrors AppShell sidebar)
 // ---------------------------------------------------------------------------
 const PAGE_ENTRIES: { id: PageName; label: string; icon: string }[] = [
-  { id: 'overview', label: 'Overview', icon: 'LayoutDashboard' },
-  { id: 'sessions', label: 'Sessions', icon: 'MessageSquare' },
+  { id: 'workbench', label: 'Control Room', icon: 'Workflow' },
   { id: 'agents', label: 'Agents', icon: 'Users' },
+  { id: 'chat', label: 'Agent Channels', icon: 'MessageCircle' },
+  { id: 'telemetry', label: 'Activity & Cost', icon: 'Activity' },
+  { id: 'sessions', label: 'Sessions', icon: 'MessageSquare' },
+  { id: 'dag', label: 'DAG Inspector', icon: 'Workflow' },
   { id: 'routing', label: 'Routing', icon: 'Route' },
-  { id: 'telemetry', label: 'Telemetry', icon: 'Activity' },
-  { id: 'dag', label: 'DAG', icon: 'Workflow' },
-  { id: 'config', label: 'Config', icon: 'Settings2' },
-  { id: 'settings', label: 'Settings', icon: 'Settings' },
+  { id: 'config', label: 'Configuration', icon: 'Settings2' },
 ];
 
 // ---------------------------------------------------------------------------

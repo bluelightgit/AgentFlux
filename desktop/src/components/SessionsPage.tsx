@@ -221,7 +221,7 @@ function FilterBar({
   onSort: (v: SortKey) => void;
 }): React.ReactElement {
   const selectClass =
-    "flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200";
+    "min-w-0 w-full rounded-sm border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200";
   return (
     <div className="flex flex-col gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-700">
       <div className="relative">
@@ -238,7 +238,7 @@ function FilterBar({
           className="w-full rounded-md border border-slate-200 bg-white py-1 pl-7 pr-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
         />
       </div>
-      <div className="flex items-center gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <select
           value={modelFilter}
           onChange={(e) => onModelFilter(e.target.value)}
@@ -265,7 +265,7 @@ function FilterBar({
         <select
           value={sort}
           onChange={(e) => onSort(e.target.value as SortKey)}
-          className={selectClass}
+          className={`${selectClass} col-span-2`}
           title="Sort sessions"
         >
           {SORT_OPTIONS.map((o) => (
@@ -298,7 +298,7 @@ function SessionTabs({
 }): React.ReactElement | null {
   if (openTabs.length === 0) return null;
   return (
-    <div className="flex items-stretch gap-1 border-b border-slate-200 bg-slate-50 px-2 pt-1 dark:border-slate-700 dark:bg-slate-900/40">
+    <div className="flex min-w-0 items-stretch gap-1 overflow-x-auto border-b border-slate-200 bg-slate-50 px-2 pt-1 dark:border-slate-700 dark:bg-slate-900/40">
       {openTabs.map((fileName) => {
         const meta = metaByFile.get(fileName);
         const label = meta ? meta.agentName || meta.sessionId : fileName;
@@ -306,7 +306,7 @@ function SessionTabs({
         return (
           <div
             key={fileName}
-            className={`group flex items-center gap-1 rounded-t border border-b-0 px-3 py-1.5 text-sm ${
+            className={`group flex max-w-56 shrink-0 items-center gap-1 rounded-t border border-b-0 px-3 py-1.5 text-sm ${
               isActive
                 ? "border-slate-200 bg-white text-blue-700 dark:border-slate-700 dark:bg-slate-800 dark:text-blue-300"
                 : "border-transparent bg-white/60 text-slate-600 hover:bg-white dark:bg-slate-800/40 dark:text-slate-300 dark:hover:bg-slate-800"
@@ -536,9 +536,9 @@ export const SessionsPage: React.FC = () => {
   const activeMeta = selectedSessionFile ? metaByFile.get(selectedSessionFile) : null;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-w-0 overflow-hidden">
       {/* ─── Left panel — session list ─────────────────────────────────── */}
-      <div className="flex w-80 shrink-0 flex-col border-r border-slate-200 dark:border-slate-700">
+      <div className="flex w-[clamp(220px,28vw,320px)] shrink-0 flex-col border-r border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between px-3 py-2">
           <span className="text-lg font-bold text-slate-800 dark:text-slate-100">
             Sessions
@@ -601,7 +601,7 @@ export const SessionsPage: React.FC = () => {
       </div>
 
       {/* ─── Right panel — tab bar + message stream ────────────────────── */}
-      <div className="flex flex-1 flex-col overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <SessionTabs
           openTabs={openTabs}
           activeTab={activeTab}

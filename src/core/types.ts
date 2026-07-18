@@ -134,6 +134,7 @@ export interface RoutingConfig {
 
 export interface RetentionConfig {
 	enabled: boolean;
+	stale_runtime_ttl_hours: number;
 	terminal_agent_ttl_hours: number;
 	max_terminal_agents: number;
 	read_message_ttl_hours: number;
@@ -181,6 +182,7 @@ export const DEFAULT_CONFIG: FluxConfig = {
 	routing: { static_signals: true, budget_aware: true, experience_aware: false, override_mode: "suggest" },
 	retention: {
 		enabled: true,
+		stale_runtime_ttl_hours: 1,
 		terminal_agent_ttl_hours: 168,
 		max_terminal_agents: 100,
 		read_message_ttl_hours: 72,

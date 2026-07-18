@@ -153,6 +153,7 @@ export const AgentsPage: React.FC = () => {
 
   const [definitions, setDefinitions] = useState<AgentDefinition[]>([]);
   const [loadingDefs, setLoadingDefs] = useState(false);
+  const [activeView, setActiveView] = useState<'roster' | 'activity' | 'capabilities'>('roster');
 
   // Load agent definitions from .agentflux/agents/*.md
   useEffect(() => {
@@ -313,9 +314,29 @@ export const AgentsPage: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4" data-testid="agents-control-page">
-      <AgentRegistryPanel />
+    <div className="min-w-0 space-y-4" data-testid="agents-control-page">
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--af-line)] pb-4">
+        <div>
+          <p className="af-kicker">Operate / Agents</p>
+          <h1 className="mt-1 text-xl font-semibold text-[var(--af-ink)]">Agent workspace</h1>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Choose one view: roster, execution activity, or capability policy.</p>
+        </div>
+        <button type="button" onClick={handleRefresh} className="af-filter-chip" title="Refresh agent status"><Icon name="RefreshCw" size={16} /><span>Refresh</span></button>
+      </header>
 
+      <nav className="flex max-w-full gap-1 overflow-x-auto border-b border-[var(--af-line)]" aria-label="Agent workspace views">
+        {([
+          ['roster', 'Roster', 'Users'],
+          ['activity', 'Activity', 'Activity'],
+          ['capabilities', 'Capabilities', 'Target'],
+        ] as const).map(([id, label, icon]) => (
+          <button key={id} type="button" onClick={() => setActiveView(id)} aria-current={activeView === id ? 'page' : undefined} className={`flex shrink-0 items-center gap-2 border-b-2 px-4 py-2 text-xs font-semibold ${activeView === id ? 'border-[var(--af-operate)] text-[var(--af-operate)]' : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}><Icon name={icon} size={15} />{label}</button>
+        ))}
+      </nav>
+
+      {activeView === 'roster' && <AgentRegistryPanel />}
+
+      {activeView === 'activity' && (
       <section className="overflow-hidden rounded-sm border border-[var(--af-line)] bg-[var(--af-sidebar)] text-slate-100">
         <div className="flex items-center justify-between border-b border-slate-700 px-4 py-3">
           <div>
@@ -357,27 +378,9 @@ export const AgentsPage: React.FC = () => {
           </div>
         )}
       </section>
+      )}
 
-      {/* Header */}
-      <header className="flex items-start justify-between border-b border-[var(--af-line)] pb-4">
-        <div>
-          <p className="af-kicker">Operate / Registry</p>
-          <h1 className="mt-1 text-xl font-semibold text-[var(--af-ink)]">Agent operations</h1>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Agent definitions, live status, and per-agent telemetry.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          className="af-filter-chip"
-          title="Refresh agent status"
-        >
-          <Icon name="RefreshCw" size={16} className="text-slate-500 dark:text-slate-400" />
-          <span>Refresh</span>
-        </button>
-      </header>
-
+      {activeView === 'roster' && <>
       {/* Section 1: Agent Definitions */}
       <section className="af-panel">
         <h2 className="af-panel-title mb-4">
@@ -402,7 +405,9 @@ export const AgentsPage: React.FC = () => {
           </div>
         )}
       </section>
+      </>}
 
+      {activeView === 'activity' && <>
       {/* Section 3: Agent Telemetry */}
       <section className="af-panel">
         <h2 className="af-panel-title mb-4">
@@ -431,7 +436,9 @@ export const AgentsPage: React.FC = () => {
       <div className="mt-4">
         <AgentRetryHistory />
       </div>
+      </>}
 
+      {activeView === 'capabilities' && <>
       <div className="mt-4">
         <AgentToolMatrix />
       </div>
@@ -443,6 +450,7 @@ export const AgentsPage: React.FC = () => {
       <div className="mt-4">
         <AgentComparisonTable />
       </div>
+      </>}
     </div>
   );
 };

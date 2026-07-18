@@ -1,4 +1,5 @@
-import { boundedNodeTimeout, parsePlannerTaskDAG, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/extension/dag-executor";
+import { boundedNodeTimeout, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/extension/dag-executor";
+import { resolve } from "node:path";
 
 const node = (id: string, dependsOn: string[] = []): TaskNode => ({
 	id, title: id, role: "implementer", dependsOn, parallelizable: false,
@@ -43,6 +44,15 @@ try { parsePlannerTaskDAG("not json", "fallback"); }
 catch { unsafePlannerOutputRejected = true; }
 check("planner repair remains fail-closed without JSON", unsafePlannerOutputRejected, "rejected");
 check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_000, 150_000, 100_000) === 50_000, `${boundedNodeTimeout(600_000, 150_000, 100_000)}ms`);
+
+const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
+	models: {
+		"deepseek-v4-pro": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
+		"deepseek-v4-flash": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
+	},
+	roles: { planner: { model: "deepseek-v4-pro", thinking: "off" } },
+}, "planner");
+check("DAG planner honors role model/provider configuration", configuredPlanner.model === "deepseek-v4-pro" && configuredPlanner.provider === "octopus-anthropic" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
 
 const failed = checks.filter(([, passed]) => !passed);
 console.log(`\nDAG contracts: ${checks.length - failed.length}/${checks.length} passed`);

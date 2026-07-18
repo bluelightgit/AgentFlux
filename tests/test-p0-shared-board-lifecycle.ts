@@ -19,6 +19,15 @@ const fluxDir = join(root, ".agentflux");
 try {
 	const boardA = new SharedBoard(fluxDir);
 	const boardB = new SharedBoard(fluxDir);
+	boardA.registerRuntimeAgent({ name: "runtime-success", role: "rpc-runtime", status: "running", instanceId: "instance-success" });
+	check(boardA.finalizeRuntimeAgentPresence("runtime-success", "instance-success", 0)
+		&& boardA.getAgent("runtime-success")?.status === "done", "runtime 正常退出原子收敛为 done");
+	boardA.registerRuntimeAgent({ name: "runtime-failure", role: "rpc-runtime", status: "running", instanceId: "instance-failure" });
+	check(boardA.updateAgentPresence("runtime-failure", { status: "failed" }, "instance-failure"), "provider 失败先进入 failed 终态");
+	check(boardA.finalizeRuntimeAgentPresence("runtime-failure", "instance-failure", 0)
+		&& boardA.getAgent("runtime-failure")?.status === "failed", "随后进程 exit 0 不覆盖 failed 终态");
+	check(!boardA.finalizeRuntimeAgentPresence("runtime-failure", "foreign-instance", 0)
+		&& boardA.getAgent("runtime-failure")?.status === "failed", "退出收敛受 instanceId fencing 保护");
 	const first = boardA.createTask({
 		title: "first",
 		status: "pending",
