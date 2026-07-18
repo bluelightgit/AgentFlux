@@ -12,6 +12,23 @@
 
 `implemented/wired` 描述代码接线情况，`offline/live verified` 描述证据等级，`experimental/released` 描述产品成熟度；三者不能相互替代。例如“wired / offline verified / experimental”表示入口可达且自动化测试通过，但尚未完成真实 provider 灰度。
 
+## 架构迁移状态
+
+2026-07-18 的稳定基线为 `28391a1`。后续产品模型以 [28 - Agent 生命周期与工作方式重构](./28-agent-workstyle-redesign.md) 为目标设计，但本节所述迁移目前仍是 `designed`，不能当作已接线能力：
+
+- 当前生产入口仍由 `MODE_CAPABILITIES` 和 `TaskRoutePlan` 表达，M1/M2/M5 分别进入 main、main_with_subagent 和 DAG。
+- 目标入口改为 Direct、Team、Workflow、Community；M3 下沉为 fork 创建来源，M4 下沉为 Persistent Specialist 生命周期，M6 下沉为通用 model policy。
+- 当前 Desktop 的 New Task 仍写入 `modePolicy`；`workStyle`、`agentKind`、`agentOrigin`、fork lineage 和 Community Issue 尚未进入运行时 schema。
+- 迁移必须先增加兼容字段和 adapter，再切换 Desktop，最后才停止创建旧模式配置。迁移期间 telemetry 同时保留 `requestedMode` 和新的正交字段。
+
+| 目标能力 | 当前等级 | 下一发布门 |
+|---|---|---|
+| WorkStyle 兼容层 | designed | M1/M2/M5 与 Direct/Team/Workflow 双向映射及回归测试 |
+| AgentFactory fresh/template/fork | designed；已有分散创建代码 | 统一实例注册、权限快照、lineage、终态回收 |
+| Persistent Specialist | implemented / experimental | 接入统一 participant registry 与 cache generation |
+| Community | designed | Issue/Claim/Proposal/Review 状态机、预算门和 Desktop Issue Room |
+| Desktop 新信息架构 | designed | New Task、Agents、Issues、Activity、Configuration 五入口闭环 |
+
 ## 状态速览
 
 ### 已完成并接入
@@ -119,10 +136,10 @@
 
 ## 下一阶段优先级
 
-1. 在已完成的 nested/DAG run 与 cost Execution family 基础上，继续关联 Message V2 delivery/ACK 与 artifact provenance；关联前不把目录/group membership 伪装成通信或团队执行拓扑。
-2. 将 Desktop 假派发与 legacy 消息写入替换为类型化 core operator contract；Message V2 发送必须保留 envelope/delivery/ACK，M5 必须有真实 DAG 启动与状态归因。
-3. 增加 multi-select、批量 fan-out、Agent group、任务模板、消息编排和结果汇总；Communication Lanes 增加 task/execution/time-window scope，后续 delivery traffic 图层只能消费真实逐接收者投递事件，极端数量再引入虚拟列表。
-4. 继续把 Observe/Advanced 历史页面迁移到统一 token/primitives，补 `prefers-reduced-motion`、窄屏和真实窗口视觉回归。
-5. 对 Desktop runtime readiness、Retry、可调布局做长时间 soak；根据真实 provider 首帧分布校准 timeout。packaged app 随附兼容 Node，避免 PATH 依赖。
-6. 为 lifecycle archive 增加磁盘 TTL/总容量上限和独立 dry-run；增加 runtime history 跨 schema 迁移与 Windows/Linux 长时 soak。
-7. 自动路由 regret/calibration、模型/拓扑优化、OS 沙箱与 MCP server 级隔离后置；当前由用户或主 Agent 选择模式，MCP 非空策略继续 fail-closed。
+1. 完成 R1 Core 兼容层：新增 `WorkStyle`、`AgentKind`、`AgentOrigin` 和 deprecated mode adapter，不改变现有 M1/M2/M5 执行结果。
+2. 建立统一 AgentFactory/participant registry，先收敛 fresh/template 创建，再实现确定 snapshot 的 fork、lineage、并行写入 claim/lock 与终态回收。
+3. 完成 R2 Desktop 精简：New Task 改用工作方式，Agents 只管理模板与 Persistent Specialists；Ephemeral/fork 只在 Execution Inspector 内展示。
+4. 在 nested/DAG execution family 上关联 Message V2 delivery/ACK、artifact provenance 和 participant lineage；关联前不把目录/group membership 伪装成执行拓扑。
+5. 实现 Community MVP 的 Issue/Claim/Proposal/Review 状态机与类型化 operator contract，再开发 Issue Room；自由文本讨论不能直接改变任务完成状态。
+6. 继续统一视觉 primitives、补 `prefers-reduced-motion`、窄屏与真实窗口回归，并对 runtime readiness、Retry、可调布局和回收做长时间 soak。
+7. 自动路由 regret/calibration、模型/拓扑优化、OS 沙箱与 MCP server 级隔离后置；近期由用户或主 Agent选择工作方式，MCP 非空策略继续 fail-closed。

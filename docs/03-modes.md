@@ -1,5 +1,7 @@
 # 03 - 六种工作模式
 
+> **历史设计 / 已冻结。** 2026-07-18 起，AgentFlux 不再继续扩展用户可见的 M1–M6。新的规范见 [28 - Agent 生命周期与工作方式重构](28-agent-workstyle-redesign.md)：M1/M2/M5 迁移为 Direct/Team/Workflow；M3 fork 改为 Agent 创建来源；M4 改为 Persistent Specialist 生命周期；M6 改为通用异构模型策略。本文保留用于解释旧配置和实验来源。
+
 把 [02](02-dimensions.md) 的维度组合收敛成用户能直接理解的六种典型模式。每种模式在 Trilemma 三角上有一个落点。
 
 ## 三角落点图

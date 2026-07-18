@@ -12,12 +12,28 @@ Desktop 的第一职责是操作 AgentFlux，而不是重复展示 telemetry 图
 
 界面参考 [Paperclip](https://github.com/paperclipai/paperclip) 的 operator control plane 思路，但不复制其 company/CEO/雇员隐喻。借鉴点是任务中心、Agent roster、threaded activity、属性检查器、待处理事项和随时介入；AgentFlux 保留 workspace、execution mode、主/子 Agent 和 DAG 的自身语义。每个默认页面必须依次回答：正在发生什么、是否需要用户、用户现在能做什么。
 
+### 下一版信息架构决策
+
+[28 - Agent 生命周期与工作方式重构](./28-agent-workstyle-redesign.md) 是下一版 Desktop 的目标语义，当前页面和 schema 尚未完成迁移。目标导航精简为：
+
+1. **Workbench**：创建并操作 Direct、Team、Workflow 任务。
+2. **Agents**：只管理角色模板和 Persistent Specialists。
+3. **Issues**：创建 Community Issue，并在 Issue Room 中讨论、认领、执行和审查。
+4. **Activity**：查看 execution、消息、artifact、成本与 lineage。
+5. **Configuration**：配置模型、模板、预算和运行环境。
+
+Ephemeral Subagent 和 forked Agent 是 execution participant，不是长期 roster 条目。New Task 不再要求用户理解 M 编号；旧 M1–M6 只在历史记录和兼容诊断中显示 deprecated 映射。Communication Graph 保留为按需诊断，不再承担默认协作入口；日常工作优先呈现 claim、依赖、阻塞、待审查结果和可执行操作。
+
+迁移顺序必须是 core 兼容字段与 adapter → Desktop 读取新旧 schema → New Task 写入新 schema → 停止创建旧模式配置。当前实现仍以下述“一期对象模型”为准。
+
 ### Control Room 一期对象模型
 
 - `taskId`：用户提交的工作目标；包含 title、prompt、priority 和 mode policy。
 - `executionId`：一次任务执行；负责状态、成本和重试归因。
 - `runId`：具体 pi runtime；一期至少表示 lead/main runtime，不能把尚未关联的 nested subagent 伪装成已聚合。
 - `modePolicy`：`agent_decides` 或用户固定 `M1`/`M2`/`M5`。固定模式按任务/进程传入，不能用全局 override 文件影响其他并发任务。
+
+目标 schema 会增加 `workStyle`、participant 的 `agentKind`/`agentOrigin` 以及 `parentAgentId`、`forkPoint`、`contextSnapshotId` lineage。切换前不得只在 renderer 内重命名 `modePolicy`，否则 Retry、history、telemetry 和 core executor 会出现语义分叉。
 
 Control Room 使用三栏：左侧 runtime/Agent roster，中间 task activity/thread，右侧 execution inspector。顶部只有一个主操作 `New Task`；Routing、Telemetry、DAG 配置和低频设置降为 Observe/Advanced。窗口和 Control Room 容器同时满足宽度门槛时，左右栏可通过两个 `separator` 拖拽或键盘 Arrow/Home/End 调宽；宽度使用 versioned localStorage 持久化并可 Reset。左右栏联合 clamp，必须保留中心栏最小宽度；窄屏降级为纵向且不显示无效手柄。
 

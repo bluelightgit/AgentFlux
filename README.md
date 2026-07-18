@@ -83,7 +83,7 @@ After installation, AgentFlux loads automatically in any pi session.
 
 ## Documentation
 
-See `docs/` for 27 design/status documents. Start with [`docs/26-implementation-status.md`](docs/26-implementation-status.md): it distinguishes designed, implemented, wired, verified, and released capabilities so roadmap intent is not confused with production behavior.
+See `docs/` for design and status documents. Start with [`docs/26-implementation-status.md`](docs/26-implementation-status.md) for verified implementation status and [`docs/28-agent-workstyle-redesign.md`](docs/28-agent-workstyle-redesign.md) for the planned simplification from M1–M6 to Agent lifecycle, creation origin (including context fork), and four work styles.
 
 ## Verification
 
