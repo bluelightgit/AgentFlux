@@ -1,4 +1,4 @@
-import { boundedNodeTimeout, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/extension/dag-executor";
+import { boundedNodeTimeout, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
 import { resolve } from "node:path";
 
 const node = (id: string, dependsOn: string[] = []): TaskNode => ({

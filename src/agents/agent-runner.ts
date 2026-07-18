@@ -1,6 +1,6 @@
 /**
  * AgentFlux Extension — subagent runner (F1-7)
- * 文档依据: docs/03-modes M2, 06-cache-strategy L1 跨 session, 10-pi-integration §2
+ * 统一执行一次性与持久 Agent，并负责并行、预算、权限和进程生命周期。
  *
  * 增量价值 (docs 反思 4b174b47): 不重写 subagent 原语, 而是确保:
  *   1. 子进程加载 subagent-entry.ts (精简入口) → 前缀布局自动应用, 但不注册 tool/command
@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
-import { parseFrontmatter } from "../core/role-manager";
+import { parseFrontmatter } from "./templates";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { ModelEntry, RoleRequirement } from "../core/model-capability";
 import { rankModels } from "../core/model-capability";
@@ -38,17 +38,18 @@ import {
 	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, writeEffectiveCapabilitySnapshot,
 	type CapabilityPolicyInput, type WorkspaceCapabilityInput,
 } from "../core/capability-policy";
+import { createEphemeralRecord, finishEphemeralRecord } from "./agent-lifecycle";
 
-// ──────────────────────────────── M2-1: 并行 subagent ────────────────────────────────
+// ──────────────────────────────── Parallel Agents ────────────────────────────────
 
-export interface ParallelSubagentTask {
-	agent: SubagentDef;
+export interface ParallelAgentTask {
+	agent: AgentTemplate;
 	task: string;
 	label?: string;             // 可选标签, 用于结果区分 (默认用 agent.name)
 }
 
 export interface ParallelRunResult {
-	results: SubagentRunResult[];
+	results: AgentRunResult[];
 	wallClockMs: number;        // 并行总耗时
 	sumIndividualMs: number;    // 各 agent 耗时之和 (用于计算加速比)
 	speedupRatio: number;       // sumIndividual / wallClock (1.0=无加速, 2.0=理想双线程)
@@ -58,7 +59,7 @@ export interface ParallelRunResult {
 }
 
 /**
- * 并行运行多个 subagent (M2-1).
+ * 并行运行多个相互独立的 Agent 任务。
  *
  * 每个 subagent 是独立子进程, 天然并行.
  * 一个 agent 失败不影响其他 agent (隔离错误).
@@ -67,15 +68,15 @@ export interface ParallelRunResult {
  * @param common 共享参数 (cwd, sessionId, telemetry, prefixLayout, pricing)
  * @returns ParallelRunResult 包含所有结果 + 并行性能指标
  */
-export async function runSubagentsParallel(
-	tasks: ParallelSubagentTask[],
+export async function runAgentsParallel(
+	tasks: ParallelAgentTask[],
 	common: {
 		cwd: string;
 		sessionId: string;
 		telemetry?: TelemetryWriter;
 		prefixLayout: boolean;
 		pricing?: PricingTable;
-		persistent?: boolean;               // M2-2: 持久 session
+		persistent?: boolean;
 		sessionIds?: Map<string, string>;   // per-label session ID (team-workflow 用)
 		sessionDir?: string;                // 自定义 session 目录
 		timeoutMs?: number;                 // 超时 (默认 120000)
@@ -84,9 +85,16 @@ export async function runSubagentsParallel(
 		signal?: AbortSignal;               // 调用方取消时终止所有子进程
 		maxCostUsd?: number;                // attempt 之间的实际成本硬停止
 		taskId?: string;                   // 父任务关联；每个并行 child 共享 taskId
+		invocationOverride?: { command: string; args: string[] };
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
+	const lifecycleRecords = tasks.map(task => common.persistent ? null : createEphemeralRecord({
+		name: task.agent.name,
+		role: task.agent.role ?? task.agent.name,
+		sessionId: common.sessionId,
+		telemetry: common.telemetry,
+	}));
 
 	// 为每个 task 记录独立开始时间, 用于计算 sumIndividualMs
 	const timings: Array<{ start: number; end: number }> = [];
@@ -97,7 +105,7 @@ export async function runSubagentsParallel(
 			const individualStart = Date.now();
 			// per-label session ID 优先, fallback 到 common.sessionId
 			const sid = (t.label ? common.sessionIds?.get(t.label) : undefined) ?? common.sessionId;
-			return runSubagent({
+			return runAgent({
 				cwd: common.cwd,
 				agent: t.agent,
 				task: t.task,
@@ -114,6 +122,7 @@ export async function runSubagentsParallel(
 				signal: common.signal,
 				maxCostUsd: common.maxCostUsd,
 				taskId: common.taskId,
+				invocationOverride: common.invocationOverride,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -124,7 +133,7 @@ export async function runSubagentsParallel(
 	const wallClockMs = Date.now() - wallStart;
 
 	// 收集结果
-	const results: SubagentRunResult[] = [];
+	const results: AgentRunResult[] = [];
 	const errors: string[] = [];
 	let totalCost = 0;
 	let allSucceeded = true;
@@ -133,6 +142,8 @@ export async function runSubagentsParallel(
 		const s = settled[i];
 		if (s.status === "fulfilled") {
 			results.push(s.value);
+			const record = lifecycleRecords[i];
+			if (record) finishEphemeralRecord(record, s.value.exitCode, s.value.usage.cost, common.telemetry, common.sessionId);
 			totalCost += s.value.usage.cost;
 			if (s.value.exitCode !== 0 || s.value.errorMessage) {
 				allSucceeded = false;
@@ -148,6 +159,8 @@ export async function runSubagentsParallel(
 				usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 				model: null, errorMessage: errMsg,
 			});
+			const record = lifecycleRecords[i];
+			if (record) finishEphemeralRecord(record, -1, 0, common.telemetry, common.sessionId);
 		}
 	}
 
@@ -161,7 +174,7 @@ export async function runSubagentsParallel(
 }
 
 /** 格式化并行 subagent 结果为工具返回 content */
-export function formatParallelResults(r: ParallelRunResult): string {
+export function formatParallelAgentResults(r: ParallelRunResult): string {
 	const lines: string[] = [
 		`[AgentFlux parallel: ${r.results.length} agents]`,
 		`wall ${(r.wallClockMs / 1000).toFixed(1)}s · sum ${(r.sumIndividualMs / 1000).toFixed(1)}s · speedup ${r.speedupRatio.toFixed(2)}x · $${r.totalCost.toFixed(4)} · ${r.allSucceeded ? "all ok" : `${r.errors.length} failed`}`,
@@ -184,7 +197,7 @@ export function formatParallelResults(r: ParallelRunResult): string {
 	return lines.join("\n");
 }
 
-export interface SubagentDef {
+export interface AgentTemplate {
 	name: string;
 	role?: string;
 	description: string;
@@ -195,11 +208,11 @@ export interface SubagentDef {
 	mcpServers?: string[];
 	workspace?: WorkspaceCapabilityInput;
 	systemPrompt: string;
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	communication?: CommunicationPolicyInput; // 角色模板默认；运行实例可收窄或增加完成门
 }
 
-export interface SubagentRunResult {
+export interface AgentRunResult {
 	agent: string;
 	exitCode: number;
 	output: string;
@@ -226,7 +239,7 @@ export interface SubagentRunResult {
 }
 
 /** 从 .agentflux/agents/*.md 加载 agent 定义 (frontmatter + body), 回落到内建 reviewer */
-export function loadSubagent(cwd: string, name: string): SubagentDef | null {
+export function loadAgentTemplate(cwd: string, name: string): AgentTemplate | null {
 	// agent 名会参与文件路径和 session id，禁止路径穿越与分隔符。
 	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(name)) return null;
 	const dir = join(cwd, ".agentflux", "agents");
@@ -238,7 +251,7 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 			if (!frontmatter.name) return null;
 			const tools = frontmatter.tools?.split(",").map((t) => t.trim()).filter(Boolean);
 			const skills = frontmatter.skills?.split(",").map((skill) => skill.trim()).filter(Boolean);
-			const thinking = frontmatter.thinking as SubagentDef["thinking"] | undefined;
+			const thinking = frontmatter.thinking as AgentTemplate["thinking"] | undefined;
 			return {
 				name: frontmatter.name, description: frontmatter.description ?? "",
 				tools: tools?.length ? tools : undefined, model: frontmatter.model,
@@ -271,9 +284,8 @@ export function loadSubagent(cwd: string, name: string): SubagentDef | null {
 	}
 	return null;
 }
-
 /** 合并项目共享 Skill 与角色 Skill；返回副本，避免污染缓存或调用方定义。 */
-export function withSharedSkills(agent: SubagentDef, sharedSkills?: string[]): SubagentDef {
+export function withSharedSkills(agent: AgentTemplate, sharedSkills?: string[]): AgentTemplate {
 	const skills = [...new Set([...(sharedSkills ?? []), ...(agent.skills ?? [])]
 		.map(skill => skill.trim())
 		.filter(Boolean))];
@@ -330,9 +342,9 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * @param model 覆盖 agent.model
  * @param provider 覆盖 agent.provider
  * @param pricing 父进程用价格表重算子进程成本
- * @param persistent M2-2: true=保留 session 文件可续接, false=一次性 ephemeral
- * @param sessionDir M2-2: 持久 session 存储目录, 默认 .agentflux/runtime/sessions/
- * @param thinking M2-4: 覆盖 agent.thinking 的 reasoning effort 级别
+ * @param persistent true=保留 session 文件可续接, false=一次性 ephemeral
+ * @param sessionDir 持久 session 存储目录, 默认 .agentflux/runtime/sessions/
+ * @param thinking 覆盖 agent.thinking 的 reasoning effort 级别
  */
 // ── SharedBoard 集成: agent 启动前读 inbox + 注册 ──
 
@@ -423,7 +435,7 @@ export function selectFallbackModel(
 }
 
 /** 注册 agent 到 SharedBoard agent 注册表 */
-function registerAgentInBoard(agent: SubagentDef, task: string, cwd: string, model?: string, provider?: string): void {
+function registerAgentInBoard(agent: AgentTemplate, task: string, cwd: string, model?: string, provider?: string): void {
 	try {
 		const board = new SharedBoard(join(cwd, ".agentflux"));
 		board.registerAgent({
@@ -451,7 +463,7 @@ function updateAgentStatusInBoard(agentName: string, status: "done" | "failed", 
 const activeSubagentProcesses = new Map<string, ChildProcess>();
 
 /** 当前进程内仍在运行的 pi 子进程，供状态页和取消测试使用。 */
-export function getActiveSubagentRunIds(): string[] {
+export function getActiveAgentRunIds(): string[] {
 	return [...activeSubagentProcesses.keys()];
 }
 
@@ -491,9 +503,9 @@ function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
 	});
 }
 
-export async function runSubagent(opts: {
+export async function runAgent(opts: {
 	cwd: string;
-	agent: SubagentDef;
+	agent: AgentTemplate;
 	task: string;
 	sessionId: string;
 	telemetry?: TelemetryWriter;
@@ -501,10 +513,10 @@ export async function runSubagent(opts: {
 	model?: string;
 	provider?: string;
 	pricing?: PricingTable;  // F1-14: 父进程用价格表重算子进程成本
-	persistent?: boolean;     // M2-2: 持久 session
+	persistent?: boolean;
 	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
-	sessionDir?: string;      // M2-2: 自定义 session 目录
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4
+	sessionDir?: string;
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
 	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
 	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
@@ -522,7 +534,7 @@ export async function runSubagent(opts: {
 	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
 	invocationOverride?: { command: string; args: string[] };
-}): Promise<SubagentRunResult> {
+}): Promise<AgentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
 	const runStartedAt = Date.now();
 	const timeoutMs = Math.max(1, opts.timeoutMs ?? 120000);
@@ -640,9 +652,9 @@ export async function runSubagent(opts: {
 	}
 
 	let retryCount = 0;
-	let lastResult: SubagentRunResult | null = null;
+	let lastResult: AgentRunResult | null = null;
 	let attemptCount = 0;
-	const aggregateUsage: SubagentRunResult["usage"] = {
+	const aggregateUsage: AgentRunResult["usage"] = {
 		turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
 	};
 
@@ -691,7 +703,7 @@ export async function runSubagent(opts: {
 		// 每次迭代重建 args (因为 tmpDir 路径会变)
 		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--no-context-files", "--approve"];
 
-		// M2-2: 持久 session vs 一次性 ephemeral
+		// Persistent Agent 复用 session；Ephemeral Agent 不保留 session。
 		if (opts.persistent) {
 			const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
 			const rawSessionId = `${opts.persistentSessionId ?? `flux-${agent.name}`}-cap-${capabilityGeneration}`;
@@ -729,7 +741,7 @@ export async function runSubagent(opts: {
 		}
 		attemptArgs.push(`Task: ${taskWithInbox}`);
 
-		const result: SubagentRunResult = {
+		const result: AgentRunResult = {
 			agent: agent.name, exitCode: 0, output: "",
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
@@ -955,7 +967,7 @@ export async function runSubagent(opts: {
 		}
 	}
 
-	// 默认兼容模式：只有完整成功（含 communication gate）才确认启动前 inbox。
+	// 只有完整成功（含 communication gate）才确认启动前 inbox。
 	// 显式 ACK 契约必须由 agent 工具在结束前完成。
 	if (finalResult.exitCode === 0 && !finalResult.errorMessage
 		&& !communicationPolicy.requireExplicitInboxAck && inboxInjection.v2MessageIds.length > 0) {
@@ -1010,7 +1022,7 @@ export async function runSubagent(opts: {
 }
 
 /** 格式化 subagent 结果为工具返回 content */
-export function formatSubagentResult(r: SubagentRunResult): string {
+export function formatAgentRunResult(r: AgentRunResult): string {
 	const hitRate = r.usage.cacheRead / (r.usage.cacheRead + r.usage.input + 1e-9);
 	const retryInfo = r.retryCount && r.retryCount > 0 ? ` · retries=${r.retryCount}` : "";
 	const succeeded = r.exitCode === 0 && !r.errorMessage;

@@ -1,7 +1,7 @@
 {
   "name": "agentflux",
   "version": "0.1.0",
-  "description": "Agent working mode router — multi-mode orchestration + intelligent routing for pi coding agent",
+  "description": "A multi-Agent workbench for pi: direct work, dynamic teams, DAG workflows and issue communities",
   "keywords": [
     "pi-package",
     "agent",
@@ -38,12 +38,8 @@
   "scripts": {
 	"typecheck": "tsc -p tsconfig.json",
 	"test": "npm run test:unit",
-    "test:unit": "tsx tests/test-model-routing.ts && tsx tests/test-f3-3-4-experience-step-routing.ts && tsx tests/test-f3-5-6-7-sidecar-budget-rl.ts && tsx tests/test-f3-8-override-auto.ts && tsx tests/test-m2-5-quality-gate.ts && tsx tests/test-team-workflow-semantics.ts && tsx tests/test-p0-shared-board-lifecycle.ts && tsx tests/test-telemetry-experience-import.ts && tsx tests/test-routing-execution-plan.ts && tsx tests/test-desktop-mode-matrix.ts && tsx tests/test-r0-contracts.ts && tsx tests/test-lifecycle-gc.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-rpc-inbox-pump.ts && tsx tests/test-capability-policy.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-self-maintenance.ts",
-	"test:live": "tsx tests/test-m2-1-parallel-subagent.ts && tsx tests/test-m5-1-2-3-4-dag-executor.ts",
-	"test:desktop-modes-zero-cost": "npm --prefix desktop run electron:compile && tsx tests/live/test-desktop-mode-runtime-smoke.ts",
-	"test:all-modes-zero-cost": "npm --prefix desktop run electron:compile && tsx tests/live/test-all-core-modes-runtime-smoke.ts",
-    "test:desktop-retry-zero-cost": "npm --prefix desktop run electron:compile && tsx tests/live/test-desktop-retry-runtime-smoke.ts",
-    "test:desktop-deepseek-live": "npm --prefix desktop run electron:compile && tsx tests/live/test-desktop-deepseek-provider-smoke.ts",
+	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts",
+	"test:live": "tsx tests/live/test-core-deepseek-smoke.ts",
 	"verify": "npm run typecheck && npm run test:unit"
   }
 }

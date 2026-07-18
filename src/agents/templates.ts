@@ -13,9 +13,8 @@
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
-import { assignModel, type AssignResult } from "./model-capability";
-import { communicationPolicyFromFrontmatter, type CommunicationPolicyInput } from "./communication-policy";
-import type { WorkspaceCapabilityInput } from "./capability-policy";
+import { communicationPolicyFromFrontmatter, type CommunicationPolicyInput } from "../core/communication-policy";
+import type { WorkspaceCapabilityInput } from "../core/capability-policy";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
@@ -30,27 +29,9 @@ export interface RoleDefinition {
 	workspace?: WorkspaceCapabilityInput;
 	systemPrompt?: string;       // 角色 system prompt
 	source: "md" | "json" | "builtin";  // 来源
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";  // M2-4: reasoning effort
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 	/** Role-template defaults. A registered/run instance may apply a narrower override. */
 	communication?: CommunicationPolicyInput;
-}
-
-export interface RoleInstance {
-	name: string;                // 唯一实例名
-	role: string;                // 角色模板名
-	model: string;               // 运行时解析出的模型
-	provider?: string;           // pi provider 名称
-	assignSource: AssignResult;  // 模型分配详情
-	session: string;             // pi session ID
-	status: "idle" | "running" | "blocked" | "done" | "failed" | "cancelled";
-	task: string;
-	createdAt: string;
-	updatedAt: string;
-	output?: string;             // 产出物路径 (handoff 等)
-}
-
-export interface Registry {
-	instances: RoleInstance[];
 }
 
 // ──────────────────────────────── 内置模板 ────────────────────────────────
@@ -63,7 +44,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "grep", "find", "ls", "bash"],
 		systemPrompt: "You are a senior planner. Analyze the requirement, break it down into implementation steps, identify risks and dependencies. Output a structured plan with clear task boundaries. Do not write implementation code.",
 		source: "builtin",
-		thinking: "high",       // M2-4: planner 需要深度思考
+		thinking: "high",
 	},
 	implementer: {
 		name: "implementer",
@@ -72,7 +53,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "write", "edit", "bash", "grep", "find"],
 		systemPrompt: "You are a senior developer. Implement the task according to the plan. Write clean, maintainable code. Run tests to verify. If you encounter issues, document them.",
 		source: "builtin",
-		thinking: "medium",     // M2-4: 实现需要中等思考
+		thinking: "medium",
 	},
 	reviewer: {
 		name: "reviewer",
@@ -81,7 +62,7 @@ const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 		tools: ["read", "grep", "bash"],
 		systemPrompt: "You are a code reviewer. Review the diff for: correctness, security, performance, maintainability. Output: ## Issues (must fix) / ## Suggestions (should consider) / ## Looks Good. Do not modify code directly.",
 		source: "builtin",
-		thinking: "high",       // M2-4: 审查需要深度思考
+		thinking: "high",
 	},
 	tester: {
 		name: "tester",
@@ -229,69 +210,6 @@ export function loadAllRoles(cwd: string, modelsConfig: any): Map<string, RoleDe
 	return roles;
 }
 
-// ──────────────────────────────── 实例注册表 ────────────────────────────────
-
-export function loadRegistry(fluxDir: string): Registry {
-	const path = join(fluxDir, "runtime", "registry.json");
-	if (!existsSync(path)) return { instances: [] };
-	try {
-		return JSON.parse(readFileSync(path, "utf-8"));
-	} catch {
-		return { instances: [] };
-	}
-}
-
-export function saveRegistry(fluxDir: string, registry: Registry): void {
-	const path = join(fluxDir, "runtime", "registry.json");
-	// 确保目录存在
-	const dir = join(fluxDir, "runtime");
-	if (!existsSync(dir)) {
-		require("node:fs").mkdirSync(dir, { recursive: true });
-	}
-	require("node:fs").writeFileSync(path, JSON.stringify(registry, null, 2));
-}
-
-let instanceCounter: Record<string, number> = {};
-
-/**
- * 生成唯一实例名
- * 用户指定 name 时用它, 否则自动生成 role-N
- */
-export function generateInstanceName(roleName: string, customName?: string): string {
-	if (customName) return customName;
-	instanceCounter[roleName] = (instanceCounter[roleName] ?? 0) + 1;
-	return `${roleName}-${instanceCounter[roleName]}`;
-}
-
-/**
- * 创建角色实例
- */
-export function createInstance(
-	roleName: string,
-	role: RoleDefinition,
-	models: Record<string, any>,
-	task: string,
-	sessionId: string,
-	customName?: string,
-): RoleInstance {
-	const assign = assignModel(roleName, role, models);
-	const name = generateInstanceName(roleName, customName);
-	const provider = models[assign.model]?.provider;
-
-	return {
-		name,
-		role: roleName,
-		model: assign.model,
-		provider,
-		assignSource: assign,
-		session: sessionId,
-		status: "idle",
-		task,
-		createdAt: new Date().toISOString(),
-		updatedAt: new Date().toISOString(),
-	};
-}
-
 // ──────────────────────────────── 格式化 ────────────────────────────────
 
 export function formatRoleList(roles: Map<string, RoleDefinition>): string {
@@ -305,19 +223,6 @@ export function formatRoleList(roles: Map<string, RoleDefinition>): string {
 			? `message=${def.communication.enabled === false ? "off" : "on"}${def.communication.requiredSendTo?.length ? ` required→${def.communication.requiredSendTo.join("|")}` : ""}` : "";
 		lines.push(`  ${name.padEnd(16)} ${source}  ${modelInfo}  ${toolsInfo}${thinkInfo ? "  " + thinkInfo : ""}${communicationInfo ? "  " + communicationInfo : ""}`);
 		if (def.description) lines.push(`  ${"".padEnd(16)} ${def.description}`);
-	}
-	return lines.join("\n");
-}
-
-export function formatInstanceList(registry: Registry): string {
-	if (registry.instances.length === 0) return "No active instances.";
-	const lines = ["Agent Instances:", ""];
-	for (const inst of registry.instances) {
-		const statusIcon = {
-			idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘",
-		}[inst.status] ?? "?";
-		lines.push(`  ${statusIcon} ${inst.name.padEnd(20)} ${inst.role.padEnd(12)} ${inst.model.padEnd(20)} ${inst.status}`);
-		if (inst.task) lines.push(`    task: ${inst.task.slice(0, 80)}`);
 	}
 	return lines.join("\n");
 }

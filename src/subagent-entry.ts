@@ -19,8 +19,7 @@ import { evaluateCapabilityToolCall, type EffectiveCapabilityPolicy } from "./co
 
 export default function (pi: ExtensionAPI) {
 	let state: FluxRuntimeState = {
-		mode: "M2", preset: "balanced", expectedMode: "M2",
-		stage: "Seed", role: "doer", branch: null, turnIndex: 0,
+		workStyle: "team", branch: null, turnIndex: 0,
 		cache: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0,
 			contextTokens: 0, contextWindow: 0, contextPercent: null, cacheHitRate: 0 },
 	};
@@ -85,8 +84,6 @@ export default function (pi: ExtensionAPI) {
 			const config = loadConfig(ctx.cwd);
 			telemetry = new TelemetryWriter(join(ctx.cwd, ".agentflux"), true);
 			sessionId = ctx.sessionManager?.getSessionFile?.() ?? `subagent-${Date.now()}`;
-			// 只设 mode, 不跑路由/maturity/footer (subagent 不需要)
-			state.mode = "M2";
 			// stderr 标记
 			console.error(`[agentflux-subagent] prefix_layout=${config.cache.prefix_layout} capability=${capabilityPolicy ? "enforced" : "legacy"}`);
 		} catch (e) {

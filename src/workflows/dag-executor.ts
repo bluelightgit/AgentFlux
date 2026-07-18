@@ -1,20 +1,14 @@
 /**
- * AgentFlux M5-1/M5-2 — 动态任务分解 + DAG 执行器
- * 文档依据: docs/22-mode-capability-roadmap.md M5 增强
- *
- * M5-1: planner 输出结构化任务 DAG (JSON), 不是纯文本 handoff
- * M5-2: DAG 执行器按拓扑序执行, 独立节点并行
- * M5-3: 条件分支 (review 失败 → 回 implementer 修复)
- * M5-4: 质量门 (acceptance criteria 检查, 不通过自动重试)
- * M5-5: 管道中断/恢复 (保存执行状态到黑板)
+ * AgentFlux Workflow：planner 输出结构化 DAG，执行器处理拓扑并行、
+ * review 反馈、质量门、重试和状态持久化。
  */
 
-import { runSubagent, type SubagentDef, type SubagentRunResult } from "./subagent";
+import { runAgent, type AgentTemplate, type AgentRunResult } from "../agents/agent-runner";
 import { checkQualityGate, type QualityGateResult } from "./quality-gate";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
 import { assignModel, rankModels, type ModelEntry, type RoleRequirement } from "../core/model-capability";
-import { loadAllRoles, type RoleDefinition } from "../core/role-manager";
+import { loadAllRoles, type RoleDefinition } from "../agents/templates";
 import { SharedBoard } from "../core/shared-board";
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
@@ -52,7 +46,6 @@ export function selectHealthyModel(
 	if (!fallback) throw new Error(`all models unavailable after circuit breaker: ${[...unavailable].join(", ")}`);
 	return fallback;
 }
-
 /** 单节点 deadline 不能越过 DAG 的全局 wall-clock deadline。 */
 export function boundedNodeTimeout(configuredTimeoutMs: number | undefined, dagDeadlineMs: number, nowMs = Date.now()): number {
 	return Math.max(1, Math.min(configuredTimeoutMs ?? Number.MAX_SAFE_INTEGER, dagDeadlineMs - nowMs));
@@ -60,7 +53,7 @@ export function boundedNodeTimeout(configuredTimeoutMs: number | undefined, dagD
 
 export interface TaskExecutionResult {
 	node: TaskNode;
-	subagentResult: SubagentRunResult;
+	subagentResult: AgentRunResult;
 	gateResult: QualityGateResult | null;  // 质量门结果 (null=未检查)
 	retryCount: number;         // 重试次数
 	passed: boolean;            // 是否通过 (gate 通过或无 gate)
@@ -109,7 +102,7 @@ export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: st
 	};
 }
 
-// ─── M5-1: 动态任务分解 ───
+// ─── Dynamic planning ───
 
 /**
  * 让 planner agent 分析任务并输出结构化 DAG.
@@ -135,7 +128,7 @@ export async function generateTaskDAG(
 		taskId?: string;
 	},
 ): Promise<TaskDAG> {
-	const plannerAgent: SubagentDef = {
+	const plannerAgent: AgentTemplate = {
 		name: "dag-planner",
 		description: "Decompose task into structured DAG",
 		tools: ["read", "grep", "find", "ls", "bash"],
@@ -172,7 +165,7 @@ Rules:
 		thinking: opts.thinking ?? "high",
 	};
 
-	const result = await runSubagent({
+	const result = await runAgent({
 		cwd: opts.cwd,
 		agent: plannerAgent,
 		task: `Analyze this task and decompose it into a structured DAG:\n\n${task}`,
@@ -297,7 +290,7 @@ function findUpstreamImplementer(node: TaskNode, dag: TaskDAG): string | undefin
 	return undefined;
 }
 
-// ─── M5-2: DAG 执行器 ───
+// ─── DAG execution ───
 
 export interface DAGExecutorOptions {
 	cwd: string;
@@ -308,24 +301,22 @@ export interface DAGExecutorOptions {
 	pricing?: PricingTable;
 	sessionId: string;
 	sharedSkills?: string[];
-	maxRetries?: number;       // M5-4: 质量门不通过时最大重试次数 (默认 2)
-	enableQualityGate?: boolean; // M5-4: 是否启用质量门 (默认 true)
+	maxRetries?: number;
+	enableQualityGate?: boolean;
 	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
-	persistent?: boolean;      // M5-persist: 是否保留 agent session 上下文 (默认 true)
+	persistent?: boolean;
 	signal?: AbortSignal;      // 用户取消时传播到每个真实子进程
 	maxCostUsd?: number;       // 步骤之间硬停止；单次 provider 请求可能产生少量超额
 	maxWallClockMs?: number;   // 整个 DAG 的 wall-clock 上限
 	maxIterations?: number;    // 全局节点执行批次数上限
 	maxParallel?: number;      // 并发节点上限
 	executionId?: string;      // 显式 run id；也用于断点文件
-	taskId?: string;           // 父 TaskRoutePlan id，贯穿 planner/node telemetry
+	taskId?: string;
 	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
 }
 
 /**
- * 按拓扑序执行 DAG, 独立节点并行 (M5-2).
- * 支持质量门和自动重试 (M5-4).
- * 支持条件分支: review 失败 → 回 implementer (M5-3).
+ * 按拓扑序执行 DAG；支持独立节点并行、质量门、自动重试和 review 反馈。
  */
 export async function executeDAG(
 	dag: TaskDAG,
@@ -352,7 +343,7 @@ export async function executeDAG(
 	// 本次 DAG 内的 model/provider 熔断记忆：一次明确降级后，后续批次不再重复撞同一故障模型。
 	const unavailableModels = new Set<string>();
 
-	const rerunCount = new Map<string, number>(); // M5-3 防无限循环: 每个 implementer 最多被重跑 1 次
+	const rerunCount = new Map<string, number>();
 	const reviewFeedback = new Map<string, string>();
 	const runtimeDir = join(opts.fluxDir, "runtime");
 	const runDir = join(runtimeDir, "runs", executionId);
@@ -437,7 +428,7 @@ export async function executeDAG(
 		// 并行执行就绪任务
 		console.error(`[flux dag] executing ${ready.length} task(s): ${ready.map(n => n.id).join(", ")}`);
 
-		// M5-shared: 更新 SharedBoard 状态供 /flux status 查看
+		// 更新 SharedBoard 状态供工作台查看。
 		for (const node of ready) {
 			try {
 				board.updateAgentStatus(`dag-${node.id}`, {
@@ -458,7 +449,7 @@ export async function executeDAG(
 			))
 		);
 
-		const batchResults: Array<{ node: TaskNode; result: SubagentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> = [];
+		const batchResults: Array<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> = [];
 		for (let i = 0; i < batchSettled.length; i++) {
 			const s = batchSettled[i];
 			if (s.status === "fulfilled") {
@@ -492,18 +483,18 @@ export async function executeDAG(
 				console.error(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "failed", workingOn: node.title.slice(0, 100) }); } catch {}
 
-				// M5-3: 如果 reviewer 失败, 检查是否有对应 implementer 可以重试 (限 1 次防无限循环)
+				// reviewer 失败时允许对应 implementer 重跑一次。
 				if (node.role === "reviewer" && node.dependsOn.length > 0) {
 					const implId = findUpstreamImplementer(node, dag);
 					if (implId && completed.has(implId) && (rerunCount.get(implId) ?? 0) < 1) {
 						rerunCount.set(implId, (rerunCount.get(implId) ?? 0) + 1);
-						console.error(`[flux dag] M5-3: reviewer failed, re-running implementer ${implId} (attempt ${rerunCount.get(implId)})`);
+						console.error(`[flux dag] reviewer failed, re-running implementer ${implId} (attempt ${rerunCount.get(implId)})`);
 						failed.delete(node.id); // reviewer 在 implementer 修复后必须重新进入队列
 						completed.delete(implId); // 重新执行 implementer
 						reviewFeedback.set(implId, gateResult?.feedback ?? result.output ?? result.errorMessage ?? "review failed");
 						try { board.updateAgentStatus(`dag-${implId}`, { status: "running", workingOn: "re-run (reviewer failed)" }); } catch {}
 					} else if (implId && completed.has(implId)) {
-						console.error(`[flux dag] M5-3: ${implId} already re-run once, not retrying again`);
+						console.error(`[flux dag] ${implId} already re-run once, not retrying again`);
 					}
 				}
 			}
@@ -545,7 +536,7 @@ async function executeNodeWithGate(
 	unavailableModels: Set<string>,
 	reviewerFeedback?: string,
 	maxCostUsd?: number,
-): Promise<{ node: TaskNode; result: SubagentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> {
+): Promise<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> {
 	const role = roles.get(node.role);
 	if (!role) {
 		console.error(`[flux dag] role ${node.role} not found, using implementer`);
@@ -575,7 +566,7 @@ async function executeNodeWithGate(
 	}
 
 	// 构建 agent 定义
-	const agentDef: SubagentDef = {
+	const agentDef: AgentTemplate = {
 		name: `dag-${node.id}`,
 		role: node.role,
 		description: role?.description ?? node.title,
@@ -603,7 +594,7 @@ async function executeNodeWithGate(
 		reviewerFeedback ? `\n=== Reviewer feedback requiring remediation ===\n${reviewerFeedback}\n=== End reviewer feedback ===` : "",
 	].filter(Boolean).join("\n");
 	let retryCount = 0;
-	let lastResult: SubagentRunResult | null = null;
+	let lastResult: AgentRunResult | null = null;
 	let lastGateResult: QualityGateResult | null = null;
 	let totalNodeCost = 0;
 	const nodeTimeoutMs = Math.max(1, opts.timeoutMs ?? 180000);
@@ -629,7 +620,7 @@ async function executeNodeWithGate(
 			? `${taskText}\n\nPrevious attempt failed quality gate:\n${lastGateResult.feedback}\n\nPlease fix the issues and retry.`
 			: taskText;
 
-		const result = await runSubagent({
+		const result = await runAgent({
 			cwd: opts.cwd,
 			agent: agentDef,
 			task: attemptTask,
@@ -643,7 +634,7 @@ async function executeNodeWithGate(
 			timeoutMs: Math.max(1, nodeDeadline - Date.now()), // 所有重试/降级共享节点总时限
 			maxRetries: 1,                        // 底层自动重试 1 次
 			retryDelayMs: 3000,
-			persistent: opts.persistent ?? true,  // M5-persist: 默认保留 session
+			persistent: opts.persistent ?? true,
 			persistentSessionId: `flux-dag-${executionId}-${node.id}`,
 			enableModelFallback: Object.keys(models).length > 1,
 			modelsForFallback: models,
@@ -685,7 +676,7 @@ async function executeNodeWithGate(
 			};
 		}
 
-		// M5-4: 质量门检查
+		// 质量门检查
 		if (enableGate && node.acceptanceCriteria.length > 0) {
 			if (Date.now() >= nodeDeadline) {
 				return {
@@ -741,7 +732,6 @@ export function formatDAG(dag: TaskDAG): string {
 	}
 	return lines.join("\n");
 }
-
 export function formatDAGResult(r: DAGExecutionResult): string {
 	const lines = [
 		`[DAG Execution: ${r.status.toUpperCase()}]`,

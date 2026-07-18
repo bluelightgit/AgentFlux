@@ -1,5 +1,7 @@
 # 19 - 多 Agent 架构
 
+> 历史架构背景。当前 Agent 生命周期、创建来源和工作方式见 [28](28-agent-workstyle-redesign.md)。
+
 > 共享黑板 + 角色信箱。持久消息用可审计文件协议，实时 runtime 由受控 RPC pump 注入；能力按角色、注册实例和单次运行逐层收窄。
 
 > 本文描述已实现的通信、共享状态和权限底座。Agent 类型、创建来源、会话 fork 与 Direct/Team/Workflow/Community 的目标产品模型见 [28 - Agent 生命周期与工作方式重构](./28-agent-workstyle-redesign.md)。fork 只共享确定快照之前的只读上下文；分支实例必须拥有独立身份、任务状态和消息 cursor。

@@ -33,7 +33,7 @@ export interface AgentStatus {
 
 export interface Blackboard {
 	project: string;
-	currentMode: string;
+	currentWorkStyle: string;
 	sharedContext: {
 		goal?: string;
 		constraints?: string[];
@@ -70,7 +70,7 @@ export interface Decision {
 	timestamp: string;
 }
 
-// M4-2: agent 间消息传递
+// Agent 间消息传递
 
 export interface AgentMessage {
 	id: string;
@@ -179,7 +179,7 @@ export class SharedBoard {
 		if (!existsSync(path)) {
 			return {
 				project: "",
-				currentMode: "",
+				currentWorkStyle: "",
 				sharedContext: {},
 				agentStatuses: {},
 				updatedAt: new Date().toISOString(),
@@ -277,7 +277,7 @@ export class SharedBoard {
 		return readdirSync(dir).filter((f: string) => f.endsWith(".md"));
 	}
 
-	// ── M4-2: Messages (agent 间消息传递) ──
+	// ── Messages ──
 
 	sendMessage(from: string, to: string, type: string, content: string): AgentMessage {
 		const id = `msg-${randomUUID()}`;
@@ -365,7 +365,7 @@ export class SharedBoard {
 		});
 	}
 
-	// ── M4-3: Task Queue (任务队列消费) ──
+	// ── Task Queue ──
 
 	private tryAcquireMutex(name: string, ttlMs = 30_000): (() => void) | null {
 		const path = join(this.lockDir(), `.mutex-${name}.lock`);
@@ -443,7 +443,7 @@ export class SharedBoard {
 		return null;
 	}
 
-	/** 完成任务并通知依赖者 (M4-4: 状态同步) */
+	/** 完成任务并通知依赖者。 */
 	completeTask(taskId: string, result: { output?: string; verdict?: string }): boolean {
 		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
 		if (!release) return false;
@@ -457,7 +457,7 @@ export class SharedBoard {
 			release();
 		}
 
-		// M4-4: 通知依赖此任务的其他 agent
+		// 通知依赖此任务的其他 Agent。
 		const allTasks = this.listTasks();
 		for (const dependent of allTasks) {
 			if (dependent.dependsOn.includes(taskId) && dependent.status === "blocked") {
@@ -474,7 +474,7 @@ export class SharedBoard {
 			}
 		}
 
-		// M4-2: 发送结果消息给广播
+		// 广播任务结果。
 		if (task.assignedTo) {
 			this.sendMessage(task.assignedTo, "broadcast", "task_complete",
 				`Task ${taskId} completed. ${result.verdict ? `Verdict: ${result.verdict}.` : ""} ${result.output ? `Output: ${result.output.slice(0, 200)}` : ""}`);
@@ -744,8 +744,7 @@ export class SharedBoard {
 
 	/**
 	 * Remove only fenced RPC runtimes whose heartbeat is older than the supplied
-	 * cutoff. Ordinary agents and legacy records without instance identity are
-	 * deliberately preserved.
+	 * cutoff. Ordinary Agents without runtime identity are preserved.
 	 */
 	pruneStaleRuntimeAgents(names: string[], staleBefore: Date, dryRun = false): AgentInfo[] {
 		const requested = new Set(names);
@@ -757,33 +756,6 @@ export class SharedBoard {
 				if (!["idle", "running", "blocked"].includes(agent.status)) return false;
 				const heartbeat = Date.parse(agent.heartbeatAt);
 				return Number.isFinite(heartbeat) && heartbeat <= cutoff;
-			});
-			if (!dryRun && removed.length > 0) {
-				const removedNames = new Set(removed.map(agent => agent.name));
-				this.writeJsonAtomic(
-					join(this.sharedDir, "agents", "_registry.json"),
-					registry.filter(agent => !removedNames.has(agent.name)),
-				);
-			}
-			return removed;
-		});
-	}
-
-	/**
-	 * Explicit operator cleanup for pre-identity records. Automatic GC must not
-	 * guess that these are dead, so a name allowlist is mandatory. Records with
-	 * an instanceId or runtimePid remain fenced out and use the runtime path.
-	 */
-	pruneExplicitStaleLegacyAgents(names: string[], staleBefore: Date, dryRun = false): AgentInfo[] {
-		const requested = new Set(names.filter(name => name.trim().length > 0));
-		const cutoff = staleBefore.getTime();
-		return this.withMutex("registry-agents", () => {
-			const registry = this.listAgents();
-			const removed = registry.filter(agent => {
-				if (!requested.has(agent.name) || agent.instanceId || agent.runtimePid != null) return false;
-				if (!["idle", "running", "blocked"].includes(agent.status)) return false;
-				const lastSeen = Date.parse(agent.lastSeen ?? agent.registeredAt);
-				return Number.isFinite(lastSeen) && lastSeen <= cutoff;
 			});
 			if (!dryRun && removed.length > 0) {
 				const removedNames = new Set(removed.map(agent => agent.name));
@@ -1006,7 +978,7 @@ export function generateHandoffContent(
 export function formatBlackboard(bb: Blackboard): string {
 	const lines = ["Blackboard:", ""];
 	lines.push(`  project: ${bb.project || "(unset)"}`);
-	lines.push(`  mode: ${bb.currentMode || "(unset)"}`);
+	lines.push(`  work style: ${bb.currentWorkStyle || "(unset)"}`);
 	if (bb.sharedContext.goal) lines.push(`  goal: ${bb.sharedContext.goal}`);
 	if (bb.sharedContext.constraints?.length) {
 		lines.push(`  constraints: ${bb.sharedContext.constraints.join(", ")}`);

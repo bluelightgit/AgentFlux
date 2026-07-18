@@ -2,14 +2,14 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SharedBoard } from "../src/core/shared-board";
-import { formatSubagentResult, getActiveSubagentRunIds, isProviderQuotaError, loadSubagent, runSubagent, selectFallbackModel, type SubagentDef } from "../src/extension/subagent";
+import { formatAgentRunResult, getActiveAgentRunIds, isProviderQuotaError, loadAgentTemplate, runAgent, selectFallbackModel, type AgentTemplate } from "../src/agents/agent-runner";
 import { TelemetryWriter } from "../src/telemetry/events";
 
 const root = mkdtempSync(join(tmpdir(), "agentflux-subagent-safe-"));
 const fluxDir = join(root, ".agentflux");
 mkdirSync(fluxDir, { recursive: true });
 const telemetry = new TelemetryWriter(fluxDir, true);
-const agent: SubagentDef = { name: "implementer", description: "test", systemPrompt: "", tools: [] };
+const agent: AgentTemplate = { name: "implementer", description: "test", systemPrompt: "", tools: [] };
 const checks: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
 	checks.push({ name, passed, detail });
@@ -18,8 +18,8 @@ function check(name: string, passed: boolean, detail: string) {
 
 async function main() {
 try {
-	check("path traversal agent names are rejected", loadSubagent(root, "../models") === null, "../models rejected");
-	const failedSummary = formatSubagentResult({
+	check("path traversal agent names are rejected", loadAgentTemplate(root, "../models") === null, "../models rejected");
+	const failedSummary = formatAgentRunResult({
 		agent: "implementer", exitCode: 1, output: "", model: null,
 		usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 		errorMessage: "provider compatibility: 406",
@@ -31,7 +31,7 @@ try {
 		&& isProviderQuotaError("Monthly usage limit reached. Resets in 8 days")
 		&& !isProviderQuotaError("429 rate limit, retry after 2 seconds"),
 		"402/monthly=true, transient 429=false");
-	const zeroExitProviderFailure = await runSubagent({
+	const zeroExitProviderFailure = await runAgent({
 		cwd: root, agent, task: "provider failure with zero process exit", sessionId: "test-session", telemetry,
 		prefixLayout: false, maxRetries: 0,
 		invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "provider-error-exit-zero.cjs")] },
@@ -49,28 +49,28 @@ try {
 
 	const aborted = new AbortController();
 	aborted.abort("test cancellation");
-	const cancelled = await runSubagent({
+	const cancelled = await runAgent({
 		cwd: root, agent, task: "must never spawn", sessionId: "test-session", telemetry,
 		prefixLayout: false, signal: aborted.signal, taskId: "task-correlation-test",
 	});
 	check("pre-aborted run returns cancelled", cancelled.exitCode === 130 && cancelled.errorMessage?.includes("cancelled") === true, `exit=${cancelled.exitCode}`);
-	check("pre-aborted run leaves no process", getActiveSubagentRunIds().length === 0, `active=${getActiveSubagentRunIds().length}`);
+	check("pre-aborted run leaves no process", getActiveAgentRunIds().length === 0, `active=${getActiveAgentRunIds().length}`);
 
 	const target = join(root, "src", "same.ts");
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(target, "export {};\n");
 	const board = new SharedBoard(fluxDir);
 	check("setup competing lock", board.acquireFileLock("other-run", target), "lock acquired");
-	const conflicted = await runSubagent({
+	const conflicted = await runAgent({
 		cwd: root, agent, task: "must not edit locked file", sessionId: "test-session", telemetry,
 		prefixLayout: false, lockFiles: [target],
 	});
 	check("lock conflict is fail-closed", conflicted.exitCode === 73 && conflicted.errorMessage?.includes("file lock conflict") === true, `exit=${conflicted.exitCode}`);
-	check("lock conflict leaves no process", getActiveSubagentRunIds().length === 0, `active=${getActiveSubagentRunIds().length}`);
+	check("lock conflict leaves no process", getActiveAgentRunIds().length === 0, `active=${getActiveAgentRunIds().length}`);
 
 	const pidFile = join(root, "process-tree.json");
 	const controller = new AbortController();
-	const running = runSubagent({
+	const running = runAgent({
 		cwd: root,
 		agent,
 		task: "deterministic process tree cancellation",
@@ -86,15 +86,15 @@ try {
 			args: [join(process.cwd(), "tests", "helpers", "hanging-process-tree.cjs"), pidFile],
 		},
 	});
-	for (let attempt = 0; attempt < 100 && (!existsSync(pidFile) || !getActiveSubagentRunIds().includes("process-tree-test")); attempt++) {
+	for (let attempt = 0; attempt < 100 && (!existsSync(pidFile) || !getActiveAgentRunIds().includes("process-tree-test")); attempt++) {
 		await new Promise(resolve => setTimeout(resolve, 20));
 	}
-	check("real child process becomes observable", existsSync(pidFile) && getActiveSubagentRunIds().includes("process-tree-test"), `active=${getActiveSubagentRunIds().join(",")}`);
+	check("real child process becomes observable", existsSync(pidFile) && getActiveAgentRunIds().includes("process-tree-test"), `active=${getActiveAgentRunIds().join(",")}`);
 	const processTree = JSON.parse(readFileSync(pidFile, "utf-8")) as { parent: number; child: number };
 	controller.abort("test process tree cancellation");
 	const terminated = await running;
 	check("in-flight abort returns exit 130 without retry", terminated.exitCode === 130 && terminated.retryCount === 0, `exit=${terminated.exitCode}, retries=${terminated.retryCount}`);
-	check("in-flight abort clears active process registry", !getActiveSubagentRunIds().includes("process-tree-test"), `active=${getActiveSubagentRunIds().join(",")}`);
+	check("in-flight abort clears active process registry", !getActiveAgentRunIds().includes("process-tree-test"), `active=${getActiveAgentRunIds().join(",")}`);
 	const isAlive = (pid: number): boolean => {
 		try { process.kill(pid, 0); return true; } catch { return false; }
 	};

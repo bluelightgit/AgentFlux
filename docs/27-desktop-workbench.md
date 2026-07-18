@@ -1,5 +1,7 @@
 # 27 - Desktop 多 Agent 工作台
 
+> 此版设计已由 [29 - Desktop 多 Agent 工作台重构规划](29-desktop-workbench-plan.md) 取代。
+
 更新日期：2026-07-18。
 
 ## 产品定位

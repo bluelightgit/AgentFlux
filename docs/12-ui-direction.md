@@ -1,5 +1,7 @@
 # 12 - 用户界面方向：TUI、Web、Electron
 
+> 历史 UI 讨论。当前 Desktop 产品与开发规划见 [29](29-desktop-workbench-plan.md)。
+
 ## 设计总原则
 
 AgentFlux 的 UI 不是“聊天窗口的包装”,而是**路由控制台**。

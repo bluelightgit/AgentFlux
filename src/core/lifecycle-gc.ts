@@ -12,7 +12,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { RetentionConfig } from "./types";
-import { SharedBoard, type AgentInfo, type AgentMessage, type AgentStatus } from "./shared-board";
+import { SharedBoard, type AgentMessage } from "./shared-board";
 import type { MessageDeliveryV2, MessageEnvelopeV2 } from "./message-bus";
 
 type JsonRecord = Record<string, any>;
@@ -21,8 +21,6 @@ export interface LifecycleGcOptions {
 	dryRun?: boolean;
 	now?: Date;
 	activeRunIds?: string[];
-	/** Explicit operator allowlist for stale, pre-instance non-terminal records. */
-	explicitLegacyAgentNames?: string[];
 }
 
 export interface LifecycleGcReport {
@@ -32,10 +30,8 @@ export interface LifecycleGcReport {
 	blockedReason?: string;
 	archivePath?: string;
 	removed: {
-		roleInstances: string[];
 		persistentAgents: string[];
 		sharedAgents: string[];
-		explicitLegacyAgents: string[];
 		blackboardStatuses: string[];
 		readDirectMessages: string[];
 		messageV2Envelopes: string[];
@@ -52,8 +48,7 @@ export interface LifecycleGcReport {
 	warnings: string[];
 }
 
-const ROLE_TERMINAL = new Set(["done", "failed"]);
-const PERSISTENT_TERMINAL = new Set(["done", "failed", "cancelled"]);
+const PERSISTENT_TERMINAL = new Set(["failed", "cancelled", "archived"]);
 const SHARED_TERMINAL = new Set(["done", "failed", "cancelled"]);
 const BLACKBOARD_TERMINAL = new Set(["done", "failed", "cancelled"]);
 
@@ -106,10 +101,6 @@ function selectExpiredOrExcess<T>(
 	return valid
 		.filter((entry, index) => nowMs - entry.timestamp >= expiryMs || index >= maxRetained)
 		.map(entry => entry.item);
-}
-
-function roleTimestamp(item: JsonRecord): unknown {
-	return item.updatedAt ?? item.completedAt ?? item.createdAt;
 }
 
 function pruneRegistryFile(
@@ -236,7 +227,7 @@ export function runLifecycleGc(
 		timestamp: now.toISOString(),
 		dryRun,
 		removed: {
-			roleInstances: [], persistentAgents: [], sharedAgents: [], explicitLegacyAgents: [], blackboardStatuses: [],
+			persistentAgents: [], sharedAgents: [], blackboardStatuses: [],
 			readDirectMessages: [], messageV2Envelopes: [], orphanSessions: [],
 		},
 		preserved: {
@@ -257,21 +248,14 @@ export function runLifecycleGc(
 	}
 
 	const runtimeDir = join(fluxDir, "runtime");
-	const roleRegistryPath = join(runtimeDir, "registry.json");
-	const persistentRegistryPath = join(runtimeDir, "persistent-agents.json");
-	const roleRoot = readJson(roleRegistryPath, { instances: [] }, warnings);
+	const persistentRegistryPath = join(runtimeDir, "agents.json");
 	const persistentRoot = readJson(persistentRegistryPath, { agents: [] }, warnings);
-	const roleInstances: JsonRecord[] = Array.isArray(roleRoot?.instances) ? roleRoot.instances : [];
 	const persistentAgents: JsonRecord[] = Array.isArray(persistentRoot)
 		? persistentRoot
 		: Array.isArray(persistentRoot?.agents) ? persistentRoot.agents : [];
 
-	const roleCandidates = selectExpiredOrExcess(
-		roleInstances, item => ROLE_TERMINAL.has(item.status), roleTimestamp,
-		policy.terminal_agent_ttl_hours, policy.max_terminal_agents, nowMs,
-	);
 	const persistentCandidates = selectExpiredOrExcess(
-		persistentAgents, item => PERSISTENT_TERMINAL.has(item.status), item => item.lastUsedAt ?? item.createdAt,
+		persistentAgents, item => PERSISTENT_TERMINAL.has(item.status), item => item.updatedAt ?? item.createdAt,
 		policy.terminal_agent_ttl_hours, policy.max_terminal_agents, nowMs,
 	);
 
@@ -287,13 +271,6 @@ export function runLifecycleGc(
 		if (!["idle", "running", "blocked"].includes(agent.status)) return false;
 		const heartbeat = parseTimestamp(agent.heartbeatAt);
 		return heartbeat !== null && heartbeat <= staleRuntimeBefore.getTime();
-	});
-	const requestedLegacyNames = [...new Set((options.explicitLegacyAgentNames ?? []).filter(name => name.trim().length > 0))];
-	const explicitLegacyCandidates = sharedAgents.filter(agent => {
-		if (!requestedLegacyNames.includes(agent.name) || agent.instanceId || agent.runtimePid != null) return false;
-		if (!["idle", "running", "blocked"].includes(agent.status)) return false;
-		const lastSeen = parseTimestamp(agent.lastSeen ?? agent.registeredAt);
-		return lastSeen !== null && lastSeen <= staleRuntimeBefore.getTime();
 	});
 	const blackboard = board.getBlackboard();
 	const blackboardEntries = Object.entries(blackboard.agentStatuses).map(([name, status]) => ({ name, status }));
@@ -314,9 +291,6 @@ export function runLifecycleGc(
 	report.preserved.groupMessages = board.listGroups()
 		.reduce((total, group) => total + board.getGroupMessages(group.id).length, 0);
 
-	const roleResult = pruneRegistryFile(
-		roleRegistryPath, "instances", new Set(roleCandidates.map(item => item.name)), ROLE_TERMINAL, dryRun, warnings,
-	);
 	const persistentResult = pruneRegistryFile(
 		persistentRegistryPath, "agents", new Set(persistentCandidates.map(item => item.name)), PERSISTENT_TERMINAL, dryRun, warnings,
 	);
@@ -326,32 +300,24 @@ export function runLifecycleGc(
 	const removedStaleRuntimes = dryRun
 		? staleRuntimeCandidates
 		: board.pruneStaleRuntimeAgents(staleRuntimeCandidates.map(item => item.name), staleRuntimeBefore);
-	const removedExplicitLegacy = dryRun
-		? explicitLegacyCandidates
-		: board.pruneExplicitStaleLegacyAgents(requestedLegacyNames, staleRuntimeBefore);
 	const removedAutomaticShared = [...removedTerminalShared, ...removedStaleRuntimes]
 		.filter((agent, index, values) => values.findIndex(candidate => candidate.name === agent.name) === index);
-	const removedShared = [...removedAutomaticShared, ...removedExplicitLegacy]
-		.filter((agent, index, values) => values.findIndex(candidate => candidate.name === agent.name) === index);
+	const removedShared = removedAutomaticShared;
 	const removedBlackboardNames = dryRun
 		? blackboardCandidates.map(item => item.name)
 		: board.pruneTerminalBlackboardStatuses(blackboardCandidates.map(item => item.name));
 
-	report.removed.roleInstances = roleResult.removed.map(item => item.name);
 	report.removed.persistentAgents = persistentResult.removed.map(item => item.name);
 	report.removed.sharedAgents = removedAutomaticShared.map(item => item.name);
-	report.removed.explicitLegacyAgents = removedExplicitLegacy.map(item => item.name);
 	report.removed.blackboardStatuses = removedBlackboardNames;
 	report.preserved.nonTerminalAgents = [
-		...roleInstances.filter(item => !ROLE_TERMINAL.has(item.status)),
 		...persistentAgents.filter(item => !PERSISTENT_TERMINAL.has(item.status)),
 		...sharedAgents.filter(item => !SHARED_TERMINAL.has(item.status)
-			&& !staleRuntimeCandidates.some(candidate => candidate.name === item.name)
-			&& !explicitLegacyCandidates.some(candidate => candidate.name === item.name)),
+			&& !staleRuntimeCandidates.some(candidate => candidate.name === item.name)),
 		...blackboardEntries.filter(item => !BLACKBOARD_TERMINAL.has(item.status.status)),
 	].length;
 
-	const potentialChangeCount = roleResult.removed.length + persistentResult.removed.length
+	const potentialChangeCount = persistentResult.removed.length
 		+ removedShared.length + removedBlackboardNames.length + messagesToArchive.length
 		+ messageV2.candidates.length;
 	const archiveRoot = join(fluxDir, "archive", "lifecycle", runId);
@@ -370,7 +336,6 @@ export function runLifecycleGc(
 	}
 
 	const removedNames = new Set([
-		...report.removed.roleInstances,
 		...report.removed.persistentAgents,
 		...report.removed.sharedAgents,
 		...report.removed.blackboardStatuses,
@@ -380,7 +345,6 @@ export function runLifecycleGc(
 		.filter(agent => !removedSharedNames.has(agent.name))
 		.map(agent => agent.name));
 	const protectedNames = new Set([
-		...roleResult.remaining.map(item => item.name),
 		...persistentResult.remaining.map(item => item.name),
 		...currentSharedNames,
 		...Object.entries(board.getBlackboard().agentStatuses)
@@ -432,7 +396,6 @@ export function runLifecycleGc(
 			...report,
 			policy,
 			archivedRecords: {
-				roleInstances: roleResult.removed,
 				persistentAgents: persistentResult.removed,
 				sharedAgents: removedShared,
 				messages: archivedMessages,
@@ -449,7 +412,7 @@ export function formatLifecycleGcReport(report: LifecycleGcReport): string {
 	const total = Object.values(report.removed).reduce((sum, items) => sum + items.length, 0);
 	return [
 		`Lifecycle GC ${report.dryRun ? "dry-run" : "complete"}: ${total} active record/file(s) ${report.dryRun ? "would be archived" : "archived"}`,
-		`  role=${report.removed.roleInstances.length} persistent=${report.removed.persistentAgents.length} shared=${report.removed.sharedAgents.length} explicit-legacy=${report.removed.explicitLegacyAgents.length} blackboard=${report.removed.blackboardStatuses.length}`,
+		`  persistent=${report.removed.persistentAgents.length} shared=${report.removed.sharedAgents.length} blackboard=${report.removed.blackboardStatuses.length}`,
 		`  messages-v1=${report.removed.readDirectMessages.length} messages-v2=${report.removed.messageV2Envelopes.length} sessions=${report.removed.orphanSessions.length}`,
 		`  preserved non-terminal=${report.preserved.nonTerminalAgents} unread=${report.preserved.unreadMessages} broadcast=${report.preserved.broadcastMessages} group=${report.preserved.groupMessages} v2-outstanding=${report.preserved.messageV2Outstanding} protected-sessions=${report.preserved.protectedSessions}`,
 		report.archivePath ? `  archive=${report.archivePath}` : "",

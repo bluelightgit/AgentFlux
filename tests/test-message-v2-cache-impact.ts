@@ -9,8 +9,7 @@ import {
 	communicationPolicyFromFrontmatter, evaluateCommunicationContract, resolveCommunicationPolicy,
 } from "../src/core/communication-policy";
 import { SharedBoard } from "../src/core/shared-board";
-import { DEFAULT_PREFERENCE } from "../src/core/types";
-import { runSubagent, type SubagentDef, type SubagentRunResult } from "../src/extension/subagent";
+import { runAgent, type AgentTemplate, type AgentRunResult } from "../src/agents/agent-runner";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
@@ -116,20 +115,16 @@ async function main() {
 			concurrentMessages.length === 40 && new Set(concurrentMessages.map(item => item.envelope.content)).size === 40,
 			`deliveries=${concurrentMessages.length}`);
 
-		const balancedImpact = assessCacheImpact("skill_set", DEFAULT_PREFERENCE);
+		const balancedImpact = assessCacheImpact("skill_set", 0.5);
 		check("cache-breaking skill changes produce a user warning",
 			balancedImpact.shouldNotifyUser && !!formatCacheImpactWarning(balancedImpact)?.includes("reusable-prefix=invalidated"),
 			formatCacheImpactWarning(balancedImpact)?.split("\n")[0] ?? "suppressed");
-		const zeroCostPreference = {
-			...DEFAULT_PREFERENCE,
-			vector: { ...DEFAULT_PREFERENCE.vector, cost_sensitivity: 0 },
-		};
-		const zeroCostImpact = assessCacheImpact("skill_set", zeroCostPreference);
+		const zeroCostImpact = assessCacheImpact("skill_set", 0);
 		check("cost_sensitivity=0 suppresses cache-impact notification",
 			!zeroCostImpact.shouldNotifyUser && zeroCostImpact.suppressedReason === "cost_sensitivity_zero"
 				&& formatCacheImpactWarning(zeroCostImpact) === null,
 			zeroCostImpact.suppressedReason ?? "not suppressed");
-		const messageImpact = assessCacheImpact("message_injection", DEFAULT_PREFERENCE);
+		const messageImpact = assessCacheImpact("message_injection", 0.5);
 		check("dynamic message suffix records token impact without false cache warning",
 			messageImpact.addsContextTokens && !messageImpact.invalidatesReusablePrefix
 				&& !messageImpact.shouldNotifyUser && messageImpact.suppressedReason === "no_cache_hit_impact",
@@ -183,9 +178,9 @@ async function main() {
 				&& runtimeContract.unacknowledgedInbox.length === 0,
 			JSON.stringify(runtimeContract));
 
-		const agent = (name: string): SubagentDef => ({ name, description: "test", systemPrompt: "", tools: [] });
+		const agent = (name: string): AgentTemplate => ({ name, description: "test", systemPrompt: "", tools: [] });
 		const successMessage = bus.sendDirect("planner", "runner-ok", "question", "Acknowledge after successful processing");
-		const success = await runSubagent({
+		const success = await runAgent({
 			cwd: root, agent: agent("runner-ok"), task: "process inbox", sessionId: "message-v2-success",
 			prefixLayout: false, timeoutMs: 5_000, maxRetries: 0,
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
@@ -195,7 +190,7 @@ async function main() {
 			`exit=${success.exitCode} status=${bus.getDelivery(successMessage.envelope.id, "runner-ok")?.status}`);
 
 		const failedMessage = bus.sendDirect("planner", "runner-fail", "question", "Keep unacked after failed processing");
-		const failed = await runSubagent({
+		const failed = await runAgent({
 			cwd: root, agent: agent("runner-fail"), task: "process inbox", sessionId: "message-v2-failure",
 			prefixLayout: false, timeoutMs: 5_000, maxRetries: 0,
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "failed-subagent.cjs")] },
@@ -204,11 +199,11 @@ async function main() {
 			failed.exitCode !== 0 && bus.getDelivery(failedMessage.envelope.id, "runner-fail")?.status === "delivered",
 			`exit=${failed.exitCode} status=${bus.getDelivery(failedMessage.envelope.id, "runner-fail")?.status}`);
 
-		const contractAgent: SubagentDef = {
+		const contractAgent: AgentTemplate = {
 			...agent("runner-contract"), tools: ["read"], communication: { requiredSendTo: ["planner"], allowedTargets: ["planner"] },
 		};
 		const contractInbox = bus.sendDirect("planner", "runner-contract", "question", "do not ack until the full contract passes");
-		const missingContract = await runSubagent({
+		const missingContract = await runAgent({
 			cwd: root, agent: contractAgent, task: "must hand off", sessionId: "message-contract-missing",
 			prefixLayout: true, timeoutMs: 5_000, maxRetries: 0, runId: "contract-missing",
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
@@ -222,9 +217,9 @@ async function main() {
 		});
 		const capturePath = join(root, "subagent-runtime-capture.json");
 		process.env.AGENTFLUX_TEST_CAPTURE = capturePath;
-		let completedContract: SubagentRunResult;
+		let completedContract: AgentRunResult;
 		try {
-			completedContract = await runSubagent({
+			completedContract = await runAgent({
 				cwd: root, agent: contractAgent, task: "must hand off", sessionId: "message-contract-complete",
 				prefixLayout: true, timeoutMs: 5_000, maxRetries: 0, runId: "contract-complete",
 				invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },

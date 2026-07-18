@@ -1,38 +1,10 @@
-/**
- * AgentFlux Extension — M3 对话树 fork 管理
- * 文档依据: docs/03-modes M3, 06-cache-strategy B4 fork-prune, 10-pi-integration
- *
- * M3 模式: 利用 pi 的对话树结构, 在特定节点 fork 出分支进行并行探索,
- * 完成后 prune (丢弃失败分支) 或 merge (获胜分支向上合并).
- *
- * pi 提供:
- *   - ctx.fork(entryId, options) → 从指定 entry 创建分支 (session 替换)
- *   - ctx.navigateTree(targetId, options) → 导航到树中任意节点
- *   - session_before_fork / session_before_tree 事件 → 拦截/记录 fork
- *   - SessionManager.getTree() → 获取对话树结构
- *
- * AgentFlux 增量:
- *   1. /flux fork <direction> 命令 → 智能选择 fork 点 (最近的用户消息)
- *   2. fork.event telemetry → 记录分支创建/切换/合并/prune
- *   3. 路由器在 M3 模式下建议 fork 而非 compact
- */
+/** pi 会话树 fork 的最小适配层。fork 是 Agent 创建来源，不是工作模式。 */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import type { TelemetryWriter } from "../telemetry/events";
 
-export interface ForkInfo {
-	forkId: string;
-	parentEntryId: string;
-	label: string;
-	createdAt: number;
-	status: "active" | "merged" | "pruned";
-}
-
-/**
- * 注册 M3 fork 相关的命令和事件.
- * 在 entry.ts 中调用此函数.
- */
-export function registerForkMode(pi: ExtensionAPI, getState: () => { sessionId: string; telemetry: TelemetryWriter | null }) {
+export function registerSessionFork(pi: ExtensionAPI, getState: () => { sessionId: string; telemetry: TelemetryWriter | null }) {
 
 	// ---------- session_before_fork 事件: 记录 fork ----------
 
@@ -46,6 +18,17 @@ export function registerForkMode(pi: ExtensionAPI, getState: () => { sessionId: 
 			detail: `fork from ${targetId}`,
 			contextPercentBefore: null,
 			contextPercentAfter: null,
+		});
+		telemetry.writeAgentLifecycle({
+			sessionId,
+			agentId: `agent-${randomUUID()}`,
+			agent: `fork-${String(targetId).slice(0, 12)}`,
+			kind: "main",
+			origin: "fork",
+			status: "idle",
+			action: "forked",
+			parentAgentId: sessionId,
+			forkPoint: String(targetId),
 		});
 		console.error(`[flux] fork: from entry ${targetId}`);
 		return undefined;
@@ -90,26 +73,10 @@ export function getForkCandidates(ctx: any, count = 3): Array<{ entryId: string;
  *   /flux fork           → 列出Available fork points
  *   /flux fork <entryId> → 从指定 entry fork
  *   /flux fork last      → 从最近一条用户消息 fork
- *   /flux fork merge     → Merge strategy info (manual for now)
  */
 export async function handleForkCommand(args: string[], ctx: any): Promise<string> {
-	// /flux fork merge: 合并说明
-	if (args[0] === "merge") {
-		return [
-			"Fork Merge:",
-			"  pi fork creates independent branches, no auto-merge between them.",
-			"  Merge strategies:",
-			"  1. Manual: copy output from target branch, paste back to main",
-			"  2. Git: Use git merge for different worktree code changes",
-			"  3. AgentFlux 自动 (Phase 3): 读取两分支的 last assistant message,",
-			"     use LLM to merge then inject into current session",
-			"",
-			"  当前阶段请用手动或 git 方式. 自动 merge 在 Phase 3 实现.",
-		].join("\n");
-	}
-
 	if (!ctx.fork) {
-		return "M3 fork unavailable: current mode does not support ctx.fork (需要 TUI 或 RPC 模式)";
+		return "Fork unavailable: current runtime does not expose ctx.fork (requires TUI or RPC mode)";
 	}
 
 	const candidates = getForkCandidates(ctx, 5);

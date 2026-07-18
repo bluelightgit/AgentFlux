@@ -1,107 +1,54 @@
 # AgentFlux
 
-Agent working mode router — multi-mode orchestration + intelligent routing for [pi](https://github.com/earendil-works/pi-coding-agent) coding agent.
+AgentFlux 是基于 [pi](https://github.com/earendil-works/pi-coding-agent) 的多 Agent 工作台运行时。产品只保留四种工作方式：主 Agent 直接执行、动态组队、固定 DAG 工作流和基于 Issue/Claim 的社区协作。模型选择、Agent 生命周期、会话 fork 与权限不再包装成独立“模式”。
 
-## Quick Start
+## 使用
 
-### Option 1: Project-local auto-load
-
-AgentFlux is configured in `.pi/settings.json` to auto-load when you run `pi` in this project:
+项目已在 `.pi/settings.json` 配置本地扩展，进入仓库后直接运行 pi；也可手动加载：
 
 ```bash
-cd <agentflux-dir>
-pi --provider <your-provider> --model <your-model>
+pi -e ./src/entry.ts --provider <provider> --model <model>
 ```
 
-No `-e` flag needed. The extension loads automatically.
+TUI 命令：
 
-### Option 2: Manual load (any directory)
+| 命令 | 作用 |
+|---|---|
+| `/flux work direct <task>` | Main Agent 直接执行 |
+| `/flux work team <task>` | Main Agent 动态创建或调用 Agent，并负责整合 |
+| `/flux work workflow <task>` | 生成并执行带依赖、并行和质量门的 DAG |
+| `/flux work community <task>` | 创建 Community Issue，由 Main Agent 主持认领、执行和关闭 |
+| `/flux agent list` | 列出 Persistent Agents |
+| `/flux agent create <name> <role>` | 从角色模板创建 Persistent Agent |
+| `/flux agent run <name> <task>` | 继续调用 Persistent Agent 的稳定 session |
+| `/flux agent archive <name>` | 归档空闲 Persistent Agent |
+| `/flux fork [last\|index\|entryId]` | 从当前 pi 会话创建真实分支 |
+| `/flux issue ...` | list/create/show/comment/claim/submit/resolve |
+| `/flux cancel [taskId]` | 取消运行中的 Workflow |
+| `/flux gc [dry-run]` | 预览或执行终态 Agent、消息与孤儿 session 回收 |
+| `/flux status` | 显示当前工作方式、运行、Persistent Agents 和 Issues |
+| `/flux compact` | 查看上下文压缩建议 |
 
-```bash
-pi -e ./src/entry.ts --provider <your-provider> --model <your-model>
-```
+角色模板位于 `.agentflux/agents/*.md` 或 `.agentflux/models.json` 的 `roles`；模板定义 model、thinking、tools、skills、communication 与 workspace 上界。注册后的 Persistent Agent 可以持久收窄权限，单次运行还可继续收窄，不能扩权。
 
-### Option 3: Install as pi package (for other projects)
+## 数据目录
 
-```bash
-# From local path
-pi install ./
-
-# Or from git (when published)
-pi install git:github.com/user/agentflux@v0.1.0
-```
-
-After installation, AgentFlux loads automatically in any pi session.
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/flux` | Open control panel menu (mode/preference/team/info) |
-| `/flux work [--mode M1\|M2\|M5] <task>` | Execute with a user/main-Agent-selected mode, or omit `--mode` to use the configured route decision |
-| `/flux cancel [runId\|all]` | Cancel active AgentFlux DAG runs and their child processes |
-| `/flux gc dry-run` | Preview terminal/stale-runtime/message/session retention cleanup |
-| `/flux gc` | Archive eligible terminal or stale RPC runtime state; refuses while subagents are active |
-| `/flux gc legacy dry-run <names...>` | Preview TTL-gated cleanup for explicitly named pre-instance records |
-| `/flux gc legacy <names...>` | Archive named stale legacy records only when they have no instance/PID and no AgentFlux run is active |
-| `/flux why` | Route inspector — why this mode was chosen |
-| `/flux mode <preset>` | Switch mode preset (eco/fast/balanced/accurate/custom) |
-| `/flux preference` | 5-dimension routing preference tuner |
-| `/flux project` | Project maturity panel |
-| `/flux complexity` | Code complexity analysis |
-| `/flux compact` | Compaction advisor |
-| `/flux fork` | M3 conversation tree fork |
-| `/flux fork merge` | Fork merge strategies |
-| `/flux team plan <task>` | Launch planner agent |
-| `/flux team build <task>` | Launch implementer agent |
-| `/flux team review` | Launch reviewer agent |
-| `/flux team pipeline <task>` | Run plan→build→review in sequence |
-| `/flux team status` | Show agent instances + blackboard |
-| `/flux team roles` | List role definitions |
-| `/flux team models` | List models + capability vectors |
-| `/flux team affinity` | Per-role model affinity ranking |
-| `/flux agents` | Show active runs, persistent agents, and DAG state |
-| `/flux chat [group]` | Read SharedBoard group messages |
-| `/flux groups` | List SharedBoard groups and registered agents |
-| `/flux status` | Full runtime/cost/agent/issue status |
-| `/flux health` | Deterministic subsystem health checks |
-| `/flux restart` | Reload config, models, pricing, and router state |
-| `/flux upgrade` | Check for repository updates |
-
-## Configuration
-
-```
+```text
 .agentflux/
-├── agentflux.json       # User config (mode, cache, context, preference)
-├── models.json          # Model pricing + capability + role definitions
-├── pricing-cache.json   # OpenRouter price cache (auto, 24h TTL)
-├── project-profile.json # Project maturity (auto-generated)
-├── events.jsonl         # Telemetry log
-├── runtime/             # Agent instance registry
-└── shared/              # Multi-agent blackboard (tasks/handoffs/decisions)
+├── agentflux.json       # 预算、缓存、上下文、通信、回收配置
+├── models.json          # 模型、角色和共享 Skills
+├── events.jsonl         # task/agent/message/capability telemetry
+├── runtime/             # Persistent Agent、session 与运行时状态
+├── community/           # Issues 与 Claims
+├── shared/              # Message V2、Agent presence 与协作数据
+└── archive/             # 生命周期回收归档
 ```
 
-## Documentation
-
-See `docs/` for design and status documents. Start with [`docs/26-implementation-status.md`](docs/26-implementation-status.md) for verified implementation status and [`docs/28-agent-workstyle-redesign.md`](docs/28-agent-workstyle-redesign.md) for the planned simplification from M1–M6 to Agent lifecycle, creation origin (including context fork), and four work styles.
-
-## Verification
+## 验证
 
 ```bash
-npm run verify       # offline typecheck + deterministic regression suite
-npm run test:desktop-modes-zero-cost # AUTO/M1/M2/M5 through Desktop AgentRuntime; no model prompt
-npm run test:all-modes-zero-cost     # M1-M6 runtime/fallback contract through Desktop workspace; no model prompt
-npm run test:desktop-deepseek-live   # paid: DeepSeek Pro M1/M5 + DeepSeek Flash M2/subagent/DAG in an isolated fixture
-npm run test:desktop-retry-zero-cost # failed -> Retry -> Extension UI -> done; no model prompt
-npm run test:live    # opt-in live-model tests; may incur cost
+npm run verify     # 类型检查 + 全部确定性 Core/TUI 回归
+npm run test:live  # DeepSeek Pro/Flash 的 Direct/Team/Workflow/Community 全链路 smoke
 ```
 
-## Update
-
-```bash
-# If installed as local path — just git pull
-cd <agentflux-dir> && git pull
-
-# If installed as pi package
-pi update --extensions
-```
+当前完成度、测试证据与明确限制见 [实现状态](docs/26-implementation-status.md)。架构决策见 [Agent 生命周期与工作方式](docs/28-agent-workstyle-redesign.md)，Desktop 重构顺序见 [Desktop 工作台规划](docs/29-desktop-workbench-plan.md)。

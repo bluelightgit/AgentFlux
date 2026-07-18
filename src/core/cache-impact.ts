@@ -1,5 +1,3 @@
-import type { PreferenceConfig } from "./types";
-
 export type CacheImpactChange =
 	| "tool_schema"
 	| "skill_set"
@@ -67,9 +65,9 @@ const IMPACTS: Record<CacheImpactChange, Omit<CacheImpactAssessment, "change" | 
 	},
 };
 
-export function assessCacheImpact(change: CacheImpactChange, pref: PreferenceConfig): CacheImpactAssessment {
+export function assessCacheImpact(change: CacheImpactChange, costPreference = 1): CacheImpactAssessment {
 	const impact = IMPACTS[change];
-	const costSensitivity = Math.max(0, Math.min(1, Number(pref.vector.cost_sensitivity) || 0));
+	const costSensitivity = Math.max(0, Math.min(1, Number(costPreference) || 0));
 	const hasCacheHitImpact = impact.invalidatesReusablePrefix || impact.requiresNewSessionGeneration;
 	const costSensitivityZero = costSensitivity <= ZERO_COST_SENSITIVITY_EPSILON;
 	return {

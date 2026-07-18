@@ -1,5 +1,7 @@
 # AgentFlux Phase 1+2 — 实现进度
 
+> 历史进度记录，不是当前完成度事实源；请使用 [26](26-implementation-status.md)。
+
 > Phase 1 目标(docs/07): 在 pi 上用前缀布局 + mask + cache 监控优化 subagent 流程成本。
 > 实测结论: prefix layout 边际收益取决于场景 (主进程5轮仅2.6%, subagent6轮37.8%)。
 > Phase 2: M3 fork + RGAO 复杂度路由 + 模型能力层 + 多 agent 架构 + team 管道。

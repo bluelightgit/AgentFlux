@@ -1,5 +1,7 @@
 # 07 - 落地路线
 
+> 历史路线图。当前发布门见 [26](26-implementation-status.md)，Desktop 顺序见 [29](29-desktop-workbench-plan.md)。
+
 分五个阶段,按 ROI 排序。每阶段都有可验证的交付物和量化指标,前一阶段不达标不进入下一阶段。
 
 ## 阶段总览

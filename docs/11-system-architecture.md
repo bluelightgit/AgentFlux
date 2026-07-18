@@ -1,5 +1,7 @@
 # 11 - 系统架构规划
 
+> 历史架构规划。当前代码边界见 [00](00-overview.md) 与 [28](28-agent-workstyle-redesign.md)。
+
 ## 决策结论
 
 AgentFlux 采用**分层架构**:

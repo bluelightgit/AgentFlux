@@ -1,5 +1,7 @@
 # 多 Agent 执行转型与 Electron 测试规划
 
+> 历史迁移与测试记录。当前 Core 测试事实见 [26](26-implementation-status.md)，Desktop 测试门见 [29](29-desktop-workbench-plan.md)。
+
 > 2026-06-29 · 从"主 agent 直接编码"转型到"主 agent 编排 + subagent 执行"
 
 ## 一、现状诊断

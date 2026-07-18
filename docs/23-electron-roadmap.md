@@ -1,5 +1,7 @@
 # 23 - Electron 应用开发规划
 
+> 已由 [29 - Desktop 工作台重构规划](29-desktop-workbench-plan.md) 取代。
+
 > Phase 4 产品化路线图。从 pi TUI 扩展向独立桌面应用演进。
 > 依据: docs/07-roadmap Phase 4, docs/12-ui-direction UI-B/C/D
 

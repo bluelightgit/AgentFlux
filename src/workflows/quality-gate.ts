@@ -1,6 +1,5 @@
 /**
- * AgentFlux M2-5 — Subagent 结果质量门
- * 文档依据: docs/22-mode-capability-roadmap.md M5-4 质量门
+ * AgentFlux Agent/Workflow 结果质量门。
  *
  * 用轻量级 LLM 调用检查 subagent 产出是否满足 acceptance criteria.
  * 不通过时返回失败原因, 可用于自动重试.
@@ -26,7 +25,7 @@ export type QualityGateStatus = "passed" | "failed" | "indeterminate";
 export interface QualityGateResult {
 	/** 三态结果。indeterminate 表示 judge 不可用或响应不可验证。 */
 	status: QualityGateStatus;
-	/** 向后兼容字段：仅 status="passed" 时为 true。 */
+	/** 仅 status="passed" 时为 true。 */
 	passed: boolean;
 	feedback: string;           // LLM 给的反馈 (失败原因或确认语)
 	criteriaResults: Array<{ criterion: string; met: boolean }>;

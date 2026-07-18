@@ -6,7 +6,7 @@ import {
 	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
 } from "../src/core/capability-policy";
-import { runSubagent } from "../src/extension/subagent";
+import { runAgent } from "../src/agents/agent-runner";
 import { TelemetryWriter } from "../src/telemetry/events";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
@@ -146,7 +146,7 @@ async function main() {
 		});
 		process.env.AGENTFLUX_TEST_CAPTURE = capturePath;
 		const telemetry = new TelemetryWriter(fluxDir, true);
-		const run = await runSubagent({
+		const run = await runAgent({
 			cwd: root,
 			agent: {
 				name: "runner", role: "reviewer", description: "runner", tools: ["read", "bash", "write"],
@@ -172,11 +172,11 @@ async function main() {
 				&& run.capability?.cacheBreakingChanges.includes("tool_schema") === true,
 			`session=${sessionArg}`);
 		const templateAgent = { name: "template-cache", role: "implementer", description: "template cache", tools: ["read"], skills: ["base"], systemPrompt: "x" };
-		await runSubagent({
+		await runAgent({
 			cwd: root, agent: templateAgent, task: "baseline", sessionId: "test", prefixLayout: true,
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
 		});
-		const changedTemplateRun = await runSubagent({
+		const changedTemplateRun = await runAgent({
 			cwd: root, agent: { ...templateAgent, skills: ["base", "frontend-design"] }, task: "changed", sessionId: "test", prefixLayout: true,
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
 		});
@@ -189,7 +189,7 @@ async function main() {
 			capabilityEvents.some(event => event.action === "resolve" && event.result === "success"
 				&& event.narrowed.includes("run:tools")),
 			`events=${capabilityEvents.length}`);
-		const mismatch = await runSubagent({
+		const mismatch = await runAgent({
 			cwd: root,
 			agent: { name: "runner", role: "implementer", description: "runner", tools: ["read"], systemPrompt: "x" },
 			task: "must reject", sessionId: "test", prefixLayout: true,
@@ -198,7 +198,7 @@ async function main() {
 		check("registered override is bound to its declared role",
 			mismatch.exitCode === 77 && mismatch.errorMessage?.includes("does not match implementer") === true,
 			mismatch.errorMessage ?? "missing error");
-		const noHook = await runSubagent({
+		const noHook = await runAgent({
 			cwd: root,
 			agent: { name: "no-hook", description: "no-hook", tools: ["read"], systemPrompt: "x", workspace: { roots: [root] } },
 			task: "must reject", sessionId: "test", prefixLayout: false,
