@@ -7,6 +7,7 @@ export type FluxCommand =
 	| { kind: "agent"; args: string[] }
 	| { kind: "fork"; args: string[] }
 	| { kind: "issue"; args: string[] }
+	| { kind: "message"; target: string; text: string }
 	| { kind: "cancel"; taskId?: string }
 	| { kind: "gc"; dryRun: boolean }
 	| { kind: "status" }
@@ -19,6 +20,7 @@ const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
 	{ value: "agent", label: "agent", description: "管理 Persistent Agents" },
 	{ value: "fork", label: "fork", description: "从当前会话上下文创建分支" },
 	{ value: "issue", label: "issue", description: "管理 Community Issues 与 Claims" },
+	{ value: "message", label: "message", description: "向运行中的 Agent 发送 Message V2" },
 	{ value: "status", label: "status", description: "查看任务、Agent 与 Issue 状态" },
 	{ value: "cancel", label: "cancel", description: "取消运行中的任务" },
 	{ value: "gc", label: "gc", description: "回收终态 Agent、消息和孤儿 session" },
@@ -71,6 +73,10 @@ export function parseFluxCommand(input: string): FluxCommand {
 	if (parts[0] === "agent") return { kind: "agent", args: parts.slice(1) };
 	if (parts[0] === "fork") return { kind: "fork", args: parts.slice(1) };
 	if (parts[0] === "issue") return { kind: "issue", args: parts.slice(1) };
+	if (parts[0] === "message") {
+		if (!parts[1] || parts.length < 3) throw new Error("Usage: /flux message <agent> <text>");
+		return { kind: "message", target: parts[1], text: parts.slice(2).join(" ") };
+	}
 	if (parts[0] === "cancel") return { kind: "cancel", taskId: parts[1] };
 	if (parts[0] === "gc") {
 		if (parts[1] && parts[1] !== "dry-run") throw new Error("Usage: /flux gc [dry-run]");
@@ -87,6 +93,7 @@ export const FLUX_HELP = [
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",
 	"  /flux fork [last|index|entryId]",
 	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|resolve <id>",
+	"  /flux message <agent> <text>",
 	"  /flux cancel [taskId]",
 	"  /flux gc [dry-run]",
 	"  /flux status",

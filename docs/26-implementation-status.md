@@ -22,7 +22,7 @@
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默；动态消息后缀不误报 prefix miss。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
 | 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline verified | `/flux` Workbench 菜单、参数补全、四种 work、Persistent lifecycle、fork、Issue、cancel、GC、status、compact 均已接线；旧 M 编号明确拒绝。 |
+| TUI | wired / offline verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。`/flux agent` 统一展示 Main、Persistent 和 SharedBoard execution Agents；Persistent 可续接 session，在线 Ephemeral/RPC 可发送 Message V2，终态 Ephemeral 只读。参数补全和旧 M 编号拒绝仍保留。 |
 
 ## 本轮测试
 
@@ -30,7 +30,8 @@
 
 - 工作方式与 Community 状态机：8/8。
 - Agent lifecycle：6/6。
-- TUI Core：11/11。
+- Main Agent 自然任务调度协议与 telemetry：4/4。
+- TUI Core：18/18。
 - Lifecycle GC：4/4。
 - Capability policy：26/26。
 - Message V2 与 cache impact：24/24。
@@ -38,14 +39,14 @@
 - DAG contracts：12/12。
 - Persistent RPC inbox pump：15/15。
 
-`npm run test:live` 在隔离 fixture 中依次验证：
+`npm run test:live` 在隔离 fixture 中依次验证。四个用户 prompt 只描述任务特征与目标，不包含 AgentFlux、工作方式名称、工具名或调用指令：
 
 - `deepseek-v4-pro`：Direct 精确完成。
 - `deepseek-v4-flash`：Main 调用 `flux_team`，真实 child 返回验收标记。
 - `deepseek-v4-pro`：Main 调用 `flux_workflow`，DAG 通过。
 - `deepseek-v4-pro`：Main 调用 `flux_issue` 完成创建、评论、认领、提交与关闭。
 
-每条链路使用独立 pi 进程、0.25 美元上限和 240 秒墙钟；任何进程非零退出或缺少工具/结果标记都会使测试失败。测试 fixture 已清理。
+2026-07-18 最终组合结果：Direct 4.7s、Team 186.1s、Workflow 89.9s、Community 119.2s，全部 exit 0；Workflow 额外要求 `[DAG Execution: PASSED]`，Community 额外要求 `resolved`。每条链路使用独立 pi 进程、0.25 美元任务预算、240 秒 Core 墙钟和 300 秒测试进程硬超时；任何非零退出、超时或缺少工具/结果标记都会失败。持久证据写入 `.agentflux/test-results/core-deepseek-latest.json`，fixture 与测试进程均已清理。
 
 ## 明确限制与后置范围
 

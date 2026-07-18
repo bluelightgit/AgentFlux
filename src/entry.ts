@@ -11,6 +11,7 @@ import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, formatIssue, getIssue, listIssues, resolveIssue, submitClaim } from "./core/community";
 import { loadConfig, resolveSharedSkills, validateConfig } from "./core/config";
 import { MessageBus } from "./core/message-bus";
+import { SharedBoard } from "./core/shared-board";
 import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
 import { discoverPiModels, mergeModels } from "./core/model-capability";
 import { loadPricing, type PricingTable } from "./core/pricing";
@@ -20,7 +21,7 @@ import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } 
 import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
 import { applyMask } from "./extension/mask";
 import { applyPrefixLayout } from "./extension/prefix-layout";
-import { showFluxTuiMenu } from "./extension/tui-menu";
+import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { TelemetryWriter } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, type DAGExecutionResult } from "./workflows/dag-executor";
 
@@ -70,11 +71,40 @@ export default function agentFlux(pi: ExtensionAPI) {
 	let sessionId = "main";
 	let turnIndex = 0;
 	let currentPlan: TaskExecutionPlan | null = null;
+	let implicitPlan: TaskExecutionPlan | null = null;
+	let implicitTask: { taskId: string; task: string } | null = null;
 	const activeRuns = new Map<string, AbortController>();
+
+	function selectImplicitWorkStyle(style: WorkStyle): TaskExecutionPlan | null {
+		if (!runtime || !telemetry || currentPlan || !implicitTask) return null;
+		if (implicitPlan) return implicitPlan;
+		implicitPlan = createTaskExecutionPlan({ task: implicitTask.task, taskId: implicitTask.taskId, workStyle: style, selectedBy: "main_agent", budget: runtime.config.budget });
+		telemetry.writeTaskExecution({ sessionId, taskId: implicitPlan.taskId, action: "created", workStyle: style, selectedBy: "main_agent", task: implicitPlan.task });
+		telemetry.writeTaskExecution({ sessionId, taskId: implicitPlan.taskId, action: "started", workStyle: style, selectedBy: "main_agent", task: implicitPlan.task });
+		return implicitPlan;
+	}
 
 	const persistentContext = (): PersistentAgentContext => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
 		return { cwd: runtime.cwd, modelsConfig: runtime.modelsConfig, telemetry: telemetry ?? undefined, pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, prefixLayout: runtime.config.cache.prefix_layout === "static_first", timeoutMs: runtime.config.budget.max_wall_clock_seconds * 1000, maxCostUsd: runtime.config.budget.max_cost_per_task };
+	};
+
+	const tuiMenuData = (ctx: any): FluxTuiMenuData => {
+		if (!runtime) throw new Error("AgentFlux is not initialized");
+		const persistent = listPersistentAgents(runtime.cwd);
+		const persistentNames = new Set(persistent.map(agent => agent.name));
+		const shared = new SharedBoard(runtime.fluxDir).listAgents().filter(agent => agent.name !== "main" && !persistentNames.has(agent.name));
+		return {
+			agents: [
+				{ name: "main", kind: "main", role: "lead", status: currentPlan || implicitTask ? "running" : "idle", model: ctx.model?.id, provider: ctx.model?.provider, sessionId, callCount: turnIndex, totalCostUsd: 0, capabilityGeneration: 1, lastTask: currentPlan?.task ?? implicitTask?.task, communication: "current_chat" },
+				...persistent.map(agent => ({ ...agent, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const })),
+				...shared.map(agent => ({ name: agent.name, kind: "ephemeral" as const, role: agent.role, status: agent.status, model: agent.model, provider: agent.provider, sessionId: agent.sessionFile, callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, lastTask: agent.currentTask, communication: ["idle", "running", "blocked"].includes(agent.status) ? "message" as const : "none" as const })),
+			],
+			roles: [...loadAllRoles(runtime.cwd, runtime.modelsConfig).keys()].sort(),
+			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })) })),
+			forkPoints: getForkCandidates(ctx, 5),
+			activeTaskIds: [...activeRuns.keys()],
+		};
 	};
 
 	async function runEphemeral(role: string, name: string, task: string, signal?: AbortSignal, lockFiles?: string[], taskId?: string): Promise<AgentRunResult> {
@@ -113,7 +143,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 	});
 	pi.on("before_provider_request", async (event: any) => runtime ? applyPrefixLayout(event.payload, runtime.config.cache).payload : undefined);
 	pi.on("before_agent_start", async (event: any) => {
-		if (!currentPlan) return undefined;
+		if (!currentPlan) {
+			if (!runtime) return undefined;
+			implicitTask = { taskId: `task-${randomUUID()}`, task: event.prompt };
+			implicitPlan = null;
+			return { systemPrompt: `${event.systemPrompt}\n\nAgentFlux operating protocol:\n- The user only needs to describe the desired outcome; never ask them to explain AgentFlux.\n- Choose Direct for small cohesive work that the main Agent can finish safely. Do not delegate merely because Agents are available.\n- Choose Team when two or more bounded responsibilities can be investigated or verified independently. Use flux_team/flux_agent, then integrate the results.\n- Choose Workflow when the work has a stable dependency order or repeatable acceptance gates. Use flux_workflow once.\n- Choose Community only when ownership or scope must emerge through visible discussion and claims. Use flux_issue; execution requires a claim. The Main Agent is moderator and must apply Issue comments/claims/submissions itself. It may use Team for bounded investigation, but must not start a fixed Workflow after choosing Community.\n- Choose one top-level work style and keep it for the task. Make the choice yourself and do not narrate internal routing unless it helps the user.` };
+		}
 		const instruction = currentPlan.workStyle === "direct"
 			? "Work directly in the main Agent. Do not create another Agent."
 			: currentPlan.workStyle === "team"
@@ -124,10 +159,17 @@ export default function agentFlux(pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\nAgentFlux task contract:\n${formatTaskExecutionPlan(currentPlan)}\n${instruction}` };
 	});
 	pi.on("turn_end", async () => { turnIndex += 1; });
-	pi.on("agent_end", async () => {
-		if (!currentPlan || !telemetry) return;
-		telemetry.writeTaskExecution({ sessionId, taskId: currentPlan.taskId, action: "completed", workStyle: currentPlan.workStyle, task: currentPlan.task, outcome: { status: "success", success: true } });
-		currentPlan = null;
+	pi.on("agent_end", async (event: any) => {
+		if (!telemetry) return;
+		const plan = currentPlan ?? implicitPlan ?? (implicitTask && runtime ? createTaskExecutionPlan({ task: implicitTask.task, taskId: implicitTask.taskId, workStyle: "direct", selectedBy: "main_agent", budget: runtime.config.budget }) : null);
+		if (!plan) return;
+		if (!currentPlan && !implicitPlan) {
+			telemetry.writeTaskExecution({ sessionId, taskId: plan.taskId, action: "created", workStyle: "direct", selectedBy: "main_agent", task: plan.task });
+			telemetry.writeTaskExecution({ sessionId, taskId: plan.taskId, action: "started", workStyle: "direct", selectedBy: "main_agent", task: plan.task });
+		}
+		const failed = event?.isError === true;
+		telemetry.writeTaskExecution({ sessionId, taskId: plan.taskId, action: failed ? "failed" : "completed", workStyle: plan.workStyle, selectedBy: plan.selectedBy, task: plan.task, outcome: { status: failed ? "failure" : "success", success: !failed } });
+		currentPlan = null; implicitPlan = null; implicitTask = null;
 	});
 	pi.on("session_shutdown", async () => { for (const controller of activeRuns.values()) controller.abort(); activeRuns.clear(); });
 
@@ -146,6 +188,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (params.action === "create_persistent") { if (!params.role) throw new Error("create_persistent requires role"); const agent = registerPersistentAgent(runtime.cwd, params.name, params.role, runtime.modelsConfig); telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "persistent", origin: "template", status: "idle", action: "created" }); return { content: [{ type: "text", text: `Created persistent Agent ${agent.name} (${agent.role})` }], details: { ok: true } }; }
 			if (params.action === "archive") { const agent = archivePersistentAgent(runtime.cwd, params.name); telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "persistent", origin: agent.lineage.origin, status: "archived", action: "archived" }); return { content: [{ type: "text", text: `Archived ${agent.name}` }], details: { ok: true } }; }
 			if (!params.task) throw new Error(`${params.action} requires task`);
+			selectImplicitWorkStyle("team");
 			const result = params.action === "run_persistent" ? await runPersistentAgent(params.name, params.task, persistentContext(), signal) : await runEphemeral(params.role ?? params.name, params.name, params.task, signal, params.lockFiles, currentPlan?.taskId);
 			return { content: [{ type: "text", text: formatAgentRunResult(result) }], details: { ok: true } };
 		},
@@ -158,6 +201,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		parameters: Type.Object({ tasks: Type.Array(Type.Object({ name: Type.String(), role: Type.Optional(Type.String()), task: Type.String(), persistent: Type.Optional(Type.Boolean()), lockFiles: Type.Optional(Type.Array(Type.String())) }), { minItems: 1, maxItems: 5 }) }),
 		async execute(_id, params, signal) {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
+			selectImplicitWorkStyle("team");
 			const ephemeral: ParallelAgentTask[] = [];
 			const locks: Record<string, string[]> = {};
 			const persistentTasks: Array<Promise<AgentRunResult>> = [];
@@ -172,13 +216,14 @@ export default function agentFlux(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({ name: "flux_workflow", label: "Workflow", description: "Plan and execute a fixed DAG with dependencies, file locks and quality gates.", parameters: Type.Object({ task: Type.String() }), async execute(_id, params, signal) { if (!runtime) throw new Error("AgentFlux is not initialized"); const plan = createTaskExecutionPlan({ task: params.task, workStyle: "workflow", selectedBy: "main_agent", budget: runtime.config.budget }); const result = await runWorkflow(plan, signal); return { content: [{ type: "text", text: `${formatTaskExecutionPlan(plan)}\n\n${formatDAGResult(result)}` }], details: result }; } });
+	pi.registerTool({ name: "flux_workflow", label: "Workflow", description: "Plan and execute a fixed DAG with dependencies, file locks and quality gates.", parameters: Type.Object({ task: Type.String() }), async execute(_id, params, signal) { if (!runtime) throw new Error("AgentFlux is not initialized"); if (implicitPlan?.workStyle === "community") throw new Error("Community is already active for this task; continue through Issue claims and submissions instead of starting a fixed Workflow"); const plan = selectImplicitWorkStyle("workflow") ?? createTaskExecutionPlan({ task: params.task, workStyle: "workflow", selectedBy: "main_agent", budget: runtime.config.budget }); const result = await runWorkflow(plan, signal); return { content: [{ type: "text", text: `${formatTaskExecutionPlan(plan)}\n\n${formatDAGResult(result)}` }], details: result }; } });
 
 	pi.registerTool({
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit and resolve Community work.",
 		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("resolve")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
+			if (!["list", "show"].includes(params.action)) selectImplicitWorkStyle("community");
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
 			if (params.action === "create") { const issue = createIssue(runtime.cwd, { title: params.title ?? "", description: params.body ?? "", acceptanceCriteria: params.acceptanceCriteria }); return { content: [{ type: "text", text: formatIssue(issue) }], details: { ok: true } }; }
 			if (!params.issueId) throw new Error(`${params.action} requires issueId`);
@@ -198,16 +243,32 @@ export default function agentFlux(pi: ExtensionAPI) {
 		try {
 			if (!runtime || !telemetry) throw new Error("AgentFlux is not initialized");
 			if (!input.trim()) {
-				const menuCommand = await showFluxTuiMenu(ctx);
+				const menuCommand = await showFluxTuiMenu(ctx, tuiMenuData(ctx));
 				if (menuCommand === undefined) return notify(ctx, FLUX_HELP);
 				if (menuCommand === null) return;
 				input = menuCommand;
+			}
+			if (input.trim() === "agent") {
+				const menuCommand = await showAgentTuiMenu(ctx, tuiMenuData(ctx));
+				if (menuCommand === null) return;
+				input = menuCommand ?? "agent list";
+			}
+			if (input.trim() === "issue") {
+				const menuCommand = await showIssueTuiMenu(ctx, tuiMenuData(ctx));
+				if (menuCommand === null) return;
+				input = menuCommand ?? "issue list";
+			}
+			if (input.trim() === "fork") {
+				const menuCommand = await showForkTuiMenu(ctx, tuiMenuData(ctx));
+				if (menuCommand === null) return;
+				if (menuCommand) input = menuCommand;
 			}
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
 			if (command.kind === "status") return notify(ctx, [`work style ${currentPlan?.workStyle ?? "idle"}`, `active runs ${activeRuns.size}`, formatPersistentAgents(listPersistentAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"));
 			if (command.kind === "fork") return notify(ctx, await handleForkCommand(command.args, ctx));
+			if (command.kind === "message") { const result = new MessageBus(runtime.fluxDir).sendDirect("main", command.target, "message", command.text); return notify(ctx, `Message sent to ${command.target}: ${result.envelope.id}`); }
 			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()] })));
 			if (command.kind === "cancel") { const ids = command.taskId ? [command.taskId] : [...activeRuns.keys()]; for (const id of ids) activeRuns.get(id)?.abort(); return notify(ctx, ids.length ? `Cancellation requested: ${ids.join(", ")}` : "No active runs."); }
 			if (command.kind === "agent") {
@@ -239,7 +300,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			}
 			if (command.kind === "work") {
 				const plan = createTaskExecutionPlan({ task: command.task, workStyle: command.style, selectedBy: "user", budget: runtime.config.budget });
-				telemetry.writeTaskExecution({ sessionId, taskId: plan.taskId, action: "created", workStyle: plan.workStyle, task: plan.task });
+				telemetry.writeTaskExecution({ sessionId, taskId: plan.taskId, action: "created", workStyle: plan.workStyle, selectedBy: "user", task: plan.task });
 				if (plan.workStyle === "workflow") {
 					const controller = new AbortController(); activeRuns.set(plan.taskId, controller);
 					if (ctx.mode === "print") {

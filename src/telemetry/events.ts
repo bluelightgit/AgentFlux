@@ -11,6 +11,7 @@ export interface TaskExecutionEvent extends BaseEvent {
 	type: "task.execution";
 	action: "created" | "started" | "completed" | "failed" | "cancelled";
 	workStyle: WorkStyle;
+	selectedBy: "user" | "main_agent";
 	task: string;
 }
 

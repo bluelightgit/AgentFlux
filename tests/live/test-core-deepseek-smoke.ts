@@ -4,9 +4,11 @@ import { join, resolve } from "node:path";
 
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `core-deepseek-${process.pid}`);
+const reportPath = join(sourceRoot, ".agentflux", "test-results", "core-deepseek-latest.json");
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 
 function setup(): void {
+	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
 	cpSync(join(sourceRoot, "src"), join(fixtureRoot, "src"), { recursive: true });
 	writeFileSync(join(fixtureRoot, "README.md"), "# AgentFlux live fixture\n");
@@ -25,8 +27,12 @@ function setup(): void {
 	}, null, 2));
 }
 
-async function run(label: string, model: string, prompt: string, expected: string[], timeoutMs = 300_000): Promise<Record<string, unknown>> {
-	const args = [piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", join(fixtureRoot, "src", "entry.ts"), "--no-skills", "--tools", "flux_agent,flux_team,flux_workflow,flux_issue,flux_message", "--provider", "octopus-anthropic", "--model", model, "--thinking", "off", prompt];
+function writeReport(status: "running" | "passed" | "failed", evidence: Record<string, unknown>[], error?: unknown): void {
+	writeFileSync(reportPath, JSON.stringify({ status, updatedAt: new Date().toISOString(), evidence, error: error ? String(error) : undefined }, null, 2));
+}
+
+async function run(label: string, model: string, prompt: string, expected: string[], forbidden: string[] = [], timeoutMs = 300_000): Promise<Record<string, unknown>> {
+	const args = [piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", join(fixtureRoot, "src", "entry.ts"), "--no-skills", "--tools", "read,grep,find,ls,flux_agent,flux_team,flux_workflow,flux_issue,flux_message", "--provider", "octopus-anthropic", "--model", model, "--thinking", "off", prompt];
 	const started = Date.now();
 	const child = spawn(process.execPath, args, { cwd: fixtureRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
 	let stdout = ""; let stderr = "";
@@ -38,17 +44,23 @@ async function run(label: string, model: string, prompt: string, expected: strin
 	if (exitCode !== 0) throw new Error(`${label} exit ${exitCode}\n${stderr}\n${stdout.slice(-2000)}`);
 	const combined = `${stdout}\n${stderr}`;
 	for (const marker of expected) if (!combined.includes(marker)) throw new Error(`${label} missing ${marker}\nSTDERR:\n${stderr.slice(-4000)}\nSTDOUT:\n${stdout.slice(-4000)}`);
+	for (const marker of forbidden) if (combined.includes(marker)) throw new Error(`${label} unexpectedly used ${marker}\n${combined.slice(-4000)}`);
 	return { label, model, pid: child.pid, exitCode, wallClockMs: Date.now() - started, markers: expected };
 }
 
 async function main(): Promise<void> {
-	setup(); const evidence: Record<string, unknown>[] = [];
+	setup(); const evidence: Record<string, unknown>[] = []; writeReport("running", evidence);
+	const selectedCases = new Set((process.env.AGENTFLUX_LIVE_CASES ?? "direct,team,workflow,community").split(",").map(value => value.trim()).filter(Boolean));
 	try {
-		evidence.push(await run("direct", "deepseek-v4-pro", "这是只读 Direct 测试。不要调用任何工具，只回复精确文本 AGENTFLUX_DIRECT_OK", ["AGENTFLUX_DIRECT_OK"]));
-		evidence.push(await run("team", "deepseek-v4-flash", "这是只读 Team 测试。必须调用一次 flux_team，创建一个 name=reviewer-smoke、role=reviewer 的临时任务，让它只回复 TEAM_CHILD_OK；成功后只回复精确文本 AGENTFLUX_TEAM_OK。", ["flux_team", "TEAM_CHILD_OK", "AGENTFLUX_TEAM_OK"]));
-		evidence.push(await run("workflow", "deepseek-v4-pro", "必须调用一次 flux_workflow，task 设置为：只读检查 README.md 第一行，不得修改文件，保持 DAG 最小并完成验收。工具结束后只回复 AGENTFLUX_WORKFLOW_OK。", ["flux_workflow", "[DAG Execution: PASSED]", "AGENTFLUX_WORKFLOW_OK"]));
-		evidence.push(await run("community", "deepseek-v4-pro", "使用 flux_issue 完成只读 Community 测试：创建 Issue，添加评论，认领 scope=readme-audit，提交该 claim 并关闭 Issue；完成后只回复精确文本 AGENTFLUX_COMMUNITY_OK。", ["flux_issue", "resolved", "AGENTFLUX_COMMUNITY_OK"]));
+		if (selectedCases.has("direct")) { const direct = await run("natural-direct", "deepseek-v4-pro", "回答精确文本 NATURAL_DIRECT_OK。这是一个单一且无需读取文件的小任务。", ["NATURAL_DIRECT_OK"], ["\"toolName\":\"flux_team\"", "\"toolName\":\"flux_workflow\"", "\"toolName\":\"flux_issue\""]); evidence.push(direct); writeReport("running", evidence); console.log(JSON.stringify(direct)); }
+		if (selectedCases.has("team")) { const team = await run("natural-team", "deepseek-v4-flash", "请让代码审查者和测试专家分别独立检查 README.md 第一行是否准确描述项目；汇总两者意见后以 NATURAL_TEAM_OK 结束。", ["flux_team", "NATURAL_TEAM_OK"]); evidence.push(team); writeReport("running", evidence); console.log(JSON.stringify(team)); }
+		if (selectedCases.has("workflow")) { const workflow = await run("natural-workflow", "deepseek-v4-pro", "执行固定三职责只读流程，节点不可合并。规划职责定义 README.md 第一行应等于 '# AgentFlux live fixture'，产物需包含 PLAN_READY；执行职责依赖规划产物，读取文件并给出判断，产物需包含 EXEC_PASS；独立审查职责依赖前两份产物，复核后产物需包含 REVIEW_PASS。每个节点的验收只检查是否包含对应标记，不限制其他解释文字。不修改文件，全部通过后以 NATURAL_WORKFLOW_OK 结束。", ["flux_workflow", "[DAG Execution: PASSED]", "NATURAL_WORKFLOW_OK"]); evidence.push(workflow); writeReport("running", evidence); console.log(JSON.stringify(workflow)); }
+		if (selectedCases.has("community")) { const community = await run("natural-community", "deepseek-v4-pro", "职责和检查范围尚未确定。请建立一个公开协作事项，形成 README 审计的认领范围，记录意见，提交认领结果并在完成后关闭事项；最后以 NATURAL_COMMUNITY_OK 结束。", ["flux_issue", "resolved", "NATURAL_COMMUNITY_OK"]); evidence.push(community); writeReport("running", evidence); console.log(JSON.stringify(community)); }
+		writeReport("passed", evidence);
 		process.stdout.write(`${JSON.stringify({ ok: true, evidence }, null, 2)}\n`);
+	} catch (error) {
+		writeReport("failed", evidence, error);
+		throw error;
 	} finally {
 		const base = resolve(sourceRoot, ".agentflux", "test-workspaces"); const target = resolve(fixtureRoot);
 		if (!target.startsWith(`${base}\\`)) throw new Error(`unsafe cleanup: ${target}`);

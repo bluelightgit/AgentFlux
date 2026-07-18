@@ -38,7 +38,7 @@
   "scripts": {
 	"typecheck": "tsc -p tsconfig.json",
 	"test": "npm run test:unit",
-	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts",
+	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts",
 	"test:live": "tsx tests/live/test-core-deepseek-smoke.ts",
 	"verify": "npm run typecheck && npm run test:unit"
   }

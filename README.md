@@ -19,12 +19,14 @@ TUI 命令：
 | `/flux work team <task>` | Main Agent 动态创建或调用 Agent，并负责整合 |
 | `/flux work workflow <task>` | 生成并执行带依赖、并行和质量门的 DAG |
 | `/flux work community <task>` | 创建 Community Issue，由 Main Agent 主持认领、执行和关闭 |
-| `/flux agent list` | 列出 Persistent Agents |
+| `/flux agent` | 列出 Main、Persistent 与 execution Agent，查看身份、状态、模型、session、调用/成本和 capability；选择后可继续 session 或发送消息 |
+| `/flux agent list` | 以文本列出 Persistent Agents |
 | `/flux agent create <name> <role>` | 从角色模板创建 Persistent Agent |
 | `/flux agent run <name> <task>` | 继续调用 Persistent Agent 的稳定 session |
 | `/flux agent archive <name>` | 归档空闲 Persistent Agent |
 | `/flux fork [last\|index\|entryId]` | 从当前 pi 会话创建真实分支 |
 | `/flux issue ...` | list/create/show/comment/claim/submit/resolve |
+| `/flux message <agent> <text>` | 向仍在线的 Agent 发送可靠 Message V2 |
 | `/flux cancel [taskId]` | 取消运行中的 Workflow |
 | `/flux gc [dry-run]` | 预览或执行终态 Agent、消息与孤儿 session 回收 |
 | `/flux status` | 显示当前工作方式、运行、Persistent Agents 和 Issues |
