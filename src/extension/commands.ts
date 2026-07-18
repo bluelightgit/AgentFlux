@@ -12,6 +12,52 @@ export type FluxCommand =
 	| { kind: "status" }
 	| { kind: "compact" };
 
+export interface FluxCompletionItem { value: string; label: string; description: string; }
+
+const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
+	{ value: "work", label: "work", description: "启动 Direct / Team / Workflow / Community 任务" },
+	{ value: "agent", label: "agent", description: "管理 Persistent Agents" },
+	{ value: "fork", label: "fork", description: "从当前会话上下文创建分支" },
+	{ value: "issue", label: "issue", description: "管理 Community Issues 与 Claims" },
+	{ value: "status", label: "status", description: "查看任务、Agent 与 Issue 状态" },
+	{ value: "cancel", label: "cancel", description: "取消运行中的任务" },
+	{ value: "gc", label: "gc", description: "回收终态 Agent、消息和孤儿 session" },
+	{ value: "compact", label: "compact", description: "查看上下文压缩建议" },
+	{ value: "help", label: "help", description: "显示完整命令帮助" },
+];
+
+function completions(prefix: string, options: Array<[string, string]>): FluxCompletionItem[] {
+	return options
+		.filter(([value]) => value.startsWith(prefix))
+		.map(([value, description]) => ({ value, label: value.split(" ").at(-1) ?? value, description }));
+}
+
+export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompletionItem[] | null {
+	const prefix = argumentPrefix.trimStart();
+	if (!prefix.includes(" ")) {
+		const found = TOP_LEVEL_COMPLETIONS.filter(item => item.value.startsWith(prefix));
+		return found.length ? found : null;
+	}
+	if (prefix.startsWith("work ")) return completions(prefix, [
+		["work direct", "Main Agent 直接执行"],
+		["work team", "Main Agent 动态创建或调用多个 Agent"],
+		["work workflow", "执行固定依赖 DAG"],
+		["work community", "创建 Issue 并通过 Claim 协作"],
+	]);
+	if (prefix.startsWith("agent ")) return completions(prefix, [
+		["agent list", "列出 Persistent Agents"], ["agent create", "从角色模板创建"],
+		["agent run", "运行 Persistent Agent"], ["agent archive", "归档 Persistent Agent"],
+	]);
+	if (prefix.startsWith("issue ")) return completions(prefix, [
+		["issue list", "列出 Issues"], ["issue create", "创建 Issue"], ["issue show", "查看 Issue"],
+		["issue comment", "发表评论"], ["issue claim", "认领工作范围"], ["issue submit", "提交 Claim"],
+		["issue resolve", "关闭已完成 Issue"],
+	]);
+	if (prefix.startsWith("fork ")) return completions(prefix, [["fork last", "从最近一条用户消息创建分支"]]);
+	if (prefix.startsWith("gc ")) return completions(prefix, [["gc dry-run", "仅预览，不修改数据"]]);
+	return null;
+}
+
 export function parseFluxCommand(input: string): FluxCommand {
 	const parts = input.trim().split(/\s+/).filter(Boolean);
 	if (parts.length === 0 || parts[0] === "help") return { kind: "help" };

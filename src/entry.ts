@@ -17,9 +17,10 @@ import { loadPricing, type PricingTable } from "./core/pricing";
 import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
 import type { WorkStyle } from "./core/types";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
-import { FLUX_HELP, parseFluxCommand } from "./extension/commands";
+import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
 import { applyMask } from "./extension/mask";
 import { applyPrefixLayout } from "./extension/prefix-layout";
+import { showFluxTuiMenu } from "./extension/tui-menu";
 import { TelemetryWriter } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, type DAGExecutionResult } from "./workflows/dag-executor";
 
@@ -193,9 +194,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 
 	pi.registerTool({ name: "flux_message", label: "Agent Message", description: "Send or inspect reliable Agent messages.", parameters: Type.Object({ action: Type.Union([Type.Literal("send"), Type.Literal("poll"), Type.Literal("ack")]), sender: Type.Optional(Type.String()), target: Type.String(), content: Type.Optional(Type.String()), messageId: Type.Optional(Type.String()) }), async execute(_id, params) { if (!runtime) throw new Error("AgentFlux is not initialized"); const bus = new MessageBus(runtime.fluxDir); const sender = params.sender ?? "main"; const result = params.action === "send" ? bus.sendDirect(sender, params.target, "message", params.content ?? "") : params.action === "poll" ? bus.poll(params.target) : bus.acknowledge(params.target, params.messageId ?? ""); return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result }; } });
 
-	pi.registerCommand("flux", { description: "AgentFlux workbench commands", handler: async (input: string, ctx: any) => {
+	pi.registerCommand("flux", { description: "Open AgentFlux Workbench or run a command", getArgumentCompletions: getFluxArgumentCompletions, handler: async (input: string, ctx: any) => {
 		try {
 			if (!runtime || !telemetry) throw new Error("AgentFlux is not initialized");
+			if (!input.trim()) {
+				const menuCommand = await showFluxTuiMenu(ctx);
+				if (menuCommand === undefined) return notify(ctx, FLUX_HELP);
+				if (menuCommand === null) return;
+				input = menuCommand;
+			}
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));

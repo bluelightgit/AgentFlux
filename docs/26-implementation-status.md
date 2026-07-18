@@ -22,7 +22,7 @@
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默；动态消息后缀不误报 prefix miss。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
 | 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline verified | 四种 work、Persistent lifecycle、fork、Issue、cancel、GC、status、compact 共 7 条集成检查通过；旧 M 编号明确拒绝。 |
+| TUI | wired / offline verified | `/flux` Workbench 菜单、参数补全、四种 work、Persistent lifecycle、fork、Issue、cancel、GC、status、compact 均已接线；旧 M 编号明确拒绝。 |
 
 ## 本轮测试
 
@@ -30,7 +30,7 @@
 
 - 工作方式与 Community 状态机：8/8。
 - Agent lifecycle：6/6。
-- TUI Core：8/8。
+- TUI Core：11/11。
 - Lifecycle GC：4/4。
 - Capability policy：26/26。
 - Message V2 与 cache impact：24/24。

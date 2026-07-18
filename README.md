@@ -14,6 +14,7 @@ TUI 命令：
 
 | 命令 | 作用 |
 |---|---|
+| `/flux` | 打开 AgentFlux Workbench 交互菜单；输入 `/flux ` 可补全子命令 |
 | `/flux work direct <task>` | Main Agent 直接执行 |
 | `/flux work team <task>` | Main Agent 动态创建或调用 Agent，并负责整合 |
 | `/flux work workflow <task>` | 生成并执行带依赖、并行和质量门的 DAG |
