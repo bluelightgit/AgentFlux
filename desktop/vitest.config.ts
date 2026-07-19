@@ -11,8 +11,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "node:fs": "./tests/mocks/node-fs.ts",
-      "node:path": "./tests/mocks/node-path.ts",
+      "node:fs": new URL("./tests/mocks/node-fs.ts", import.meta.url).pathname,
+      "node:path": new URL("./tests/mocks/node-path.ts", import.meta.url).pathname,
     },
   },
 });

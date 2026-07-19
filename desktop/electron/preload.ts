@@ -27,10 +27,10 @@ export interface ElectronFileApi {
   getUserDataPath: () => string;
   watchFile: (path: string) => { ok: boolean };
   unwatchFile: (path: string) => { ok: boolean };
-  minimizeWindow: () => void;
-  maximizeWindow: () => void;
-  closeWindow: () => void;
-  isMaximized: () => boolean;
+  minimizeWindow: () => Promise<void>;
+  maximizeWindow: () => Promise<boolean>;
+  closeWindow: () => Promise<void>;
+  isMaximized: () => Promise<boolean>;
   showFolderDialog: () => string | null;
   platform: string;
   ipcRenderer: {
@@ -66,10 +66,10 @@ const api: ElectronFileApi = {
   unwatchFile: (filePath) => ipcRenderer.invoke('unwatch-file', filePath) as unknown as { ok: boolean },
 
   // ── Window controls ──
-  minimizeWindow: () => { ipcRenderer.invoke('window-minimize'); },
-  maximizeWindow: () => { ipcRenderer.invoke('window-maximize'); },
-  closeWindow: () => { ipcRenderer.invoke('window-close'); },
-  isMaximized: () => ipcRenderer.invoke('window-is-maximized') as unknown as boolean,
+  minimizeWindow: () => ipcRenderer.invoke('window-minimize') as Promise<void>,
+  maximizeWindow: () => ipcRenderer.invoke('window-maximize') as Promise<boolean>,
+  closeWindow: () => ipcRenderer.invoke('window-close') as Promise<void>,
+  isMaximized: () => ipcRenderer.invoke('window-is-maximized') as Promise<boolean>,
 
   // ── Dialogs ──
   showFolderDialog: () => ipcRenderer.invoke('show-folder-dialog') as unknown as string | null,

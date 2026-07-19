@@ -2,7 +2,7 @@
 
 更新日期：2026-07-19。本文件是 Desktop 重构的当前规划与进度记录。
 
-当前进度：D0 主任务契约已完成；D1 的导航、任务创建、失败进入/Retry 和三栏调整已完成，运行时拆分与任务内参与者视图仍在开发。
+当前进度：D0 主任务契约已完成；D1 的导航、任务创建、失败进入/Retry、三栏调整和应用工具栏已完成，运行时拆分与任务内参与者视图仍在开发。
 
 ## 产品目标
 
@@ -62,6 +62,8 @@ Issue Room 三栏：左侧 Issue 状态与筛选，中间 comment/claim/submit/r
 - [部分完成] Direct/Team/Workflow/Community 选择、spawn/readiness、follow-up/steer/abort/stop、失败进入和 Retry lineage。
 - [完成] 三栏拖动、键盘调整、重置与窄屏单栏布局。
 - [完成] 主导航收敛为五个产品入口，不再展示 Chat/Sessions/DAG/Routing 等重复页面。
+- [完成] 顶栏搜索/命令面板共享状态，刷新同时更新事件与 runtime；Windows 窗口按钮使用 sender-bound IPC 并同步最大化状态。
+- [完成] 通知首次轮询只建立历史基线；相同 Agent、exit code 和 error 的新失败折叠计数，右下角最多同时展示 3 条。
 - [待开发] Electron main 拆分 runtime manager、protocol adapter、history store；任务内参与者与真实消息 lanes。
 
 ### D2：Agents
@@ -94,5 +96,7 @@ Issue Room 三栏：左侧 Issue 状态与筛选，中间 comment/claim/submit/r
 - 工作方式：Direct、Team、Workflow、Community 各一条 DeepSeek Pro/Flash 隔离链路。
 - 状态：Main/child 的 idle/running/blocked/done/failed/cancelled/archived 与 task 状态一致。
 - UI：1280×800、1024×720、800×600；栏宽拖动/键盘/reset；失败任务进入和 Retry。
+- 应用工具栏：搜索打开/聚焦、刷新真实重载、最小化/最大化/关闭 IPC、历史失败不回放与同类折叠。
+- Desktop 自我迭代：从 `New Task` 分发受控 workspace 修改，校验文件结果、runtime `done` 和固定工作方式 telemetry。
 - Communication：0、少量、64 Agents；只绘制当前 scope 的真实边，检查无全连中心和标签重叠。
 - 进程：测试后 fixture 与测试 PID 为 0；不干涉用户正在运行的 Desktop 实例。

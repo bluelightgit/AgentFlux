@@ -31,10 +31,10 @@ interface ElectronFileApi {
   getUserDataPath: () => unknown;
   watchFile: (path: string) => unknown;
   unwatchFile: (path: string) => unknown;
-  minimizeWindow: () => void;
-  maximizeWindow: () => void;
-  closeWindow: () => void;
-  isMaximized: () => unknown;
+  minimizeWindow: () => Promise<void>;
+  maximizeWindow: () => Promise<boolean>;
+  closeWindow: () => Promise<void>;
+  isMaximized: () => Promise<boolean>;
   showFolderDialog: () => unknown;
   platform: string;
   ipcRenderer: {
@@ -85,10 +85,10 @@ describe('Preload Contract — 类型与结构验证', () => {
       getUserDataPath: () => '',
       watchFile: () => ({ ok: true }),
       unwatchFile: () => ({ ok: true }),
-      minimizeWindow: () => {},
-      maximizeWindow: () => {},
-      closeWindow: () => {},
-      isMaximized: () => false,
+      minimizeWindow: async () => {},
+      maximizeWindow: async () => false,
+      closeWindow: async () => {},
+      isMaximized: async () => false,
       showFolderDialog: () => null,
       platform: 'win32',
       ipcRenderer: {
@@ -208,10 +208,10 @@ describe('Preload Contract — 类型与结构验证', () => {
         getUserDataPath: () => '',
         watchFile: () => ({ ok: true }),
         unwatchFile: () => ({ ok: true }),
-        minimizeWindow: () => {},
-        maximizeWindow: () => {},
-        closeWindow: () => {},
-        isMaximized: () => false,
+        minimizeWindow: async () => {},
+        maximizeWindow: async () => false,
+        closeWindow: async () => {},
+        isMaximized: async () => false,
         showFolderDialog: () => null,
         platform: 'win32',
         ipcRenderer: { invoke: () => Promise.resolve(), on: () => {}, removeListener: () => {} },
@@ -283,10 +283,10 @@ describe('Preload Contract — 类型与结构验证', () => {
       getUserDataPath: () => '',
       watchFile: () => ({ ok: true }),
       unwatchFile: () => ({ ok: true }),
-      minimizeWindow: () => {},
-      maximizeWindow: () => {},
-      closeWindow: () => {},
-      isMaximized: () => false,
+      minimizeWindow: async () => {},
+      maximizeWindow: async () => false,
+      closeWindow: async () => {},
+      isMaximized: async () => false,
       showFolderDialog: () => null,
       platform: 'win32',
       ipcRenderer: {
@@ -427,10 +427,10 @@ describe('Preload Contract — 模拟模块暴露验证', () => {
       getUserDataPath: () => '',
       watchFile: () => ({ ok: true }),
       unwatchFile: () => ({ ok: true }),
-      minimizeWindow: () => {},
-      maximizeWindow: () => {},
-      closeWindow: () => {},
-      isMaximized: () => false,
+      minimizeWindow: async () => {},
+      maximizeWindow: async () => false,
+      closeWindow: async () => {},
+      isMaximized: async () => false,
       showFolderDialog: () => null,
       platform: 'win32',
       ipcRenderer: {

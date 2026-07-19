@@ -134,7 +134,7 @@ function NotificationRow({
   notification,
   onClick,
 }: NotificationRowProps): React.ReactElement {
-  const { kind, title, body, timestamp, read } = notification;
+  const { kind, title, body, timestamp, read, count } = notification;
 
   return (
     <button
@@ -160,7 +160,7 @@ function NotificationRow({
               : 'text-slate-800 dark:text-slate-100 font-medium'
           }`}
         >
-          {title}
+          {title}{count > 1 ? <span className="ml-2 font-mono text-[10px] text-slate-400">×{count}</span> : null}
         </div>
         {body ? (
           <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 break-words">

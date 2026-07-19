@@ -12,6 +12,11 @@ import { useEffect, useRef } from "react";
 import { useDashboardStore } from "../store/dashboard-store";
 import { useNotifications } from "../components/NotificationProvider";
 import { parseEventsFileAsync, type SubagentRunEvent } from "../lib/events-parser";
+import {
+  advanceRunNotificationCursor,
+  groupRunNotifications,
+  type RunNotificationCursor,
+} from "../lib/run-notifications";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -20,10 +25,12 @@ export function useEventNotifications(): void {
   const { notify } = useNotifications();
 
   // Number of subagent.run events we have already notified about.
-  const lastSeenEventCount = useRef(0);
+  const cursor = useRef<RunNotificationCursor>({ initialized: false, count: 0 });
 
   useEffect(() => {
     if (!fluxDir) return;
+
+    cursor.current = { initialized: false, count: 0 };
 
     const eventsPath = `${fluxDir}/events.jsonl`;
 
@@ -37,29 +44,11 @@ export function useEventNotifications(): void {
           (e): e is SubagentRunEvent => e.type === "subagent.run",
         );
 
-        const prevCount = lastSeenEventCount.current;
-        // Only look at events appended since our last check.
-        const newRuns = runs.slice(prevCount);
-        lastSeenEventCount.current = runs.length;
+        const advanced = advanceRunNotificationCursor(runs, cursor.current);
+        cursor.current = advanced.cursor;
 
-        for (const run of newRuns) {
-          // errorMessage is not part of the typed event shape today,
-          // but some agents may include it — read it defensively.
-          const errorMessage = (run as unknown as { errorMessage?: string })
-            .errorMessage;
-
-          if (run.exitCode !== 0 || errorMessage) {
-            const detail = errorMessage
-              ? errorMessage
-              : `exit code ${run.exitCode}`;
-            notify("error", `${run.agent} failed`, detail);
-          } else {
-            notify(
-              "success",
-              `${run.agent} completed`,
-              `Completed in ${run.turns} turns ($${run.costUsd.toFixed(4)})`,
-            );
-          }
+        for (const batch of groupRunNotifications(advanced.freshRuns)) {
+          notify(batch.kind, batch.title, batch.detail, batch.key, batch.count);
         }
       } catch {
         // File may not exist yet or be mid-write; ignore and retry next tick.

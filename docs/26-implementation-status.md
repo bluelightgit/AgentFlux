@@ -22,8 +22,8 @@
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默；动态消息后缀不误报 prefix miss。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
 | 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。Tab/Enter 补全完整字段后会退出候选态并提交，`work/agent/issue/fork` 裸命令可进入对应菜单。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
-| Desktop | D0/D1 partial / offline verified | 主导航已收敛为 Workbench、Agents、Issues、Activity、Configuration；任务创建使用 `agent_decides/direct/team/workflow/community`，共享 Renderer/Electron contract，并通过 `AGENTFLUX_WORK_STYLE` 将用户固定选择注入 Core。旧 runtime history schema 不迁移。 |
+| TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。空格会触发 slash 参数补全；Tab 选择父字段后自动进入下级选单，Enter 仍可提交裸命令进入菜单。真实 PTY 已验证手输 `/flux work ` 与 `/flux wo` + Tab。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
+| Desktop | D0/D1 partial / offline + Electron verified | 主导航已收敛为 Workbench、Agents、Issues、Activity、Configuration；任务创建使用 `agent_decides/direct/team/workflow/community`，共享 Renderer/Electron contract，并通过 `AGENTFLUX_WORK_STYLE` 将用户固定选择注入 Core。搜索/命令面板、刷新和原生窗口控制已接通；历史运行失败不再作为新 Toast 回放，同类新失败按 Agent/exit cause 折叠。旧 runtime history schema 不迁移。 |
 
 ## 本轮测试
 
@@ -32,7 +32,7 @@
 - 工作方式与 Community 状态机：8/8。
 - Agent lifecycle：6/6。
 - Main Agent 自然任务调度协议、Desktop 固定工作方式与 telemetry：5/5。
-- TUI Core：21/21。
+- TUI Core：23/23。
 - Lifecycle GC：4/4。
 - Capability policy：26/26。
 - Message V2 与 cache impact：24/24。
@@ -49,7 +49,7 @@
 
 2026-07-18 最终组合结果：Direct 4.7s、Team 186.1s、Workflow 89.9s、Community 119.2s，全部 exit 0；Workflow 额外要求 `[DAG Execution: PASSED]`，Community 额外要求 `resolved`。每条链路使用独立 pi 进程、0.25 美元任务预算、240 秒 Core 墙钟和 300 秒测试进程硬超时；任何非零退出、超时或缺少工具/结果标记都会失败。持久证据写入 `.agentflux/test-results/core-deepseek-latest.json`，fixture 与测试进程均已清理。
 
-Desktop 迁移回归：Vitest 13 files、163/163；Vite production build 与 Electron compile 通过。实际 Electron 窗口在 1280×800、1024×720、800×600 下完成 Workbench、Agents 三视图和 Activity 导航/横向溢出检查；Extension UI 的 confirm/select/input 状态链路以真实 pi RPC 通过，最终 `done/exit 0`，残留测试进程为 0。
+Desktop 迁移回归：Vitest 15 files、168/168；Vite production build 与 Electron compile 通过。实际 Electron 窗口在 1280×800、1024×720、800×600 下完成 Workbench、Agents 三视图和 Activity 导航/横向溢出检查；搜索打开并聚焦、刷新完成、最大化/还原同步、历史失败 Toast 为 0。通过 Desktop `New Task` 选择 Direct，使用 `deepseek-v4-flash` 修改并回读受控 workspace fixture，Renderer 状态最终为 `done`，`task.execution` 记录为 `selectedBy=user/workStyle=direct`，证明主链路可从 Desktop 完成一次 AgentFlux 自我迭代。
 
 ## 明确限制与后置范围
 

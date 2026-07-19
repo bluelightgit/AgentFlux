@@ -99,6 +99,39 @@ await pause(800);
 const reports = [];
 
 try {
+  const initialFailureToasts = await evaluate(call, `new Promise((resolve) => setTimeout(() => resolve(
+    [...document.querySelectorAll('[aria-label="Dismiss notification"]')].filter((node) =>
+      node.parentElement?.textContent?.includes('failed')
+    ).length
+  ), 3500))`);
+  if (initialFailureToasts !== 0) throw new Error(`Historical failure toasts were replayed: ${initialFailureToasts}`);
+
+  const chrome = await evaluate(call, `(async () => {
+    const button = (label) => document.querySelector('button[aria-label="' + label + '"]');
+    button('Search and commands')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const dialog = document.querySelector('[role="dialog"][aria-label="Search and commands"]');
+    const searchFocused = dialog?.querySelector('input') === document.activeElement;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+    const refresh = button('Refresh');
+    const oldTitle = refresh?.title;
+    refresh?.click();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const refreshWorked = Boolean(refresh?.title.startsWith('Last refreshed')) && refresh?.title !== oldTitle;
+
+    const maximize = button('Toggle maximize window');
+    maximize?.click();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const maximized = maximize?.title === 'Restore';
+    maximize?.click();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const restored = maximize?.title === 'Maximize';
+    return { dialogOpened: Boolean(dialog), searchFocused, refreshWorked, maximized, restored };
+  })()`);
+  if (Object.values(chrome).some((value) => !value)) throw new Error(`Desktop chrome check failed: ${JSON.stringify(chrome)}`);
+  reports.push({ label: 'desktop-chrome', ...chrome, initialFailureToasts });
+
   for (const viewport of viewports) {
     await call('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1, mobile: false });
     await pause(300);

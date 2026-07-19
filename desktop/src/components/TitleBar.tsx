@@ -39,19 +39,19 @@ const TitleBar: React.FC = () => {
     };
   }, []);
 
-  const handleMinimize = () => {
+  const handleMinimize = async () => {
     if (typeof window === 'undefined' || !window.api?.minimizeWindow) return;
-    window.api.minimizeWindow();
+    await window.api.minimizeWindow();
   };
 
-  const handleMaximize = () => {
+  const handleMaximize = async () => {
     if (typeof window === 'undefined' || !window.api?.maximizeWindow) return;
-    window.api.maximizeWindow().then(() => refreshMaximized());
+    setMaximized(await window.api.maximizeWindow());
   };
 
-  const handleClose = () => {
+  const handleClose = async () => {
     if (typeof window === 'undefined' || !window.api?.closeWindow) return;
-    window.api.closeWindow();
+    await window.api.closeWindow();
   };
 
   // macOS: the native traffic lights live on the left; reserve a drag region.
@@ -68,33 +68,33 @@ const TitleBar: React.FC = () => {
   // Windows/Linux: render minimize / maximize / close buttons on the right.
   return (
     <div
-      className="flex items-stretch shrink-0"
+      className="af-window-controls flex shrink-0 items-stretch self-stretch"
       style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
     >
       <button
         type="button"
-        onClick={handleMinimize}
+        onClick={() => void handleMinimize()}
         aria-label="Minimize window"
         title="Minimize"
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
+        className="af-window-button text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700"
       >
-        <Icon name="Minus" size={16} />
+        <span className="block h-px w-3 bg-current" />
       </button>
       <button
         type="button"
-        onClick={handleMaximize}
+        onClick={() => void handleMaximize()}
         aria-label="Toggle maximize window"
         title={maximized ? 'Restore' : 'Maximize'}
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
+        className="af-window-button text-slate-500 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-700"
       >
-        <Icon name="Square" size={14} />
+        {maximized ? <span className="af-window-restore" /> : <span className="block h-2.5 w-2.5 border border-current" />}
       </button>
       <button
         type="button"
-        onClick={handleClose}
+        onClick={() => void handleClose()}
         aria-label="Close window"
         title="Close"
-        className="flex items-center justify-center w-12 h-full text-slate-500 hover:bg-red-500 hover:text-white dark:text-slate-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
+        className="af-window-button text-slate-500 hover:bg-red-500 hover:text-white dark:text-slate-300"
       >
         <Icon name="X" size={16} />
       </button>

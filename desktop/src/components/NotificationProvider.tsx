@@ -20,11 +20,13 @@ export interface Notification {
   body?: string;
   timestamp: number;
   read: boolean;
+  key?: string;
+  count: number;
 }
 
 export interface NotificationContextValue {
   notifications: Notification[];
-  notify: (kind: NotificationKind, title: string, body?: string) => void;
+  notify: (kind: NotificationKind, title: string, body?: string, key?: string, occurrences?: number) => void;
   dismiss: (id: string) => void;
   clearAll: () => void;
   markAsRead: (id: string) => void;
@@ -117,7 +119,7 @@ export function NotificationProvider({
   }, [clearTimer]);
 
   const notify = useCallback(
-    (kind: NotificationKind, title: string, body?: string) => {
+    (kind: NotificationKind, title: string, body?: string, key?: string, occurrences = 1) => {
       const id = genId();
       const notification: Notification = {
         id,
@@ -126,8 +128,16 @@ export function NotificationProvider({
         body,
         timestamp: Date.now(),
         read: false,
+        key,
+        count: Math.max(1, occurrences),
       };
       setNotifications((prev) => {
+        const existingIndex = key ? prev.findIndex((item) => item.key === key) : -1;
+        if (existingIndex >= 0) {
+          const existing = prev[existingIndex];
+          const updated = { ...existing, kind, title, body, timestamp: notification.timestamp, read: false, count: existing.count + notification.count };
+          return [updated, ...prev.filter((_, index) => index !== existingIndex)];
+        }
         const next = [notification, ...prev];
         // Trim oldest entries beyond max
         if (next.length > max) {
@@ -197,7 +207,7 @@ interface ToastStackProps {
 function ToastStack({ notifications, onDismiss }: ToastStackProps): React.ReactElement | null {
   // Show the most recent few toasts that are still unread as active toasts.
   // Once read (e.g. via NotificationCenter) they leave the toast stack.
-  const visible = notifications.filter((n) => !n.read).slice(0, 4);
+  const visible = notifications.filter((n) => !n.read).slice(0, 3);
 
   if (visible.length === 0) return null;
 
@@ -216,7 +226,7 @@ interface ToastProps {
 }
 
 function Toast({ notification, onDismiss }: ToastProps): React.ReactElement {
-  const { id, kind, title, body, timestamp } = notification;
+  const { id, kind, title, body, timestamp, count } = notification;
 
   return (
     <Card
@@ -230,7 +240,7 @@ function Toast({ notification, onDismiss }: ToastProps): React.ReactElement {
         />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-slate-800 dark:text-slate-100 break-words">
-            {title}
+            {title}{count > 1 ? <span className="ml-2 font-mono text-[10px] text-[var(--af-muted)]">×{count}</span> : null}
           </div>
           {body ? (
             <div className="mt-1 text-xs text-slate-500 dark:text-slate-400 break-words">

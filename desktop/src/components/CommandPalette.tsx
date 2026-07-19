@@ -196,6 +196,9 @@ export function CommandPalette({
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Search and commands"
       className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]"
       onMouseDown={(e) => {
         // Close when clicking the backdrop itself (not its children).

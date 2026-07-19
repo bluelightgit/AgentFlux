@@ -4,6 +4,7 @@ import { AppFrame, Icon, StatusDot } from './ui';
 import { useTheme } from './ThemeProvider';
 import { useKeyboardNav } from '../hooks/useKeyboardNav';
 import { useCommandPalette } from '../hooks/useCommandPalette';
+import { useWorkbenchStore } from '../store/workbench-store';
 
 import { CommandPalette } from './CommandPalette';
 import { RealTimeCostCounter } from './RealTimeCostCounter';
@@ -25,7 +26,7 @@ const NAV_GROUPS: { label: string; items: { id: PageName; label: string; icon: s
 // ---------------------------------------------------------------------------
 // TopBar
 // ---------------------------------------------------------------------------
-const TopBar: React.FC = () => {
+const TopBar: React.FC<{ onOpenPalette: () => void }> = ({ onOpenPalette }) => {
   const workspaces = useDashboardStore((s) => s.workspaces);
   const activeWorkspace = useDashboardStore((s) => s.activeWorkspace);
   const selectWorkspace = useDashboardStore((s) => s.selectWorkspace);
@@ -35,9 +36,10 @@ const TopBar: React.FC = () => {
   const project = useDashboardStore((s) => s.project);
   const events = useDashboardStore((s) => s.events);
   const { theme, toggleTheme } = useTheme();
-  const { toggle: togglePalette } = useCommandPalette();
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
 
   // Close dropdown on outside click / escape
   useEffect(() => {
@@ -73,6 +75,20 @@ const TopBar: React.FC = () => {
   };
 
   const currentName = activeWorkspace?.name ?? 'Select Workspace';
+
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([reload(), useWorkbenchStore.getState().loadRuntimes()]);
+      const refreshedAt = Date.now();
+      setLastRefreshedAt(refreshedAt);
+    } catch (error: unknown) {
+      console.error('Workbench refresh failed:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   return (
     <header
@@ -186,13 +202,13 @@ const TopBar: React.FC = () => {
 
         <button
           type="button"
-          onClick={togglePalette}
-          aria-label="Command palette (Cmd+K)"
-          title="Command palette (Cmd+K)"
+          onClick={onOpenPalette}
+          aria-label="Search and commands"
+          title="Search and commands (Ctrl+K)"
           className="flex items-center px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
         >
           <Icon name="Search" size={18} />
-          <span className="hidden xl:inline text-xs text-slate-400 ml-2">Cmd+K</span>
+          <span className="hidden xl:inline text-xs text-slate-400 ml-2">Ctrl+K</span>
         </button>
 
         <button
@@ -207,14 +223,15 @@ const TopBar: React.FC = () => {
 
         <button
           type="button"
-          onClick={() => reload()}
+          onClick={() => void handleRefresh()}
           aria-label="Refresh"
-          title="Refresh"
+          title={lastRefreshedAt ? `Last refreshed ${new Date(lastRefreshedAt).toLocaleTimeString()}` : 'Refresh workbench data'}
+          disabled={refreshing}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-sm text-slate-600 dark:hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:focus-visible:ring-blue-400"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
-          <Icon name="RefreshCw" size={16} className="text-slate-500" />
-          <span className="hidden xl:inline">Refresh</span>
+          <Icon name="RefreshCw" size={16} className={`text-slate-500 ${refreshing ? 'animate-spin' : ''}`} />
+          <span className="hidden xl:inline">{refreshing ? 'Refreshing' : 'Refresh'}</span>
         </button>
       </div>
 
@@ -299,12 +316,12 @@ const MainContent: React.FC<{ children: React.ReactNode; compact?: boolean }> = 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const currentPage = useDashboardStore((s) => s.currentPage);
   const setPage = useDashboardStore((s) => s.setPage);
-  const { open: paletteOpen, close: closePalette } = useCommandPalette();
+  const { open: paletteOpen, toggle: togglePalette, close: closePalette } = useCommandPalette();
   useKeyboardNav(currentPage, setPage);
 
   return (
     <AppFrame>
-      <TopBar />
+      <TopBar onOpenPalette={togglePalette} />
       <div className="flex flex-1 overflow-hidden min-h-0">
         <Sidebar />
         <MainContent compact={currentPage === 'workbench'}>{children}</MainContent>

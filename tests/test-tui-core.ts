@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentFlux from "../src/entry";
 import { showAgentTuiMenu, showFluxTuiMenu } from "../src/extension/tui-menu";
+import { isSlashArgumentBoundary, shouldContinueSlashCompletion } from "../src/extension/tui-autocomplete-bridge";
 
 type Handler = (...args: any[]) => any;
 class FakePi {
@@ -29,6 +30,8 @@ async function main(): Promise<void> {
 		const ctx: any = { cwd: root, hasUI: true, mode: "tui", model: { id: "test" }, ui: { notify: (text: string) => notices.push(text), select: async () => menuSelections.shift(), input: async () => menuInputs.shift() }, sessionManager: { getSessionFile: () => "tui-session", getBranch: () => [{ type: "message", id: "entry-1", message: { role: "user", content: [{ type: "text", text: "seed context" }] } }] }, fork: async () => ({ cancelled: false }) };
 		for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
 		check(pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册四条核心工具链");
+		check(isSlashArgumentBoundary("/flux work ", " ") && !isSlashArgumentBoundary("plain text ", " "), "空格可触发 slash command 参数补全而不影响普通输入");
+		check(shouldContinueSlashCompletion("/flux work", "\t") && !shouldContinueSlashCompletion("/flux work ", "\t"), "Tab 补全 slash 字段后继续显示下级选单");
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
 		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
