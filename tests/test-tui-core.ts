@@ -32,8 +32,13 @@ async function main(): Promise<void> {
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
 		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
+		check(await flux.getArgumentCompletions("agent") === null && await flux.getArgumentCompletions("work") === null, "补全为完整字段后退出候选态，Enter 可提交并打开菜单");
 		const workCompletions = await flux.getArgumentCompletions("work ");
 		check(workCompletions.map((item: any) => item.value).includes("work community"), "work 子命令补全显示四种工作方式");
+		check((await flux.getArgumentCompletions("agent list"))?.length === 0, "完整子命令退出候选态，Enter 可直接执行");
+		menuSelections = ["team · dynamic Agent collaboration"]; menuInputs = ["coordinate review"];
+		await flux.handler("work", ctx);
+		check(pi.sent.at(-1) === "coordinate review", "补全后的 /flux work 打开工作方式菜单");
 		menuSelections = ["Work · start a task", "direct · Main Agent executes"]; menuInputs = ["menu task"];
 		await flux.handler("", ctx);
 		check(pi.sent.at(-1) === "menu task", "直接输入 /flux 可从 Workbench 菜单创建任务");

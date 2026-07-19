@@ -29,6 +29,7 @@ const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
 ];
 
 function completions(prefix: string, options: Array<[string, string]>): FluxCompletionItem[] {
+	if (options.some(([value]) => value === prefix)) return [];
 	return options
 		.filter(([value]) => value.startsWith(prefix))
 		.map(([value, description]) => ({ value, label: value.split(" ").at(-1) ?? value, description }));
@@ -37,6 +38,7 @@ function completions(prefix: string, options: Array<[string, string]>): FluxComp
 export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompletionItem[] | null {
 	const prefix = argumentPrefix.trimStart();
 	if (!prefix.includes(" ")) {
+		if (TOP_LEVEL_COMPLETIONS.some(item => item.value === prefix)) return null;
 		const found = TOP_LEVEL_COMPLETIONS.filter(item => item.value.startsWith(prefix));
 		return found.length ? found : null;
 	}

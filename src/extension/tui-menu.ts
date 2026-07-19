@@ -123,6 +123,18 @@ export async function showForkTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<
 	return candidate ? `fork ${candidate.entryId}` : null;
 }
 
+export async function showWorkTuiMenu(ctx: any): Promise<string | null | undefined> {
+	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
+	const style = await select(ctx, "Work style", [
+		"direct · Main Agent executes", "team · dynamic Agent collaboration",
+		"workflow · fixed dependency DAG", "community · Issue and Claim collaboration",
+	]);
+	if (!style) return null;
+	const workStyle = style.split(" ·")[0];
+	const task = await input(ctx, `${workStyle} task`, "Describe the outcome and acceptance criteria");
+	return task ? `work ${workStyle} ${task}` : null;
+}
+
 export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const selected = await select(ctx, "AgentFlux Workbench", [
@@ -131,15 +143,7 @@ export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<
 		"Maintenance · lifecycle GC", "Help · command reference",
 	]);
 	if (!selected) return null;
-	if (selected.startsWith("Work")) {
-		const style = await select(ctx, "Work style", [
-			"direct · Main Agent executes", "team · dynamic Agent collaboration",
-			"workflow · fixed dependency DAG", "community · Issue and Claim collaboration",
-		]);
-		if (!style) return null;
-		const task = await input(ctx, `${style.split(" ·")[0]} task`, "Describe the outcome and acceptance criteria");
-		return task ? `work ${style.split(" ·")[0]} ${task}` : null;
-	}
+	if (selected.startsWith("Work")) return showWorkTuiMenu(ctx);
 	if (selected.startsWith("Agents")) return showAgentTuiMenu(ctx, data);
 	if (selected.startsWith("Community")) return showIssueTuiMenu(ctx, data);
 	if (selected.startsWith("Fork")) return showForkTuiMenu(ctx, data);

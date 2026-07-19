@@ -21,7 +21,7 @@ import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } 
 import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
 import { applyMask } from "./extension/mask";
 import { applyPrefixLayout } from "./extension/prefix-layout";
-import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
+import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showWorkTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { TelemetryWriter } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, type DAGExecutionResult } from "./workflows/dag-executor";
 
@@ -245,6 +245,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (!input.trim()) {
 				const menuCommand = await showFluxTuiMenu(ctx, tuiMenuData(ctx));
 				if (menuCommand === undefined) return notify(ctx, FLUX_HELP);
+				if (menuCommand === null) return;
+				input = menuCommand;
+			}
+			if (input.trim() === "work") {
+				const menuCommand = await showWorkTuiMenu(ctx);
+				if (menuCommand === undefined) return notify(ctx, "Usage: /flux work <direct|team|workflow|community> <task>");
 				if (menuCommand === null) return;
 				input = menuCommand;
 			}
