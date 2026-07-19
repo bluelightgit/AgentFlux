@@ -51,10 +51,11 @@ async function evaluate(call, expression) {
   return result.result.value;
 }
 
-async function clickText(call, text) {
+async function clickText(call, text, scope = 'body') {
   return evaluate(call, `(() => {
     const label = ${JSON.stringify(text)};
-    const target = [...document.querySelectorAll('button')].find((node) =>
+    const root = document.querySelector(${JSON.stringify(scope)});
+    const target = [...(root?.querySelectorAll('button') ?? [])].find((node) =>
       node.textContent.trim() === label || [...node.querySelectorAll('span')].some((span) => span.textContent.trim() === label)
     );
     if (!target) return false;
@@ -102,22 +103,25 @@ try {
     await call('Emulation.setDeviceMetricsOverride', { ...viewport, deviceScaleFactor: 1, mobile: false });
     await pause(300);
 
-    await clickText(call, 'Control Room');
+    if (!await clickText(call, 'Workbench')) {
+      const labels = await evaluate(call, `[...document.querySelectorAll('button')].map((node) => node.textContent.trim()).filter(Boolean)`);
+      throw new Error(`Workbench navigation entry was not found: ${JSON.stringify(labels)}`);
+    }
     await pause();
-    reports.push(await inspect(call, 'control-room', viewport));
+    reports.push(await inspect(call, 'workbench', viewport));
 
     if (!await clickText(call, 'Agents')) throw new Error('Agents navigation entry was not found');
     await pause();
     reports.push(await inspect(call, 'agents-roster', viewport));
     for (const tab of ['Activity', 'Capabilities']) {
-      if (!await clickText(call, tab)) throw new Error(`Agents ${tab} tab was not found`);
+      if (!await clickText(call, tab, 'main')) throw new Error(`Agents ${tab} tab was not found`);
       await pause();
       reports.push(await inspect(call, `agents-${tab.toLowerCase()}`, viewport));
     }
 
-    if (!await clickText(call, 'Sessions')) throw new Error('Sessions navigation entry was not found');
+    if (!await clickText(call, 'Activity')) throw new Error('Activity navigation entry was not found');
     await pause();
-    reports.push(await inspect(call, 'sessions', viewport));
+    reports.push(await inspect(call, 'activity', viewport));
   }
   console.log(JSON.stringify({ ok: true, reports }, null, 2));
 } finally {

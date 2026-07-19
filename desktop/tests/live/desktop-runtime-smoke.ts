@@ -7,7 +7,7 @@ import { MessageBus } from '../../../src/core/message-bus.ts';
 const require = createRequire(import.meta.url);
 const projectRoot = resolve(import.meta.dirname, '../../..');
 const desktopRoot = resolve(import.meta.dirname, '../..');
-const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'agent-runtime.js')) as {
+const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'electron', 'agent-runtime.js')) as {
   AgentRuntime: new () => {
     start(options: { projectRoot: string; name: string; initialTask?: string }): Promise<string>;
     list(): Array<Record<string, any>>;

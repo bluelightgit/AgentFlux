@@ -43,7 +43,14 @@ async function main(): Promise<void> {
 		await emit(pi, "agent_end", { isError: false }, ctx);
 		const allEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
 		check(allEvents.some(event => event.type === "task.execution" && event.workStyle === "community" && event.selectedBy === "main_agent" && event.action === "started"), "Main Agent 调用 Community 工具时记录实际调度方式");
+
+		process.env.AGENTFLUX_WORK_STYLE = "workflow";
+		const fixedResults = await emit(pi, "before_agent_start", { prompt: "按固定依赖完成发布", systemPrompt: "base", systemPromptOptions: {} }, ctx);
+		const fixedPrompt = fixedResults.find(result => result?.systemPrompt)?.systemPrompt ?? "";
+		check(fixedPrompt.includes("work style workflow") && fixedPrompt.includes("Use flux_workflow exactly once"), "Desktop 固定工作方式通过运行时契约注入 Main Agent");
+		await emit(pi, "agent_end", { isError: false }, ctx);
+		delete process.env.AGENTFLUX_WORK_STYLE;
 		console.log(`\n${passed} main-Agent routing checks passed`);
-	} finally { rmSync(root, { recursive: true, force: true }); }
+	} finally { delete process.env.AGENTFLUX_WORK_STYLE; rmSync(root, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exit(1); });

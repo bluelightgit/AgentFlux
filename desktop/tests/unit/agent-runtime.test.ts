@@ -379,7 +379,7 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     expect((spawnMock.mock.calls[1][1] as string[]).slice(-2)).toEqual(['--name', 'lease-worker']);
 
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       savedAt: 1,
       records: [{
         runId: 'historical-run', name: 'historical-worker', pid: 999, status: 'done', events: [],
@@ -1361,7 +1361,7 @@ describe('AgentRuntime — Doc 27 测试门', () => {
 
   it('Persistence MVP: 恢复历史时清空 PID/pending，并将旧在线状态降级为 aborted', () => {
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       savedAt: 123,
       records: [{
         runId: 'old-run', name: 'old-agent', pid: 9876, status: 'running', events: [],
@@ -1372,7 +1372,7 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     runtime.configurePersistence('/tmp/agentflux/runtime-history.v1.json');
     expect(runtime.list()).toEqual([expect.objectContaining({
       runId: 'old-run', taskId: 'legacy-task-old-run', executionId: 'legacy-execution-old-run',
-      taskTitle: 'old-agent', priority: 'normal', modePolicy: 'agent_decides',
+      taskTitle: 'old-agent', priority: 'normal', workStyle: 'agent_decides',
       pid: null, status: 'aborted', pendingUiRequests: [], historical: true,
     })]);
   });
@@ -1391,7 +1391,7 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     expect(runtime.list()).toEqual([]);
   });
 
-  it('Persistence MVP: 使用 schema v1、容量上限和 temp rename 原子写', async () => {
+  it('Persistence MVP: 使用 schema v2、容量上限和 temp rename 原子写', async () => {
     mockExistsSync.mockImplementation((candidate) => String(candidate) === '/test' || String(candidate).endsWith('entry.ts') || String(candidate).includes('node_modules'));
     runtime.configurePersistence('/tmp/agentflux/runtime-history.v1.json', 1);
     vi.useFakeTimers();
@@ -1403,7 +1403,7 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     const [tempPath, raw] = vi.mocked(fs.writeFileSync).mock.calls.at(-1)!;
     expect(tempPath).toBe('/tmp/agentflux/runtime-history.v1.json.tmp');
     const parsed = JSON.parse(String(raw));
-    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.schemaVersion).toBe(2);
     expect(parsed.records).toHaveLength(1);
     expect(fs.renameSync).toHaveBeenCalledWith('/tmp/agentflux/runtime-history.v1.json.tmp', '/tmp/agentflux/runtime-history.v1.json');
   });
@@ -1413,11 +1413,11 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     vi.useFakeTimers();
     const runId = await runtime.start({
       projectRoot: '/test', name: 'lead', taskTitle: 'Ship control room', initialTask: 'Implement the P0 slice',
-      priority: 'critical', modePolicy: 'M5',
+      priority: 'critical', workStyle: 'workflow',
     });
     const snapshot = runtime.list().find((item) => item.runId === runId)!;
     expect(snapshot).toMatchObject({
-      runId, taskTitle: 'Ship control room', initialPrompt: 'Implement the P0 slice', priority: 'critical', modePolicy: 'M5',
+      runId, taskTitle: 'Ship control room', initialPrompt: 'Implement the P0 slice', priority: 'critical', workStyle: 'workflow',
     });
     expect(snapshot.taskId).toMatch(/^[0-9a-f-]{36}$/);
     expect(snapshot.executionId).toMatch(/^[0-9a-f-]{36}$/);
@@ -1428,21 +1428,21 @@ describe('AgentRuntime — Doc 27 测试门', () => {
     expect(JSON.parse(raw).records[0]).toMatchObject({ taskId: snapshot.taskId, executionId: snapshot.executionId, runId });
   });
 
-  it('Mode policy: fixed 注入闭集 execution env，agent_decides 不继承父进程值', async () => {
-    process.env.AGENTFLUX_EXECUTION_MODE = 'M2';
-    await runtime.start({ projectRoot: '/test', name: 'auto', initialTask: 'auto', modePolicy: 'agent_decides' });
+  it('Work style: fixed 注入闭集 env，agent_decides 不继承父进程值', async () => {
+    process.env.AGENTFLUX_WORK_STYLE = 'team';
+    await runtime.start({ projectRoot: '/test', name: 'auto', initialTask: 'auto', workStyle: 'agent_decides' });
     const autoEnv = (spawnMock.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env;
-    expect(autoEnv.AGENTFLUX_EXECUTION_MODE).toBeUndefined();
+    expect(autoEnv.AGENTFLUX_WORK_STYLE).toBeUndefined();
 
-    await runtime.start({ projectRoot: '/test', name: 'fixed', initialTask: 'fixed', modePolicy: 'M5' });
+    await runtime.start({ projectRoot: '/test', name: 'fixed', initialTask: 'fixed', workStyle: 'workflow' });
     const fixedEnv = (spawnMock.mock.calls[1][2] as { env: NodeJS.ProcessEnv }).env;
-    expect(fixedEnv.AGENTFLUX_EXECUTION_MODE).toBe('M5');
-    delete process.env.AGENTFLUX_EXECUTION_MODE;
+    expect(fixedEnv.AGENTFLUX_WORK_STYLE).toBe('workflow');
+    delete process.env.AGENTFLUX_WORK_STYLE;
   });
 
-  it('Task contract: 拒绝 renderer 不支持的 priority/modePolicy', async () => {
+  it('Task contract: 拒绝 renderer 不支持的 priority/workStyle', async () => {
     await expect(runtime.start({ projectRoot: '/test', name: 'bad', initialTask: 'bad', priority: 'urgent' as any })).rejects.toThrow('priority 不受支持');
-    await expect(runtime.start({ projectRoot: '/test', name: 'bad', initialTask: 'bad', modePolicy: 'M6' as any })).rejects.toThrow('modePolicy 不受支持');
+    await expect(runtime.start({ projectRoot: '/test', name: 'bad', initialTask: 'bad', workStyle: 'swarm' as any })).rejects.toThrow('workStyle 不受支持');
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
@@ -1502,27 +1502,15 @@ describe('AgentRuntime — Doc 27 测试门', () => {
   });
 
   it('P1 retry: runtime derives provenance and preserves source record', async () => {
-    const sourceRunId = await runtime.start({ projectRoot: '/test', name: 'lead', taskTitle: 'Original', initialTask: 'same prompt', priority: 'high', modePolicy: 'M5' });
+    const sourceRunId = await runtime.start({ projectRoot: '/test', name: 'lead', taskTitle: 'Original', initialTask: 'same prompt', priority: 'high', workStyle: 'workflow' });
     emitExit(0, 1, null);
     const before = structuredClone(runtime.list().find((item) => item.runId === sourceRunId)!);
     const retryRunId = await runtime.retry(sourceRunId);
     const source = runtime.list().find((item) => item.runId === sourceRunId)!;
     const retry = runtime.list().find((item) => item.runId === retryRunId)!;
     expect(source).toEqual(before);
-    expect(retry).toMatchObject({ retryOfRunId: sourceRunId, rootRunId: sourceRunId, retryAttempt: 1, taskTitle: 'Original', initialPrompt: 'same prompt', priority: 'high', modePolicy: 'M5' });
+    expect(retry).toMatchObject({ retryOfRunId: sourceRunId, rootRunId: sourceRunId, retryAttempt: 1, taskTitle: 'Original', initialPrompt: 'same prompt', priority: 'high', workStyle: 'workflow' });
     expect(retry.executionId).not.toBe(source.executionId);
   });
 
-  it('P1 retry: legacy history safely infers workspace from fixed cli ancestry', async () => {
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ schemaVersion: 1, savedAt: 1, records: [{
-      runId: 'legacy-failed', name: 'lead', taskTitle: 'Legacy', initialPrompt: 'retry me', priority: 'normal', modePolicy: 'M1',
-      pid: null, status: 'failed', events: [], stderrSummary: '', cliSource: 'project', cliPath: '/test/node_modules/pi/dist/cli.js',
-      runtimeSource: 'path', runtimeExecutable: 'node', runtimeVersion: 'v24', startedAt: 1, lastActivity: 2,
-      exitCode: 1, exitSignal: null, errorCode: 'RPC_EXIT_BEFORE_READY', pendingUiRequests: [], historical: true,
-    }] }));
-    runtime.configurePersistence('/tmp/runtime-history.v1.json');
-    expect(runtime.list()[0].retryable).toBe(true);
-    const retryRunId = await runtime.retry('legacy-failed');
-    expect(runtime.list().find((item) => item.runId === retryRunId)).toMatchObject({ projectRoot: '/test', retryOfRunId: 'legacy-failed', retryAttempt: 1 });
-  });
 });

@@ -1,6 +1,6 @@
 # 26 - 实现状态与测试事实
 
-更新日期：2026-07-18。本文件是当前能力状态的事实源。
+更新日期：2026-07-19。本文件是当前能力状态的事实源。
 
 状态定义：`wired` 表示生产入口可达，`offline verified` 表示确定性回归通过，`live verified` 表示真实 provider 链路通过，`limited` 表示能力可用但边界必须显式说明。
 
@@ -22,7 +22,8 @@
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默；动态消息后缀不误报 prefix miss。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
 | 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。`/flux agent` 统一展示 Main、Persistent 和 SharedBoard execution Agents；Persistent 可续接 session，在线 Ephemeral/RPC 可发送 Message V2，终态 Ephemeral 只读。参数补全和旧 M 编号拒绝仍保留。 |
+| TUI | wired / offline verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。Tab/Enter 补全完整字段后会退出候选态并提交，`work/agent/issue/fork` 裸命令可进入对应菜单。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
+| Desktop | D0/D1 partial / offline verified | 主导航已收敛为 Workbench、Agents、Issues、Activity、Configuration；任务创建使用 `agent_decides/direct/team/workflow/community`，共享 Renderer/Electron contract，并通过 `AGENTFLUX_WORK_STYLE` 将用户固定选择注入 Core。旧 runtime history schema 不迁移。 |
 
 ## 本轮测试
 
@@ -30,8 +31,8 @@
 
 - 工作方式与 Community 状态机：8/8。
 - Agent lifecycle：6/6。
-- Main Agent 自然任务调度协议与 telemetry：4/4。
-- TUI Core：18/18。
+- Main Agent 自然任务调度协议、Desktop 固定工作方式与 telemetry：5/5。
+- TUI Core：21/21。
 - Lifecycle GC：4/4。
 - Capability policy：26/26。
 - Message V2 与 cache impact：24/24。
@@ -48,6 +49,8 @@
 
 2026-07-18 最终组合结果：Direct 4.7s、Team 186.1s、Workflow 89.9s、Community 119.2s，全部 exit 0；Workflow 额外要求 `[DAG Execution: PASSED]`，Community 额外要求 `resolved`。每条链路使用独立 pi 进程、0.25 美元任务预算、240 秒 Core 墙钟和 300 秒测试进程硬超时；任何非零退出、超时或缺少工具/结果标记都会失败。持久证据写入 `.agentflux/test-results/core-deepseek-latest.json`，fixture 与测试进程均已清理。
 
+Desktop 迁移回归：Vitest 13 files、163/163；Vite production build 与 Electron compile 通过。实际 Electron 窗口在 1280×800、1024×720、800×600 下完成 Workbench、Agents 三视图和 Activity 导航/横向溢出检查；Extension UI 的 confirm/select/input 状态链路以真实 pi RPC 通过，最终 `done/exit 0`，残留测试进程为 0。
+
 ## 明确限制与后置范围
 
 - 不再提供 M1–M6 配置读取、映射或 deprecated telemetry。
@@ -57,11 +60,11 @@
 - Persistent Agent 的稳定 session 已实现，但缓存收益需真实长任务 soak 后才可量化。
 - 预算在 provider 请求边界生效，单次请求可能造成小额越界。
 - 自动路由、模型/拓扑成本优化、OS 沙箱、MCP server 级门禁与 archive 容量治理后置。
-- Desktop 尚未迁移到本轮 Core contract；旧 Desktop 仅视为待重构代码，不代表当前产品入口。
+- Desktop 的主任务链路已迁移；Agents/Issues/Activity 的信息结构与视觉收口仍在进行，Community 写操作尚未全部并入 Workbench。
 
 ## 下一发布门
 
-1. 按 [29 - Desktop 工作台规划](29-desktop-workbench-plan.md) 先建立 Core/Desktop 共享 contract，再重构 UI。
+1. 按 [29 - Desktop 工作台规划](29-desktop-workbench-plan.md) 完成 D1 运行控制和 D2 Agents 收口，再接 D3 Issue Room。
 2. 为 Persistent Agent 做多轮真实调用、cache generation 变化和长时间回收 soak。
 3. 在 pi 提供可导出的 context snapshot/runtime API 后，实现真实并行 fork；此前保持限制说明。
 4. 完善 Community proposal/review/decision 与 participant 主动循环，并加入预算和消息轮次门。

@@ -5,12 +5,12 @@
     "moduleResolution": "node",
     "lib": ["ES2020"],
     "outDir": "./dist-electron",
-    "rootDir": "./electron",
+    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "sourceMap": true
   },
-  "include": ["electron/**/*.ts"]
+  "include": ["electron/**/*.ts", "shared/**/*.ts"]
 }

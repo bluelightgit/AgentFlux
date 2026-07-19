@@ -1,4 +1,6 @@
-# AgentFlux Desktop v2.1 — Improvement Plan
+# AgentFlux Desktop v2.1 — Improvement Plan (Archived)
+
+> 已归档：旧八页改良方案已被五入口工作台方案取代。当前规范见 `../docs/29-desktop-workbench-plan.md`。
 
 > Baseline: `desktop/docs-v2-design-spec.md` (v2 component hierarchy, color, icon systems)
 > Scope: Close 14 known gaps by adapting Paperclip + AionUi patterns to the existing 8-page architecture.

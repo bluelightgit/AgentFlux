@@ -1,4 +1,6 @@
-# AgentFlux Desktop v2 — Design Spec
+# AgentFlux Desktop v2 — Design Spec (Archived)
+
+> 已归档：本文描述旧八页/M1–M6 界面，不再作为实现依据。当前规范见 `../docs/29-desktop-workbench-plan.md`。
 
 > 产出方式: 主 agent 补充（设计者 subagent 因 gpt-5.5 过载失败）
 > 实现方式: 多 agent 并行开发

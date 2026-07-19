@@ -1,4 +1,6 @@
 import { parseCapabilityPolicyBundle, type CapabilityPolicyBundle } from './capability-policy';
+import type { RuntimeStartOptions, TaskPriority, WorkStyleSelection } from '../../shared/runtime-contract';
+export type { TaskPriority, WorkStyleSelection } from '../../shared/runtime-contract';
 
 /**
  * Agent Runtime 浏览器侧 TypeScript 客户端
@@ -36,7 +38,7 @@ export interface AgentSession {
   taskTitle: string;
   initialPrompt: string;
   priority: TaskPriority;
-  modePolicy: ModePolicy;
+  workStyle: WorkStyleSelection;
   name: string;
   pid: number | null;
   status: SessionStatus;
@@ -76,17 +78,7 @@ export type ExtensionUIResponse =
   | { id: string; confirmed: boolean }
   | { id: string; cancelled: true };
 
-export interface StartOptions {
-  projectRoot: string;
-  name: string;
-  taskTitle: string;
-  initialTask: string;
-  priority: TaskPriority;
-  modePolicy: ModePolicy;
-}
-
-export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
-export type ModePolicy = 'agent_decides' | 'M1' | 'M2' | 'M5';
+export type StartOptions = RuntimeStartOptions;
 
 export interface RequestMessage {
   type: string;

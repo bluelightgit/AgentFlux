@@ -1,10 +1,9 @@
 import { useEffect, useCallback } from 'react';
 import type { PageName } from '../store/dashboard-store';
 
-const PAGE_ORDER: PageName[] = ['workbench', 'agents', 'chat', 'telemetry', 'sessions', 'dag', 'routing', 'config'];
+const PAGE_ORDER: PageName[] = ['workbench', 'agents', 'issues', 'activity', 'config'];
 const PAGE_KEYS: Record<string, PageName> = {
-  '1': 'workbench', '2': 'agents', '3': 'chat', '4': 'telemetry',
-  '5': 'sessions', '6': 'dag', '7': 'routing', '8': 'config',
+  '1': 'workbench', '2': 'agents', '3': 'issues', '4': 'activity', '5': 'config',
 };
 
 export function useKeyboardNav(currentPage: PageName, setPage: (p: PageName) => void) {
@@ -24,7 +23,7 @@ export function useKeyboardNav(currentPage: PageName, setPage: (p: PageName) => 
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
 
-      // Number keys 1-8 for direct page navigation
+      // Number keys 1-5 for direct page navigation
       if (PAGE_KEYS[e.key]) { e.preventDefault(); setPage(PAGE_KEYS[e.key]); return; }
       // Arrow left/right for sequential nav
       if (e.key === 'ArrowRight' && e.altKey) { e.preventDefault(); goNext(); return; }

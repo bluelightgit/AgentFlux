@@ -254,7 +254,7 @@ function createWindow(): BrowserWindow {
       }
     });
   } else {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    win.loadFile(path.join(__dirname, '..', '..', 'dist', 'index.html'));
   }
 
   return win;

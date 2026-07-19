@@ -194,13 +194,15 @@ describe("IT-8: AppShell renders with correct Live indicator states", () => {
     render(React.createElement(AppShell, null, React.createElement("div", null, "child")));
 
     const navigation = screen.getByRole("navigation");
-    ["Control Room", "Agents", "Agent Channels", "Activity & Cost", "DAG Inspector", "Configuration"].forEach((label) => {
+    ["Workbench", "Agents", "Issues", "Activity", "Configuration"].forEach((label) => {
       expect(screen.getAllByText(label, { selector: "nav button span" })).toHaveLength(1);
     });
     expect(navigation).not.toHaveTextContent("Tasks/Agents");
     expect(navigation).not.toHaveTextContent("Activity / Costs");
     expect(navigation).not.toHaveTextContent("Overview");
-    expect(navigation).not.toHaveTextContent("Issue drafts");
+    expect(navigation).not.toHaveTextContent("Agent Channels");
+    expect(navigation).not.toHaveTextContent("DAG Inspector");
+    expect(navigation).not.toHaveTextContent("Routing");
     expect(navigation).not.toHaveTextContent("Settings");
   });
 

@@ -7,7 +7,7 @@ import { MessageBus } from '../../../src/core/message-bus.ts';
 const require = createRequire(import.meta.url);
 const projectRoot = resolve(import.meta.dirname, '../../..');
 const desktopRoot = resolve(import.meta.dirname, '../..');
-const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'agent-runtime.js'));
+const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'electron', 'agent-runtime.js'));
 
 process.env.AGENTFLUX_PI_MODEL = 'octopus-anthropic/deepseek-v4-flash';
 process.env.AGENTFLUX_PI_THINKING = 'off';

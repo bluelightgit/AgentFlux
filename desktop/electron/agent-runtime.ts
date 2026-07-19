@@ -17,6 +17,7 @@ import { ChildProcess, spawn, spawnSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { EventEmitter } from 'events';
+import { isWorkStyleSelection, type RuntimeStartOptions, type TaskPriority, type WorkStyleSelection } from '../shared/runtime-contract';
 
 // ─── 类型定义 ───────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ export interface RuntimeRecord {
   taskTitle: string;
   initialPrompt: string;
   priority: TaskPriority;
-  modePolicy: ModePolicy;
+  workStyle: WorkStyleSelection;
   name: string;
   proc: ChildProcess;
   status: SessionStatus;
@@ -95,7 +96,7 @@ export interface AgentSessionSnapshot {
   taskTitle: string;
   initialPrompt: string;
   priority: TaskPriority;
-  modePolicy: ModePolicy;
+  workStyle: WorkStyleSelection;
   name: string;
   pid: number | null;
   status: SessionStatus;
@@ -117,18 +118,8 @@ export interface AgentSessionSnapshot {
   historical: boolean;
 }
 
-export interface StartOptions {
-  projectRoot: string;
-  name: string;
-  initialTask?: string;
-  taskTitle?: string;
-  priority?: TaskPriority;
-  modePolicy?: ModePolicy;
-}
-
-export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
-export type FixedExecutionMode = 'M1' | 'M2' | 'M5';
-export type ModePolicy = 'agent_decides' | FixedExecutionMode;
+export type StartOptions = Partial<RuntimeStartOptions> & Pick<RuntimeStartOptions, 'projectRoot' | 'name'>;
+export type { TaskPriority, WorkStyleSelection } from '../shared/runtime-contract';
 
 interface SpawnCommand {
   command: string;
@@ -217,12 +208,12 @@ const SIGTERM_TIMEOUT_MS = 3000;
 const STDERR_SUMMARY_MAX_LINES = 50;
 const LINE_FEED = 0x0a; // '\n'
 const DEFAULT_UI_REQUEST_TIMEOUT_MS = 5 * 60_000;
-const PERSISTENCE_SCHEMA_VERSION = 1;
+const PERSISTENCE_SCHEMA_VERSION = 2;
 const DEFAULT_HISTORY_CAP = 100;
 const MINIMUM_PI_NODE_VERSION = '22.19.0';
 
 interface RuntimePersistenceFile {
-  schemaVersion: 1;
+  schemaVersion: 2;
   savedAt: number;
   records: AgentSessionSnapshot[];
 }
@@ -289,7 +280,7 @@ export class AgentRuntime extends EventEmitter {
     const { projectRoot, name, initialTask } = options;
     const taskTitle = options.taskTitle?.trim() || initialTask?.trim().slice(0, 80) || 'Untitled task';
     const priority = options.priority ?? 'normal';
-    const modePolicy = options.modePolicy ?? 'agent_decides';
+    const workStyle = options.workStyle ?? 'agent_decides';
 
     // 参数校验
     if (!projectRoot || typeof projectRoot !== 'string') {
@@ -301,8 +292,8 @@ export class AgentRuntime extends EventEmitter {
     if (!['low', 'normal', 'high', 'critical'].includes(priority)) {
       throw new Error(`priority 不受支持: ${String(priority)}`);
     }
-    if (!['agent_decides', 'M1', 'M2', 'M5'].includes(modePolicy)) {
-      throw new Error(`modePolicy 不受支持: ${String(modePolicy)}`);
+    if (!isWorkStyleSelection(workStyle)) {
+      throw new Error(`workStyle 不受支持: ${String(workStyle)}`);
     }
 
     if (!path.isAbsolute(projectRoot)) {
@@ -321,7 +312,7 @@ export class AgentRuntime extends EventEmitter {
     const taskId = crypto.randomUUID();
     const executionId = crypto.randomUUID();
     const uniqueName = this.makeUniqueName(name.trim());
-    const { proc, resolved } = this.spawnProcess(projectRoot, uniqueName, entryPath, runId, modePolicy);
+    const { proc, resolved } = this.spawnProcess(projectRoot, uniqueName, entryPath, runId, workStyle);
 
     const now = Date.now();
     const record: RuntimeRecord = {
@@ -335,7 +326,7 @@ export class AgentRuntime extends EventEmitter {
       taskTitle,
       initialPrompt: initialTask?.trim() ?? '',
       priority,
-      modePolicy,
+      workStyle,
       name: uniqueName,
       proc,
       status: 'starting',
@@ -377,9 +368,9 @@ export class AgentRuntime extends EventEmitter {
     if (!source || !['failed', 'aborted'].includes(source.status)) {
       throw new Error('Only a known failed or aborted run can be retried');
     }
-    const projectRoot = source.projectRoot || this.inferLegacyProjectRoot(source.cliPath);
+    const projectRoot = source.projectRoot;
     if (!projectRoot) throw new Error('Historical run has no verified workspace provenance');
-    const runId = await this.start({ projectRoot, name: source.name.replace(/-\d+$/, ''), taskTitle: source.taskTitle, initialTask: source.initialPrompt, priority: source.priority, modePolicy: source.modePolicy });
+    const runId = await this.start({ projectRoot, name: source.name.replace(/-\d+$/, ''), taskTitle: source.taskTitle, initialTask: source.initialPrompt, priority: source.priority, workStyle: source.workStyle });
     const created = this.records.get(runId)!;
     created.retryOfRunId = source.runId;
     created.rootRunId = source.rootRunId || source.runId;
@@ -387,20 +378,6 @@ export class AgentRuntime extends EventEmitter {
     this.emit(AgentRuntime.EVENT_RECORD_UPDATE, this.getSnapshot(runId));
     this.schedulePersistence();
     return runId;
-  }
-
-  private inferLegacyProjectRoot(cliPath: string): string | null {
-    if (!cliPath || !path.isAbsolute(cliPath)) return null;
-    let candidate = path.dirname(cliPath);
-    for (let depth = 0; depth < 8; depth += 1) {
-      const relative = path.relative(candidate, cliPath);
-      const firstSegment = relative.split(path.sep)[0]?.toLowerCase();
-      if (firstSegment === 'node_modules' && !relative.startsWith('..') && !path.isAbsolute(relative) && fs.existsSync(path.join(candidate, 'src', 'entry.ts'))) return candidate;
-      const parent = path.dirname(candidate);
-      if (parent === candidate) break;
-      candidate = parent;
-    }
-    return null;
   }
 
   async waitUntilReady(runId: string, timeoutMs = 8_000): Promise<void> {
@@ -591,7 +568,7 @@ export class AgentRuntime extends EventEmitter {
     name: string,
     entryPath: string,
     runId: string,
-    modePolicy: ModePolicy,
+    workStyle: WorkStyleSelection,
   ): { proc: ChildProcess; resolved: SpawnCommand } {
     const resolved = this.resolveSpawnCommand(projectRoot);
     const args = [...resolved.argsPrefix, ...this.buildSpawnArgs(entryPath, name)];
@@ -603,8 +580,8 @@ export class AgentRuntime extends EventEmitter {
       AGENTFLUX_PI_SOURCE: resolved.source,
     };
     // Renderer can only select this closed policy union. Arbitrary env/args never cross IPC.
-    if (modePolicy !== 'agent_decides') childEnv.AGENTFLUX_EXECUTION_MODE = modePolicy;
-    else delete childEnv.AGENTFLUX_EXECUTION_MODE;
+    if (workStyle !== 'agent_decides') childEnv.AGENTFLUX_WORK_STYLE = workStyle;
+    else delete childEnv.AGENTFLUX_WORK_STYLE;
     // Never leak Electron's parent flag into a real Node child.
     delete childEnv.ELECTRON_RUN_AS_NODE;
     if (resolved.runAsNode) childEnv.ELECTRON_RUN_AS_NODE = '1';
@@ -1203,7 +1180,7 @@ export class AgentRuntime extends EventEmitter {
     for (const r of this.records.values()) merged.set(r.runId, this.getSnapshot(r.runId));
     return Array.from(merged.values()).map((snapshot) => ({
       ...snapshot,
-      retryable: ['failed', 'aborted'].includes(snapshot.status) && Boolean(snapshot.projectRoot || this.inferLegacyProjectRoot(snapshot.cliPath)),
+      retryable: ['failed', 'aborted'].includes(snapshot.status) && Boolean(snapshot.projectRoot),
     }));
   }
 
@@ -1252,7 +1229,7 @@ export class AgentRuntime extends EventEmitter {
       taskTitle: r.taskTitle,
       initialPrompt: r.initialPrompt,
       priority: r.priority,
-      modePolicy: r.modePolicy,
+      workStyle: r.workStyle,
       name: r.name,
       pid: r.proc.pid ?? null,
       status: r.status,
@@ -1321,8 +1298,6 @@ export class AgentRuntime extends EventEmitter {
         this.historicalRecords.set(item.runId, {
           ...item,
           projectRoot: typeof item.projectRoot === 'string' ? item.projectRoot : '',
-          // schema v1 records written before task-scoped runtimes receive stable,
-          // honest legacy defaults instead of pretending the old run had a task contract.
           taskId: typeof item.taskId === 'string' ? item.taskId : `legacy-task-${item.runId}`,
           executionId: typeof item.executionId === 'string' ? item.executionId : `legacy-execution-${item.runId}`,
           retryOfRunId: typeof item.retryOfRunId === 'string' ? item.retryOfRunId : null,
@@ -1331,7 +1306,7 @@ export class AgentRuntime extends EventEmitter {
           taskTitle: typeof item.taskTitle === 'string' ? item.taskTitle : item.name,
           initialPrompt: typeof item.initialPrompt === 'string' ? item.initialPrompt : '',
           priority: ['low', 'normal', 'high', 'critical'].includes(item.priority) ? item.priority : 'normal',
-          modePolicy: ['agent_decides', 'M1', 'M2', 'M5'].includes(item.modePolicy) ? item.modePolicy : 'agent_decides',
+          workStyle: isWorkStyleSelection(item.workStyle) ? item.workStyle : 'agent_decides',
           pid: null,
           status: ['starting', 'running', 'blocked'].includes(item.status) ? 'aborted' : item.status,
           events: Array.isArray(item.events) ? item.events.slice(-1000) : [],
@@ -1366,7 +1341,7 @@ export class AgentRuntime extends EventEmitter {
       .sort((a, b) => b.lastActivity - a.lastActivity)
       .slice(0, this.historyCap)
       .map((item) => ({ ...item, pendingUiRequests: [] }));
-    const payload: RuntimePersistenceFile = { schemaVersion: 1, savedAt: Date.now(), records };
+    const payload: RuntimePersistenceFile = { schemaVersion: 2, savedAt: Date.now(), records };
     const directory = path.dirname(this.persistencePath);
     const tempPath = `${this.persistencePath}.tmp`;
     try {

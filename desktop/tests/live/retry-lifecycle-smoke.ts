@@ -17,7 +17,7 @@ const projectRoot = resolve(import.meta.dirname, '../../..');
 const desktopRoot = resolve(import.meta.dirname, '../..');
 const flag = join(desktopRoot, '.tmp-retry-lifecycle-smoke.flag');
 const fixture = join(import.meta.dirname, 'fixtures', 'retry-lifecycle-smoke.ts');
-const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'agent-runtime.js')) as { AgentRuntime: new () => Runtime };
+const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'electron', 'agent-runtime.js')) as { AgentRuntime: new () => Runtime };
 process.env.AGENTFLUX_DESKTOP_LIVE_TEST = '1';
 process.env.AGENTFLUX_DESKTOP_TEST_EXTENSION = fixture;
 process.env.AGENTFLUX_RETRY_SMOKE_FLAG = flag;

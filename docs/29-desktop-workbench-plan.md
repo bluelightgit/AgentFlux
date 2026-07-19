@@ -1,6 +1,8 @@
 # 29 - Desktop 多 Agent 工作台重构规划
 
-更新日期：2026-07-18。本轮只规划，不修改 Desktop。Desktop 开发必须通过 AgentFlux 多 Agent方式执行，主 Agent负责监控、测试与修复运行时问题。
+更新日期：2026-07-19。本文件是 Desktop 重构的当前规划与进度记录。
+
+当前进度：D0 主任务契约已完成；D1 的导航、任务创建、失败进入/Retry 和三栏调整已完成，运行时拆分与任务内参与者视图仍在开发。
 
 ## 产品目标
 
@@ -50,15 +52,17 @@ Issue Room 三栏：左侧 Issue 状态与筛选，中间 comment/claim/submit/r
 
 ### D0：共享契约
 
-- Electron IPC/renderer 类型直接复用或生成自 Core 的 WorkStyle、AgentRecord、Issue、Claim、TaskExecutionPlan。
-- 删除 `modePolicy`、M fallback 和 renderer 内复制的 capability manifest。
-- 为旧 Desktop 数据不做迁移；开发 fixture 使用新 schema 重建。
+- [完成] Renderer 与 Electron 共享 `runtime-contract.ts` 的 WorkStyle/StartOptions。
+- [完成] 删除主任务链路的 `modePolicy` 与 M fallback；固定工作方式进入 Core task contract。
+- [完成] runtime history 升级为 schema v2，旧数据不迁移。
+- [待开发] AgentRecord、Issue、Claim 与 TaskExecutionPlan 的共享读取契约。
 
 ### D1：运行时与 Workbench 骨架
 
-- Electron main 拆成 runtime manager、protocol adapter、history store。
-- 首先接通 Direct 和 Team：spawn/readiness、事件归属、follow-up/steer/abort/stop、失败进入、Retry lineage。
-- 完成三栏可调布局和统一视觉 token/component primitives。
+- [部分完成] Direct/Team/Workflow/Community 选择、spawn/readiness、follow-up/steer/abort/stop、失败进入和 Retry lineage。
+- [完成] 三栏拖动、键盘调整、重置与窄屏单栏布局。
+- [完成] 主导航收敛为五个产品入口，不再展示 Chat/Sessions/DAG/Routing 等重复页面。
+- [待开发] Electron main 拆分 runtime manager、protocol adapter、history store；任务内参与者与真实消息 lanes。
 
 ### D2：Agents
 

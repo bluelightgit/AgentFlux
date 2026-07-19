@@ -19,7 +19,7 @@
  *   - message_update → 忽略
  */
 import { create } from "zustand";
-import { agentRuntimeClient, type AgentSession, type ExtensionUIResponse, type RuntimeDiagnostics, type ModePolicy, type TaskPriority } from "../lib/agent-runtime";
+import { agentRuntimeClient, type AgentSession, type ExtensionUIResponse, type RuntimeDiagnostics, type TaskPriority, type WorkStyleSelection } from "../lib/agent-runtime";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,7 +45,7 @@ export interface NewTaskOptions {
   title: string;
   prompt: string;
   priority: TaskPriority;
-  modePolicy: ModePolicy;
+  workStyle: WorkStyleSelection;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
           taskTitle: "Untitled task",
           initialTask: "Start a new task and wait for instructions.",
           priority: "normal",
-          modePolicy: "agent_decides",
+          workStyle: "agent_decides",
         });
         const runtimes = await agentRuntimeClient.list();
         set({ runtimes, loading: false, bridgeAvailable: true });
@@ -461,7 +461,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
           taskTitle: title,
           initialTask: prompt,
           priority: options.priority,
-          modePolicy: options.modePolicy,
+          workStyle: options.workStyle,
         });
         const userEvent: WorkbenchStreamEvent = {
           id: nextEventId(), type: "user", content: prompt, timestamp: Date.now(), runId: result.runId,
@@ -574,7 +574,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => {
             taskTitle: prompt.trim().slice(0, 80),
             initialTask: prompt,
             priority: "normal",
-            modePolicy: "agent_decides",
+            workStyle: "agent_decides",
           });
 
           // 用户事件带实际 runId

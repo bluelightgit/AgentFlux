@@ -45,7 +45,7 @@ interface ElectronFileApi {
 }
 
 interface AgentRuntimeBridge {
-  start(options: { projectRoot: string; name: string; taskTitle: string; initialTask: string; priority: 'low'|'normal'|'high'|'critical'; modePolicy: 'agent_decides'|'M1'|'M2'|'M5' }): Promise<{ runId: string; taskId: string; executionId: string }>;
+  start(options: { projectRoot: string; name: string; taskTitle: string; initialTask: string; priority: 'low'|'normal'|'high'|'critical'; workStyle: 'agent_decides'|'direct'|'team'|'workflow'|'community' }): Promise<{ runId: string; taskId: string; executionId: string }>;
   list(): Promise<unknown[]>;
   diagnostics(): Promise<unknown>;
   capabilityPolicies(projectRoot: string): Promise<unknown>;
@@ -171,7 +171,7 @@ describe('Preload Contract — 类型与结构验证', () => {
       taskTitle: 'Task',
       initialTask: 'optional',
       priority: 'normal',
-      modePolicy: 'agent_decides',
+      workStyle: 'agent_decides',
     };
     expect(params.projectRoot).toBe('/test');
     expect(params.name).toBe('test');
@@ -184,9 +184,9 @@ describe('Preload Contract — 类型与结构验证', () => {
       taskTitle: 'Task',
       initialTask: 'Prompt',
       priority: 'critical',
-      modePolicy: 'M5',
+      workStyle: 'workflow',
     };
-    expect(params2.modePolicy).toBe('M5');
+    expect(params2.workStyle).toBe('workflow');
   });
 
   it('契约：window 同时含有 api 与 agentRuntime 两个属性', () => {

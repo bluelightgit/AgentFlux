@@ -1,4 +1,6 @@
-# AgentFlux Desktop v2 — Architecture Specification
+# AgentFlux Desktop v2 — Architecture Specification (Archived)
+
+> 已归档：本文不再代表当前运行时和信息架构。当前规范见 `../docs/29-desktop-workbench-plan.md`。
 
 > **Status**: Design directive from main agent
 > **Date**: 2026-06-30

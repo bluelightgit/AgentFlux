@@ -11,7 +11,7 @@ function run(overrides: Partial<SubagentRunEvent> = {}): SubagentRunEvent {
   };
 }
 
-describe('Control Room P1 helpers', () => {
+describe('Workbench P1 helpers', () => {
   it('clamps panel widths and always reserves the 400px center lane', () => {
     expect(clampColumns({ left: 999, right: 999 }, 980)).toEqual({ left: 306, right: 260 });
     const value = clampColumns({ left: -1, right: -1 }, 980);
@@ -29,7 +29,7 @@ describe('Control Room P1 helpers', () => {
   it('diagnostics excludes prompt and includes only the runtime whitelist', () => {
     const output = buildRuntimeDiagnostics({
       projectRoot: 'C:/work', runId: 'r', taskId: 't', executionId: 'e', retryOfRunId: null, rootRunId: 'r', retryAttempt: 0,
-      taskTitle: 'title', initialPrompt: 'TOP SECRET PROMPT', priority: 'normal', modePolicy: 'M1', name: 'lead', pid: null,
+      taskTitle: 'title', initialPrompt: 'TOP SECRET PROMPT', priority: 'normal', workStyle: 'direct', name: 'lead', pid: null,
       status: 'failed', events: [], stderrSummary: 'Authorization: Bearer abc123', cliSource: 'project', cliPath: 'cli', runtimeSource: 'path',
       runtimeExecutable: 'node', runtimeVersion: 'v24', startedAt: 1, lastActivity: 2, exitCode: 1, exitSignal: null,
       errorCode: 'RPC_EXIT_BEFORE_READY', retryable: true, pendingUiRequests: [], historical: false,

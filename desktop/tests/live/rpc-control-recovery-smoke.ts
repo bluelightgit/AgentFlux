@@ -32,7 +32,7 @@ type Runtime = {
 const require = createRequire(import.meta.url);
 const projectRoot = resolve(import.meta.dirname, '../../..');
 const desktopRoot = resolve(import.meta.dirname, '../..');
-const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'agent-runtime.js')) as {
+const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'electron', 'agent-runtime.js')) as {
   AgentRuntime: new () => Runtime;
 };
 

@@ -29,7 +29,7 @@ const resultPath = join(desktopRoot, '.tmp-extension-ui-live-result.json');
 const reportPath = join(desktopRoot, '.tmp-extension-ui-live-report.json');
 const tracePath = join(desktopRoot, '.tmp-extension-ui-live-trace.json');
 const fixturePath = join(import.meta.dirname, 'fixtures', 'extension-ui-smoke.ts');
-const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'agent-runtime.js')) as {
+const { AgentRuntime } = require(join(desktopRoot, 'dist-electron', 'electron', 'agent-runtime.js')) as {
   AgentRuntime: new () => Runtime;
 };
 

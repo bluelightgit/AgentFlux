@@ -32,7 +32,7 @@ const bridgeState: {
     taskTitle?: string;
     initialPrompt?: string;
     priority?: string;
-    modePolicy?: string;
+    workStyle?: string;
   }>;
   events: unknown[];
   listeners: Array<(event: unknown) => void>;
@@ -52,7 +52,7 @@ const callCounts: {
 
 function makeBridge() {
   return {
-    start: async (options: { projectRoot: string; name: string; taskTitle: string; initialTask: string; priority: string; modePolicy: string }) => {
+    start: async (options: { projectRoot: string; name: string; taskTitle: string; initialTask: string; priority: string; workStyle: string }) => {
       callCounts.start++;
       const runId = "run-" + String(Date.now()) + "-" + String(Math.random().toString(36).slice(2, 6));
       bridgeState.runtimes.push({
@@ -62,7 +62,7 @@ function makeBridge() {
         taskTitle: options.taskTitle,
         initialPrompt: options.initialTask,
         priority: options.priority,
-        modePolicy: options.modePolicy,
+        workStyle: options.workStyle,
         name: options.name,
         pid: 12345,
         status: "running",
@@ -477,26 +477,26 @@ describe('IT-WB-Control-Room: task dispatch and execution inspector', () => {
     render(<WorkbenchPage />);
     await flushMicrotasks();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New Task' })); });
-    expect(screen.getByLabelText('Execution mode')).toHaveValue('agent_decides');
+    expect(screen.getByLabelText('Work style')).toHaveValue('agent_decides');
     fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'Default routing task' } });
     fireEvent.change(screen.getByLabelText('Initial prompt'), { target: { value: 'Let the lead agent choose.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Dispatch task' }));
     fireEvent.click(screen.getByRole('button', { name: 'Dispatch task' }));
     await waitFor(() => expect(callCounts.start).toBe(1));
-    expect(bridgeState.runtimes[0]).toMatchObject({ priority: 'normal', modePolicy: 'agent_decides' });
+    expect(bridgeState.runtimes[0]).toMatchObject({ priority: 'normal', workStyle: 'agent_decides' });
   });
 
-  it('fixed M5 and critical priority flow into the selected execution inspector', async () => {
+  it('fixed Workflow and critical priority flow into the selected execution inspector', async () => {
     render(<WorkbenchPage />);
     await flushMicrotasks();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New Task' })); });
     fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'Critical DAG task' } });
     fireEvent.change(screen.getByLabelText('Initial prompt'), { target: { value: 'Execute the known DAG.' } });
     fireEvent.change(screen.getByLabelText('Task priority'), { target: { value: 'critical' } });
-    fireEvent.change(screen.getByLabelText('Execution mode'), { target: { value: 'M5' } });
+    fireEvent.change(screen.getByLabelText('Work style'), { target: { value: 'workflow' } });
     fireEvent.click(screen.getByRole('button', { name: 'Dispatch task' }));
-    await waitFor(() => expect(screen.getByText('User fixed')).toBeInTheDocument());
-    expect(screen.getByText('M5')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('User')).toBeInTheDocument());
+    expect(screen.getByText('workflow')).toBeInTheDocument();
     expect(screen.getByText('critical')).toBeInTheDocument();
     expect(screen.getByTitle(/^task-run-/)).toBeInTheDocument();
     expect(screen.getByTitle(/^execution-run-/)).toBeInTheDocument();
@@ -505,14 +505,14 @@ describe('IT-WB-Control-Room: task dispatch and execution inspector', () => {
   it('blocked and failed lead runtimes surface operator attention', async () => {
     bridgeState.runtimes.push({
       runId: 'attention-run', taskId: 'attention-task', executionId: 'attention-execution', taskTitle: 'Approve deployment',
-      initialPrompt: 'Deploy', priority: 'high', modePolicy: 'M2', name: 'lead', pid: 44, status: 'blocked',
+      initialPrompt: 'Deploy', priority: 'high', workStyle: 'team', name: 'lead', pid: 44, status: 'blocked',
       lastActivity: Date.now(), events: [], stderrSummary: '', pendingUiRequests: [], historical: false,
     });
     render(<WorkbenchPage />);
     await waitFor(() => expect(screen.getByText('1 run needs attention.')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Approve deployment'));
     expect(screen.getByText('blocked')).toBeInTheDocument();
-    expect(screen.getByText('User fixed')).toBeInTheDocument();
+    expect(screen.getByText('User')).toBeInTheDocument();
   });
 });
 
@@ -1317,7 +1317,7 @@ describe('IT-WB-P1: failed history and resizable control room', () => {
   it('failed run allows only Retry and Copy diagnostics', () => {
     const failed = {
       projectRoot: '/test', runId: 'failed-1', taskId: 'task', executionId: 'exec', retryOfRunId: null, rootRunId: 'failed-1', retryAttempt: 0,
-      retryable: true, taskTitle: 'Failed task', initialPrompt: 'prompt', priority: 'normal', modePolicy: 'M1', name: 'lead', pid: null,
+      retryable: true, taskTitle: 'Failed task', initialPrompt: 'prompt', priority: 'normal', workStyle: 'direct', name: 'lead', pid: null,
       status: 'failed', events: [], stderrSummary: 'boom', cliSource: 'project', cliPath: '/test/node_modules/pi/cli.js', runtimeSource: 'path',
       runtimeExecutable: 'node', runtimeVersion: 'v24', startedAt: 1, lastActivity: 2, exitCode: 1, exitSignal: null, errorCode: 'RPC_EXIT_BEFORE_READY', pendingUiRequests: [], historical: false,
     };
@@ -1345,9 +1345,9 @@ describe('IT-WB-P1: failed history and resizable control room', () => {
     const left = screen.getByRole('separator', { name: 'Resize task roster' });
     fireEvent.keyDown(left, { key: 'End' });
     expect(left).toHaveAttribute('aria-valuenow', '420');
-    expect(JSON.parse(localStorage.getItem('agentflux.control-room.layout.v1')!)).toMatchObject({ left: 420 });
+    expect(JSON.parse(localStorage.getItem('agentflux.workbench.layout.v1')!)).toMatchObject({ left: 420 });
     fireEvent.click(screen.getByRole('button', { name: 'Reset layout' }));
-    expect(JSON.parse(localStorage.getItem('agentflux.control-room.layout.v1')!)).toEqual({ left: 240, right: 320 });
+    expect(JSON.parse(localStorage.getItem('agentflux.workbench.layout.v1')!)).toEqual({ left: 240, right: 320 });
     view.unmount();
     width = 800;
     render(<WorkbenchPage />);

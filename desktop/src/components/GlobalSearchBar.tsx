@@ -76,7 +76,7 @@ export function GlobalSearchBar(): React.ReactElement {
             title: `subagent.run - ${e.agent}`,
             detail: `${formatCost(e.costUsd)} - ${e.model} - ${formatTs(e.ts)}`,
             action: () => {
-              setPage('telemetry');
+              setPage('activity');
               setShowResults(false);
             },
           });
@@ -102,7 +102,7 @@ export function GlobalSearchBar(): React.ReactElement {
             detail: `${sessionsDir}/${f}`,
             action: () => {
               selectSession(f);
-              setPage('sessions');
+              setPage('activity');
               setShowResults(false);
             },
           });

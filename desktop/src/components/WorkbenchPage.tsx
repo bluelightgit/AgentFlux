@@ -17,7 +17,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useDashboardStore } from "../store/dashboard-store";
 import { useWorkbenchStore, type WorkbenchStreamEvent, type WorkbenchEventType } from "../store/workbench-store";
 import { Icon } from "./ui";
-import type { AgentSession, ModePolicy, PendingExtensionUIRequest, SessionStatus, TaskPriority } from "../lib/agent-runtime";
+import type { AgentSession, PendingExtensionUIRequest, SessionStatus, TaskPriority, WorkStyleSelection } from "../lib/agent-runtime";
 import { formatTime } from "../lib/format";
 import { CapabilityPolicyPanel } from './CapabilityPolicyPanel';
 import { aggregateExecutionFamily, buildRuntimeDiagnostics, clampColumns, type ExecutionFamilyAggregate } from '../lib/workbench-p1';
@@ -27,7 +27,7 @@ import { aggregateExecutionFamily, buildRuntimeDiagnostics, clampColumns, type E
 // ---------------------------------------------------------------------------
 
 const BREAKPOINT_XL = 1280;
-const LAYOUT_KEY = 'agentflux.control-room.layout.v1';
+const LAYOUT_KEY = 'agentflux.workbench.layout.v1';
 const DEFAULT_COLUMNS = { left: 240, right: 320 };
 
 function readColumns(): { left: number; right: number } {
@@ -562,8 +562,8 @@ function ComposerPanel({ disabled }: { disabled: boolean }): React.ReactElement 
       {selectedRuntime ? (
         <dl className="grid grid-cols-[88px_1fr] gap-x-3 gap-y-1.5 border-b border-slate-200 px-3 py-3 text-xs dark:border-slate-700">
           <dt className="text-slate-500">Task</dt><dd className="truncate font-medium text-slate-800 dark:text-slate-100">{selectedRuntime.taskTitle || selectedRuntime.name}</dd>
-          <dt className="text-slate-500">Mode source</dt><dd>{selectedRuntime.modePolicy === 'agent_decides' ? 'Main agent decides' : 'User fixed'}</dd>
-          <dt className="text-slate-500">Mode</dt><dd className="font-mono">{selectedRuntime.modePolicy === 'agent_decides' ? 'AUTO' : selectedRuntime.modePolicy}</dd>
+          <dt className="text-slate-500">Selected by</dt><dd>{selectedRuntime.workStyle === 'agent_decides' ? 'Main agent' : 'User'}</dd>
+          <dt className="text-slate-500">Work style</dt><dd className="font-mono uppercase">{selectedRuntime.workStyle === 'agent_decides' ? 'Agent decides' : selectedRuntime.workStyle}</dd>
           <dt className="text-slate-500">Priority</dt><dd className="font-mono uppercase">{selectedRuntime.priority || 'normal'}</dd>
           <dt className="text-slate-500">Status</dt><dd className="font-mono uppercase">{selectedRuntime.status}</dd>
           {selectedRuntime.errorCode && <><dt className="text-red-600 dark:text-red-400">Error code</dt><dd className="font-mono text-red-700 dark:text-red-300">{selectedRuntime.errorCode}</dd></>}
@@ -721,7 +721,7 @@ function NewTaskDialog({ open, onClose }: { open: boolean; onClose: () => void }
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('normal');
-  const [modePolicy, setModePolicy] = useState<ModePolicy>('agent_decides');
+  const [workStyle, setWorkStyle] = useState<WorkStyleSelection>('agent_decides');
   const dispatchedRef = useRef(false);
 
   useEffect(() => {
@@ -732,9 +732,9 @@ function NewTaskDialog({ open, onClose }: { open: boolean; onClose: () => void }
   const dispatch = async () => {
     if (dispatchedRef.current || !title.trim() || !prompt.trim()) return;
     dispatchedRef.current = true;
-    await createTask({ title, prompt, priority, modePolicy });
+    await createTask({ title, prompt, priority, workStyle });
     if (!useWorkbenchStore.getState().error) {
-      setTitle(''); setPrompt(''); setPriority('normal'); setModePolicy('agent_decides'); onClose();
+      setTitle(''); setPrompt(''); setPriority('normal'); setWorkStyle('agent_decides'); onClose();
     } else {
       dispatchedRef.current = false;
     }
@@ -752,9 +752,9 @@ function NewTaskDialog({ open, onClose }: { open: boolean; onClose: () => void }
           <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">Initial prompt<textarea aria-label="Initial prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={6} className="mt-1.5 w-full resize-y border border-slate-300 bg-transparent px-3 py-2 text-sm outline-none focus:border-cyan-600 dark:border-slate-600" placeholder="Context, constraints, acceptance criteria…" /></label>
           <div className="grid grid-cols-2 gap-4">
             <label className="text-xs font-semibold">Priority<select aria-label="Task priority" value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)} className="mt-1.5 w-full border border-slate-300 bg-transparent px-2 py-2 font-mono text-xs uppercase dark:border-slate-600"><option value="low">LOW</option><option value="normal">NORMAL</option><option value="high">HIGH</option><option value="critical">CRITICAL</option></select></label>
-            <label className="text-xs font-semibold">Execution mode<select aria-label="Execution mode" value={modePolicy} onChange={(event) => setModePolicy(event.target.value as ModePolicy)} className="mt-1.5 w-full border border-slate-300 bg-transparent px-2 py-2 text-xs dark:border-slate-600"><option value="agent_decides">Main agent decides</option><option value="M1">Fixed · M1 single agent</option><option value="M2">Fixed · M2 delegated</option><option value="M5">Fixed · M5 DAG</option></select></label>
+            <label className="text-xs font-semibold">Work style<select aria-label="Work style" value={workStyle} onChange={(event) => setWorkStyle(event.target.value as WorkStyleSelection)} className="mt-1.5 w-full border border-slate-300 bg-transparent px-2 py-2 text-xs dark:border-slate-600"><option value="agent_decides">Main agent decides</option><option value="direct">Direct</option><option value="team">Team</option><option value="workflow">Workflow</option><option value="community">Community</option></select></label>
           </div>
-          <p className="border-l-2 border-cyan-600 pl-3 text-xs leading-5 text-slate-500"><strong className="text-slate-700 dark:text-slate-200">Default: Main agent decides.</strong> Fix M1, M2 or M5 only when the execution shape is already known. Automatic routing and sandbox policy are not configured here.</p>
+          <p className="border-l-2 border-cyan-600 pl-3 text-xs leading-5 text-slate-500">Let Main choose, or select a work style when the collaboration shape is already clear.</p>
           {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-3 dark:border-slate-700"><button type="button" onClick={onClose} className="px-3 py-2 text-xs text-slate-500">Cancel</button><button type="button" onClick={dispatch} disabled={loading || !title.trim() || !prompt.trim()} className="bg-cyan-700 px-4 py-2 text-xs font-semibold text-white hover:bg-cyan-800 disabled:opacity-40">{loading ? 'Dispatching…' : 'Dispatch task'}</button></footer>
@@ -774,7 +774,7 @@ function OnboardingOverlay(): React.ReactElement {
       <div className="min-w-0">
       <p className="af-kicker">Workspace required</p>
       <h2 className="mt-1 text-base font-semibold text-slate-800 dark:text-slate-100">Connect an AgentFlux project</h2>
-      <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500 dark:text-slate-400">Select or add a workspace in the top bar. Control Room will then create lead runtimes, surface agent requests, and keep task execution in one place.</p>
+      <p className="mt-2 max-w-lg text-sm leading-6 text-slate-500 dark:text-slate-400">Select or add a workspace to create tasks, talk with Agents, and handle decisions in one place.</p>
       <div className="mt-4 flex flex-col gap-2 text-left text-xs text-slate-500">
         <div className="flex items-center gap-2">
           <span className="inline-block h-2 w-2 rounded-full bg-red-400" />
@@ -844,9 +844,9 @@ export const WorkbenchPage: React.FC = () => {
   };
 
   return (
-    <div ref={roomRef} className="control-room flex h-full min-w-0 flex-col border border-[var(--af-line)] bg-[var(--af-panel)]" data-testid="operations-control-room">
+    <div ref={roomRef} className="agent-workbench flex h-full min-w-0 flex-col border border-[var(--af-line)] bg-[var(--af-panel)]" data-testid="agent-workbench">
       <header className="flex items-center gap-4 border-b border-[var(--af-line)] bg-[var(--af-panel-subtle)] px-4 py-3">
-        <div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Operate / Control Room</p><h1 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">Task operations</h1></div>
+        <div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Workbench</p><h1 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">Tasks and Agents</h1></div>
         <div className="hidden items-center gap-4 text-xs text-slate-500 sm:flex"><span><b className="font-mono text-slate-900 dark:text-white">{liveCount}</b> LIVE</span><span><b className={`font-mono ${attentionCount ? 'text-amber-600' : 'text-slate-900 dark:text-white'}`}>{attentionCount}</b> ATTENTION</span></div>
         <button type="button" onClick={() => setNewTaskOpen(true)} disabled={onboarding} className="af-button-primary flex items-center gap-2 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"><Icon name="Plus" size={16} />New Task</button>
         {threeCol && <button type="button" onClick={() => updateColumns(DEFAULT_COLUMNS)} className="text-xs text-slate-500 hover:text-cyan-700">Reset layout</button>}

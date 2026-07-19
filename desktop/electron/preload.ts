@@ -7,6 +7,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
+import type { RuntimeStartOptions } from '../shared/runtime-contract';
 
 // ─── Legacy API: window.api ────────────────────────────────────────────────
 // 保留 git HEAD 版本 window.api 的全部能力
@@ -88,14 +89,7 @@ contextBridge.exposeInMainWorld('api', api);
 // ─── Agent Runtime Bridge ──────────────────────────────────────────────────
 
 export interface AgentRuntimeBridge {
-  start(options: {
-    projectRoot: string;
-    name: string;
-    taskTitle: string;
-    initialTask: string;
-    priority: 'low' | 'normal' | 'high' | 'critical';
-    modePolicy: 'agent_decides' | 'M1' | 'M2' | 'M5';
-  }): Promise<{ runId: string; taskId: string; executionId: string }>;
+  start(options: RuntimeStartOptions): Promise<{ runId: string; taskId: string; executionId: string }>;
   retry(runId: string): Promise<{ runId: string; taskId: string; executionId: string }>;
   list(): Promise<unknown[]>;
   diagnostics(): Promise<unknown>;

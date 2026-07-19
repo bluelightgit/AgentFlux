@@ -13,18 +13,11 @@ import TitleBar from './TitleBar';
 // Navigation items (per design spec §2.2 / §3)
 // ---------------------------------------------------------------------------
 const NAV_GROUPS: { label: string; items: { id: PageName; label: string; icon: string; note?: string }[] }[] = [
-  { label: 'OPERATE', items: [
-    { id: 'workbench', label: 'Control Room', icon: 'Workflow', note: 'create & run tasks' },
-    { id: 'agents', label: 'Agents', icon: 'Users', note: 'identities & caps' },
-    { id: 'chat', label: 'Agent Channels', icon: 'MessageCircle', note: 'read-only' },
-  ] },
-  { label: 'REVIEW', items: [
-    { id: 'telemetry', label: 'Activity & Cost', icon: 'Activity', note: 'read-only' },
-    { id: 'sessions', label: 'Sessions', icon: 'MessageSquare', note: 'read-only' },
-    { id: 'dag', label: 'DAG Inspector', icon: 'Workflow', note: 'diagnostics' },
-  ] },
-  { label: 'SYSTEM', items: [
-    { id: 'routing', label: 'Routing', icon: 'Route' },
+  { label: 'WORKSPACE', items: [
+    { id: 'workbench', label: 'Workbench', icon: 'Workflow' },
+    { id: 'agents', label: 'Agents', icon: 'Users' },
+    { id: 'issues', label: 'Issues', icon: 'CircleDot' },
+    { id: 'activity', label: 'Activity', icon: 'Activity' },
     { id: 'config', label: 'Configuration', icon: 'Settings2' },
   ] },
 ];
@@ -162,7 +155,7 @@ const TopBar: React.FC = () => {
       {/* Center: App title */}
       <div className="flex-1 min-w-0 text-center">
         <span className="font-mono text-sm font-semibold uppercase tracking-[0.16em] text-[var(--af-ink)]">AgentFlux</span>
-        <span className="ml-2 hidden text-[9px] uppercase tracking-wider text-[var(--af-muted)] 2xl:inline">Operations control plane</span>
+        <span className="ml-2 hidden text-[9px] uppercase tracking-wider text-[var(--af-muted)] 2xl:inline">Multi-agent workbench</span>
       </div>
 
       {/* Right: Cost counter, Live indicator, Command palette, Theme toggle, Refresh */}
