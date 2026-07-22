@@ -7,8 +7,10 @@ AgentFlux 是基于 [pi](https://github.com/earendil-works/pi-coding-agent) 的�
 项目已在 `.pi/settings.json` 配置本地扩展，进入仓库后直接运行 pi；也可手动加载：
 
 ```bash
-pi -e ./src/entry.ts --provider <provider> --model <model>
+pi -e ./dist/extension/entry.js --provider <provider> --model <model>
 ```
+
+先执行 `npm run build` 生成扩展入口。`src/entry.ts` 只用于源码开发和测试；全局安装及 Desktop 集成均加载 `dist/extension/entry.js`，发布包不携带 `src`。
 
 TUI 命令：
 

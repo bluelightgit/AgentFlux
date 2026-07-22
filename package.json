@@ -1,6 +1,7 @@
 {
   "name": "agentflux",
   "version": "0.1.0",
+	"type": "module",
   "description": "A multi-Agent workbench for pi: direct work, dynamic teams, DAG workflows and issue communities",
   "keywords": [
     "pi-package",
@@ -15,15 +16,29 @@
     "type": "git",
     "url": ""
   },
-  "files": [
-    "src/**/*.ts",
+	"files": [
+	"dist/**/*",
     "docs/*.md",
     ".agentflux/models.json",
     "README.md"
   ],
+	"exports": {
+		".": "./dist/extension/entry.js",
+		"./extension": "./dist/extension/entry.js",
+		"./host": {
+			"types": "./dist/types/host/index.d.ts",
+			"import": "./dist/host/index.js",
+			"require": "./dist/host/index.cjs"
+		},
+		"./contracts": {
+			"types": "./dist/types/contracts/index.d.ts",
+			"import": "./dist/contracts/index.js",
+			"require": "./dist/contracts/index.cjs"
+		}
+	},
   "pi": {
     "extensions": [
-      "./src/entry.ts"
+      "./dist/extension/entry.js"
     ]
   },
   "peerDependencies": {
@@ -32,14 +47,17 @@
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-	"tsx": "^4.22.4",
-	"typescript": "^5.9.3"
+    "esbuild": "^0.25.12",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
   },
   "scripts": {
+	"build": "node scripts/build.mjs && tsc -p tsconfig.declarations.json",
 	"typecheck": "tsc -p tsconfig.json",
-	"test": "npm run test:unit",
-	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts",
-	"test:live": "tsx tests/live/test-core-deepseek-smoke.ts",
-	"verify": "npm run typecheck && npm run test:unit"
+    "test": "npm run test:unit",
+	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-task-envelope.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts",
+    "test:live": "tsx tests/live/test-core-deepseek-smoke.ts",
+	"verify": "npm run typecheck && npm run test:unit",
+	"prepack": "npm run build"
   }
 }

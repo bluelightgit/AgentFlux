@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_CONFIG, type FluxConfig, type WorkStyle } from "./types";
+import { discoverPiModels, mergeModels, type ModelEntry } from "./model-capability";
 
 function merge<T>(base: T, value: Partial<T> | undefined): T {
 	if (!value) return base;
@@ -22,6 +23,18 @@ export function loadRawConfig(cwd: string): Record<string, unknown> {
 
 export function loadConfig(cwd: string): FluxConfig {
 	return merge(DEFAULT_CONFIG, loadRawConfig(cwd) as Partial<FluxConfig>);
+}
+
+export function loadModelsConfig(cwd: string): Record<string, unknown> & { models: Record<string, ModelEntry> } {
+	const path = join(cwd, ".agentflux", "models.json");
+	let value: Record<string, unknown> = { models: {} };
+	if (existsSync(path)) {
+		try { value = JSON.parse(readFileSync(path, "utf-8")); } catch {}
+	}
+	return {
+		...value,
+		models: mergeModels((value.models as Record<string, ModelEntry> | undefined) ?? {}, discoverPiModels()),
+	};
 }
 
 export function resolveSharedSkills(_config: FluxConfig, modelsConfig: any): string[] {

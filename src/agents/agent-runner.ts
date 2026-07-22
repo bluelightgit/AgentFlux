@@ -299,12 +299,17 @@ export function withSharedSkills(agent: AgentTemplate, sharedSkills?: string[]):
  */
 function getSubagentEntryPath(_cwd: string): string {
 	// 从已安装 package 自身定位，不能假设目标项目也有 src/subagent-entry.ts。
-	return resolve(dirname(fileURLToPath(import.meta.url)), "..", "subagent-entry.ts");
+	const ownFile = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
+	const ownDir = dirname(ownFile);
+	const bundledEntry = resolve(ownDir, "subagent-entry.js");
+	if (existsSync(bundledEntry)) return bundledEntry;
+	return resolve(ownDir, "..", "subagent-entry.ts");
 }
 
 /** 决定 pi 可执行路径: 用 node + pi 的 cli.js (shell:false, 避免 Windows shell 分词) */
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const req = createRequire(import.meta.url);
+	const ownFile = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
+	const req = createRequire(ownFile);
 	let cliPath: string = "";
 
 	// Method 1: 直接 resolve (如果 exports 字段允许)

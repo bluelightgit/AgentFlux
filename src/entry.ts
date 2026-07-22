@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { createEphemeralRecord, finishEphemeralRecord } from "./agents/agent-lifecycle";
@@ -9,13 +8,13 @@ import { archivePersistentAgent, formatPersistentAgents, listPersistentAgents, r
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, formatIssue, getIssue, listIssues, resolveIssue, submitClaim } from "./core/community";
-import { loadConfig, parseWorkStyle, resolveSharedSkills, validateConfig } from "./core/config";
+import { loadConfig, loadModelsConfig, parseWorkStyle, resolveSharedSkills, validateConfig } from "./core/config";
 import { MessageBus } from "./core/message-bus";
 import { SharedBoard } from "./core/shared-board";
 import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
-import { discoverPiModels, mergeModels } from "./core/model-capability";
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
+import { parseAgentFluxTaskEnvelope } from "./core/task-envelope";
 import type { WorkStyle } from "./core/types";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
 import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
@@ -34,14 +33,6 @@ interface RuntimeContext {
 	sharedSkills: string[];
 	pricing?: PricingTable;
 }
-function readModels(cwd: string): any {
-	const path = join(cwd, ".agentflux", "models.json");
-	let value: any = { models: {} };
-	if (existsSync(path)) try { value = JSON.parse(readFileSync(path, "utf-8")); } catch {}
-	value.models = mergeModels(value.models ?? {}, discoverPiModels());
-	return value;
-}
-
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) ctx.ui.notify(text, level);
 	else (level === "error" ? console.error : console.log)(text);
@@ -128,7 +119,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		const config = loadConfig(ctx.cwd);
 		const warnings = validateConfig(config);
-		const modelsConfig = readModels(ctx.cwd);
+		const modelsConfig = loadModelsConfig(ctx.cwd);
 		const fluxDir = join(ctx.cwd, ".agentflux");
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
@@ -147,13 +138,17 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event: any) => {
 		if (!currentPlan) {
 			if (!runtime) return undefined;
-			const fixedWorkStyle = parseWorkStyle(process.env.AGENTFLUX_WORK_STYLE);
+			const envelope = parseAgentFluxTaskEnvelope(event.prompt);
+			const task = envelope?.task ?? event.prompt;
+			const fixedWorkStyle = envelope
+				? parseWorkStyle(envelope.workStyle)
+				: parseWorkStyle(process.env.AGENTFLUX_WORK_STYLE);
 			if (fixedWorkStyle) {
-				currentPlan = createTaskExecutionPlan({ task: event.prompt, workStyle: fixedWorkStyle, selectedBy: "user", budget: runtime.config.budget });
+				currentPlan = createTaskExecutionPlan({ task, taskId: envelope?.taskId, workStyle: fixedWorkStyle, selectedBy: "user", budget: runtime.config.budget });
 				telemetry?.writeTaskExecution({ sessionId, taskId: currentPlan.taskId, action: "created", workStyle: fixedWorkStyle, selectedBy: "user", task: currentPlan.task });
 				telemetry?.writeTaskExecution({ sessionId, taskId: currentPlan.taskId, action: "started", workStyle: fixedWorkStyle, selectedBy: "user", task: currentPlan.task });
 			} else {
-			implicitTask = { taskId: `task-${randomUUID()}`, task: event.prompt };
+				implicitTask = { taskId: envelope?.taskId ?? `task-${randomUUID()}`, task };
 			implicitPlan = null;
 			return { systemPrompt: `${event.systemPrompt}\n\nAgentFlux operating protocol:\n- The user only needs to describe the desired outcome; never ask them to explain AgentFlux.\n- Choose Direct for small cohesive work that the main Agent can finish safely. Do not delegate merely because Agents are available.\n- Choose Team when two or more bounded responsibilities can be investigated or verified independently. Use flux_team/flux_agent, then integrate the results.\n- Choose Workflow when the work has a stable dependency order or repeatable acceptance gates. Use flux_workflow once.\n- Choose Community only when ownership or scope must emerge through visible discussion and claims. Use flux_issue; execution requires a claim. The Main Agent is moderator and must apply Issue comments/claims/submissions itself. It may use Team for bounded investigation, but must not start a fixed Workflow after choosing Community.\n- Choose one top-level work style and keep it for the task. Make the choice yourself and do not narrate internal routing unless it helps the user.` };
 			}

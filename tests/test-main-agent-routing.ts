@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentFlux from "../src/entry";
+import { createAgentFluxTaskEnvelope, encodeAgentFluxTaskEnvelope } from "../src/core/task-envelope";
 
 type Handler = (...args: any[]) => any;
 class FakePi {
@@ -43,6 +44,14 @@ async function main(): Promise<void> {
 		await emit(pi, "agent_end", { isError: false }, ctx);
 		const allEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
 		check(allEvents.some(event => event.type === "task.execution" && event.workStyle === "community" && event.selectedBy === "main_agent" && event.action === "started"), "Main Agent 调用 Community 工具时记录实际调度方式");
+
+		const desktopPrompt = encodeAgentFluxTaskEnvelope(createAgentFluxTaskEnvelope({ taskId: "desktop-team-1", workStyle: "team", task: "并行检查实现与测试" }));
+		const desktopResults = await emit(pi, "before_agent_start", { prompt: desktopPrompt, systemPrompt: "base", systemPromptOptions: {} }, ctx);
+		const desktopSystemPrompt = desktopResults.find(result => result?.systemPrompt)?.systemPrompt ?? "";
+		check(desktopSystemPrompt.includes("work style team") && desktopSystemPrompt.includes("lead Agent"), "Desktop 逐任务 envelope 固定 Team 工作方式");
+		await emit(pi, "agent_end", { isError: false }, ctx);
+		const desktopEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
+		check(desktopEvents.some(event => event.type === "task.execution" && event.taskId === "desktop-team-1" && event.task === "并行检查实现与测试" && event.workStyle === "team"), "Desktop envelope 保留 taskId 且 telemetry 不记录协议头");
 
 		process.env.AGENTFLUX_WORK_STYLE = "workflow";
 		const fixedResults = await emit(pi, "before_agent_start", { prompt: "按固定依赖完成发布", systemPrompt: "base", systemPromptOptions: {} }, ctx);
