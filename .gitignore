@@ -36,6 +36,8 @@ tmp/
 data/local/
 
 # AgentFlux runtime telemetry (local, per-machine)
+.codex
+.claude
 .agentflux/
 .pi/npm/
 .pi/git/

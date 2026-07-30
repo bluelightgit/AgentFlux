@@ -108,8 +108,12 @@ function normalizePriceFile(json: any): RawPriceRow[] {
 			});
 		}
 	} else if (json && typeof json === "object") {
-		for (const [id, p] of Object.entries(json)) {
-			const pp = p as any;
+		const priceMap = json.models && typeof json.models === "object"
+			? json.models
+			: json;
+		for (const [id, p] of Object.entries(priceMap)) {
+			const model = p as any;
+			const pp = model?.pricing ?? model;
 			if (pp && typeof pp === "object") {
 				rows.push({
 					id,

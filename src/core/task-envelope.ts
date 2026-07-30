@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WorkStyleSelection } from "./types";
+import { assertSafeOpaqueId } from "./safe-path";
 
 const PREFIX = "agentflux-task-v1:";
 
@@ -23,7 +24,7 @@ export function createAgentFluxTaskEnvelope(input: {
 	if (!task) throw new Error("Task cannot be empty");
 	return {
 		version: 1,
-		taskId: input.taskId?.trim() || `task-${randomUUID()}`,
+		taskId: assertSafeOpaqueId(input.taskId?.trim() || `task-${randomUUID()}`, "taskId"),
 		workStyle: input.workStyle,
 		task,
 	};
@@ -48,7 +49,12 @@ export function parseAgentFluxTaskEnvelope(prompt: string): AgentFluxTaskEnvelop
 		if (metadata?.version !== 1 || typeof metadata.taskId !== "string" || !metadata.taskId.trim() || !isWorkStyleSelection(metadata.workStyle) || !task) {
 			throw new Error("invalid fields");
 		}
-		return { version: 1, taskId: metadata.taskId.trim(), workStyle: metadata.workStyle, task };
+		return {
+			version: 1,
+			taskId: assertSafeOpaqueId(metadata.taskId, "taskId"),
+			workStyle: metadata.workStyle,
+			task,
+		};
 	} catch (error) {
 		throw new Error(`Invalid AgentFlux task envelope: ${error instanceof Error ? error.message : String(error)}`);
 	}

@@ -17,7 +17,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
@@ -38,7 +38,9 @@ import {
 	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, writeEffectiveCapabilitySnapshot,
 	type CapabilityPolicyInput, type WorkspaceCapabilityInput,
 } from "../core/capability-policy";
-import { createEphemeralRecord, finishEphemeralRecord } from "./agent-lifecycle";
+import { createEphemeralRecord, finishEphemeralRecord, startEphemeralRecord } from "./agent-lifecycle";
+import { clearAgentRunStop, readAgentRunStop } from "./agent-run-control";
+import { finishAgentRun, heartbeatAgentRun, markAgentRunRunning, registerAgentRun } from "../core/run-registry";
 
 // ──────────────────────────────── Parallel Agents ────────────────────────────────
 
@@ -46,6 +48,60 @@ export interface ParallelAgentTask {
 	agent: AgentTemplate;
 	task: string;
 	label?: string;             // 可选标签, 用于结果区分 (默认用 agent.name)
+	workspaceCwd?: string;      // 子进程实际工作区；AgentFlux 状态仍写入 common.cwd
+	lockFiles?: string[];       // 相对路径以 workspaceCwd 为基准
+	model?: string;
+	provider?: string;
+	thinking?: AgentTemplate["thinking"];
+	maxTurns?: number;
+	maxInputTokens?: number;
+	completionProof?: AgentCompletionProof;
+}
+
+export interface AgentCompletionProof {
+	files: Array<{
+		path: string;
+		contains?: string[];
+	}>;
+}
+
+export interface AgentCompletionProofReport {
+	passed: boolean;
+	checkedFiles: string[];
+	failures: string[];
+}
+
+export function evaluateAgentCompletionProof(workspaceCwd: string, proof: AgentCompletionProof): AgentCompletionProofReport {
+	const root = resolve(workspaceCwd);
+	const checkedFiles: string[] = [];
+	const failures: string[] = [];
+	const files = Array.isArray(proof?.files) ? proof.files : [];
+	for (const item of files) {
+		const path = resolve(root, item.path);
+		const rel = relative(root, path);
+		if (rel === ".." || rel.startsWith(`..${sep}`)) {
+			failures.push(`proof path outside workspace: ${item.path}`);
+			continue;
+		}
+		checkedFiles.push(path);
+		if (!existsSync(path)) {
+			failures.push(`proof file missing: ${item.path}`);
+			continue;
+		}
+		const required = item.contains ?? [];
+		if (required.length === 0) continue;
+		let content = "";
+		try { content = readFileSync(path, "utf-8"); }
+		catch (error: any) {
+			failures.push(`proof file unreadable: ${item.path}: ${error?.message ?? error}`);
+			continue;
+		}
+		for (const text of required) {
+			if (!content.includes(text)) failures.push(`proof text missing in ${item.path}: ${text}`);
+		}
+	}
+	if (files.length === 0) failures.push("completion proof has no files");
+	return { passed: failures.length === 0, checkedFiles, failures };
 }
 
 export interface ParallelRunResult {
@@ -56,6 +112,13 @@ export interface ParallelRunResult {
 	totalCost: number;
 	allSucceeded: boolean;
 	errors: string[];           // 失败 agent 的错误信息
+}
+
+export function allocateParallelAgentBudget(maxCostUsd: number | undefined, taskCount: number): number | undefined {
+	if (maxCostUsd === undefined) return undefined;
+	if (!Number.isFinite(maxCostUsd) || maxCostUsd <= 0) throw new Error("Parallel task budget must be greater than 0");
+	if (!Number.isInteger(taskCount) || taskCount <= 0) throw new Error("Parallel task count must be a positive integer");
+	return maxCostUsd / taskCount;
 }
 
 /**
@@ -85,16 +148,34 @@ export async function runAgentsParallel(
 		signal?: AbortSignal;               // 调用方取消时终止所有子进程
 		maxCostUsd?: number;                // attempt 之间的实际成本硬停止
 		taskId?: string;                   // 父任务关联；每个并行 child 共享 taskId
+		executionId?: string;              // 父 execution 关联
 		invocationOverride?: { command: string; args: string[] };
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
-	const lifecycleRecords = tasks.map(task => common.persistent ? null : createEphemeralRecord({
+	const perAgentMaxCostUsd = allocateParallelAgentBudget(common.maxCostUsd, tasks.length);
+	const runIds = tasks.map(() => `subagent-${randomUUID()}`);
+	const lifecycleRecords = tasks.map((task, index) => common.persistent ? null : createEphemeralRecord({
 		name: task.agent.name,
 		role: task.agent.role ?? task.agent.name,
 		sessionId: common.sessionId,
+		taskId: common.taskId,
+		runId: runIds[index],
+		currentTask: task.task.slice(0, 200),
+		model: task.agent.model,
 		telemetry: common.telemetry,
 	}));
+	for (let index = 0; index < tasks.length; index++) {
+		const record = lifecycleRecords[index];
+		if (record) startEphemeralRecord(record, {
+			sessionId: common.sessionId,
+			taskId: common.taskId,
+			runId: runIds[index],
+			currentTask: tasks[index].task,
+			model: tasks[index].agent.model,
+			telemetry: common.telemetry,
+		});
+	}
 
 	// 为每个 task 记录独立开始时间, 用于计算 sumIndividualMs
 	const timings: Array<{ start: number; end: number }> = [];
@@ -107,6 +188,7 @@ export async function runAgentsParallel(
 			const sid = (t.label ? common.sessionIds?.get(t.label) : undefined) ?? common.sessionId;
 			return runAgent({
 				cwd: common.cwd,
+				workspaceCwd: t.workspaceCwd,
 				agent: t.agent,
 				task: t.task,
 				sessionId: sid,
@@ -118,10 +200,19 @@ export async function runAgentsParallel(
 				sessionDir: common.sessionDir,
 				timeoutMs: common.timeoutMs,
 				maxRetries: common.maxRetries ?? 1,
-				lockFiles: t.label ? common.lockFiles?.[t.label] : undefined,
+				model: t.model,
+				provider: t.provider,
+				thinking: t.thinking,
+				maxTurns: t.maxTurns,
+				maxInputTokens: t.maxInputTokens,
+				completionProof: t.completionProof,
+				lockFiles: t.lockFiles ?? (t.label ? common.lockFiles?.[t.label] : undefined),
 				signal: common.signal,
-				maxCostUsd: common.maxCostUsd,
+				maxCostUsd: perAgentMaxCostUsd,
 				taskId: common.taskId,
+				executionId: common.executionId,
+				runId: runIds[i],
+				liveTeamCommunication: true,
 				invocationOverride: common.invocationOverride,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
@@ -143,7 +234,7 @@ export async function runAgentsParallel(
 		if (s.status === "fulfilled") {
 			results.push(s.value);
 			const record = lifecycleRecords[i];
-			if (record) finishEphemeralRecord(record, s.value.exitCode, s.value.usage.cost, common.telemetry, common.sessionId);
+			if (record) finishEphemeralRecord(record, s.value.exitCode, s.value.usage.cost, common.telemetry, common.sessionId, common.taskId, runIds[i]);
 			totalCost += s.value.usage.cost;
 			if (s.value.exitCode !== 0 || s.value.errorMessage) {
 				allSucceeded = false;
@@ -160,7 +251,7 @@ export async function runAgentsParallel(
 				model: null, errorMessage: errMsg,
 			});
 			const record = lifecycleRecords[i];
-			if (record) finishEphemeralRecord(record, -1, 0, common.telemetry, common.sessionId);
+			if (record) finishEphemeralRecord(record, -1, 0, common.telemetry, common.sessionId, common.taskId, runIds[i]);
 		}
 	}
 
@@ -236,6 +327,7 @@ export interface AgentRunResult {
 		narrowed: string[];
 		cacheBreakingChanges: Array<"tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard">;
 	};
+	completionProof?: AgentCompletionProofReport;
 }
 
 /** 从 .agentflux/agents/*.md 加载 agent 定义 (frontmatter + body), 回落到内建 reviewer */
@@ -301,8 +393,10 @@ function getSubagentEntryPath(_cwd: string): string {
 	// 从已安装 package 自身定位，不能假设目标项目也有 src/subagent-entry.ts。
 	const ownFile = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
 	const ownDir = dirname(ownFile);
-	const bundledEntry = resolve(ownDir, "subagent-entry.js");
+	// 构建产物位于 dist/host，扩展位于同级的 dist/extension。
+	const bundledEntry = resolve(ownDir, "..", "extension", "subagent-entry.js");
 	if (existsSync(bundledEntry)) return bundledEntry;
+	// 源码执行时 ownDir=src/agents。
 	return resolve(ownDir, "..", "subagent-entry.ts");
 }
 
@@ -404,7 +498,16 @@ function isModelError(msg?: string): boolean {
 /** 瞬时错误 — 502/503/500/overloaded/gateway 等, 重试同一模型 */
 function isTransientError(msg?: string, output?: string): boolean {
 	const text = `${msg ?? ""} ${output ?? ""}`;
-	return /502|503|500|overloaded|service unavailable|gateway|bad gateway|rate limit|429|timeout|connection (refused|reset|closed)|ECONNREFUSED|ETIMEDY|负载.*上限|过载|服务不可用|超时|请求失败|繁忙/i.test(text);
+	return /502|503|500|overloaded|service unavailable|gateway|bad gateway|rate limit|429|timeout|resourceexhausted|local total request limit reached|connection (refused|reset|closed)|ECONNREFUSED|ETIMEDY|负载.*上限|过载|服务不可用|超时|请求失败|繁忙/i.test(text);
+}
+
+export function canCompletionProofRecover(
+	result: Pick<AgentRunResult, "exitCode" | "output" | "errorMessage">,
+): boolean {
+	if (result.exitCode === 74) return true;
+	return result.exitCode !== 0
+		&& result.output.trim().length > 0
+		&& isTransientError(result.errorMessage);
 }
 
 /** Provider/API 组合不兼容 — 重试同一组合通常无效，应切换模型/provider。 */
@@ -455,6 +558,30 @@ function registerAgentInBoard(agent: AgentTemplate, task: string, cwd: string, m
 		// 确保 "all" 大群包含此 agent
 		board.ensureAllGroup([agent.name]);
 	} catch { /* 静默 */ }
+}
+
+function registerRuntimeAgentInBoard(
+	agent: AgentTemplate,
+	task: string,
+	cwd: string,
+	instanceId: string,
+	model?: string,
+	provider?: string,
+): void {
+	try {
+		const board = new SharedBoard(join(cwd, ".agentflux"));
+		board.registerRuntimeAgent({
+			name: agent.name,
+			role: "rpc-runtime",
+			status: "running",
+			currentTask: task.slice(0, 200),
+			model,
+			provider,
+			thinking: agent.thinking,
+			instanceId,
+		});
+		board.ensureAllGroup([agent.name]);
+	} catch {}
 }
 
 /** 更新 agent 状态 */
@@ -510,6 +637,7 @@ function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
 
 export async function runAgent(opts: {
 	cwd: string;
+	workspaceCwd?: string; // 子进程 cwd；运行状态、消息与 telemetry 仍归属 cwd
 	agent: AgentTemplate;
 	task: string;
 	sessionId: string;
@@ -534,13 +662,27 @@ export async function runAgent(opts: {
 	signal?: AbortSignal;                              // 取消信号，终止真实子进程并停止重试
 	runId?: string;                                    // 外部 run 关联 id
 	maxCostUsd?: number;                               // attempt 间成本上限（单次调用可能产生少量超额）
+	maxTurns?: number;                                 // 完成一个 assistant turn 后检查的硬上限
+	maxInputTokens?: number;                           // 跨 turn 累计 input token 硬上限
+	completionProof?: AgentCompletionProof;            // 声明后所有成功都必须通过；仅 exit 74 可由文件事实恢复为成功
 	taskId?: string;                                   // Message V2 / telemetry correlation
+	executionId?: string;                              // first-class parent execution correlation
+	liveTeamCommunication?: boolean;                    // Team child 在结束前主动轮询 operator/peer inbox
 	communicationOverride?: CommunicationPolicyInput; // 注册实例/单次调用动态覆盖角色模板
 	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
 	invocationOverride?: { command: string; args: string[] };
 }): Promise<AgentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
+	const workspaceCwd = resolve(opts.workspaceCwd ?? cwd);
+	if (!existsSync(workspaceCwd)) {
+		return {
+			agent: agent.name, exitCode: 72, output: "",
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+			model: null, errorMessage: `workspace does not exist: ${workspaceCwd}`, retryCount: 0,
+		};
+	}
+	const lockFiles = opts.lockFiles?.map(file => resolve(workspaceCwd, file));
 	const runStartedAt = Date.now();
 	const timeoutMs = Math.max(1, opts.timeoutMs ?? 120000);
 	const maxRetries = opts.maxRetries ?? 0;
@@ -568,7 +710,7 @@ export async function runAgent(opts: {
 	let previousEffectiveCapability: any = null;
 	try {
 		capabilityPolicy = resolveCapabilityPolicy({
-			cwd, agentName: agent.name, role: capabilityRole, runId: processRunId, instanceId: agentInstanceId,
+			cwd: workspaceCwd, agentName: agent.name, role: capabilityRole, runId: processRunId, instanceId: agentInstanceId,
 			template: {
 				tools: agent.tools, skills: agent.skills, mcpServers: agent.mcpServers,
 				communication: agent.communication, workspace: agent.workspace,
@@ -620,18 +762,44 @@ export async function runAgent(opts: {
 		narrowed: capabilityPolicy.narrowed, cacheImpact: capabilityCacheChanges,
 		detail: `snapshot=${capabilitySnapshotPath}`,
 	});
+	const fluxDir = join(cwd, ".agentflux");
+	registerAgentRun(fluxDir, {
+		id: processRunId,
+		taskId: opts.taskId,
+		executionId: opts.executionId,
+		sessionId,
+		agent: agent.name,
+		role: capabilityRole,
+		currentTask: opts.task.slice(0, 500),
+		model: opts.model ?? agent.model,
+		kind: opts.persistent ? "persistent" : "ephemeral",
+	});
 
 	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
 
 	// SharedBoard 集成: 读 inbox + 注册 agent
-	let scopedTask = opts.lockFiles && opts.lockFiles.length > 0
-		? `${opts.task}\n\n=== Enforced file edit scope ===\nYou may read other files for context, but you may modify ONLY these paths:\n${opts.lockFiles.map(file => `- ${file}`).join("\n")}\nIf the task requires another file, stop and report the missing scope instead of editing it.\n=== End enforced scope ===`
+	let scopedTask = lockFiles && lockFiles.length > 0
+		? `${opts.task}\n\n=== Enforced file edit scope ===\nYou may read other files for context, but you may modify ONLY these paths:\n${lockFiles.map(file => `- ${file}`).join("\n")}\nIf the task requires another file, stop and report the missing scope instead of editing it.\n=== End enforced scope ===`
 		: opts.task;
 	const communicationInstruction = formatCommunicationContractInstruction(communicationPolicy);
 	if (communicationInstruction) scopedTask = `${scopedTask}\n\n${communicationInstruction}`;
+	if (opts.liveTeamCommunication && prefixLayout && communicationPolicy.enabled && communicationPolicy.actions.includes("poll")) {
+		scopedTask = `${scopedTask}\n\n=== Live team communication ===\nAfter completing substantive work and before your final response, call flux_agent_message with action=poll. Process relevant operator or peer updates and acknowledge every message you consumed.\n=== End live team communication ===`;
+	}
 	const inboxInjection = prependInboxMessages(scopedTask, agent.name, cwd);
 	const taskWithInbox = inboxInjection.task;
-	registerAgentInBoard(agent, opts.task, cwd, opts.model ?? agent.model, opts.provider ?? agent.provider);
+	if (opts.persistent) {
+		registerRuntimeAgentInBoard(
+			agent,
+			opts.task,
+			cwd,
+			agentInstanceId,
+			opts.model ?? agent.model,
+			opts.provider ?? agent.provider,
+		);
+	} else {
+		registerAgentInBoard(agent, opts.task, cwd, opts.model ?? agent.model, opts.provider ?? agent.provider);
+	}
 
 	// 文件锁 owner 必须是本次运行实例，不能只用角色名（两个 implementer 不是同一 owner）。
 	const lockOwner = `${agent.name}:${processRunId}`;
@@ -639,10 +807,10 @@ export async function runAgent(opts: {
 	// 文件锁: 获取要编辑的文件的锁。任何冲突都 fail-closed。
 	const lockedFiles: string[] = [];
 	let lockError: string | undefined;
-	if (opts.lockFiles && opts.lockFiles.length > 0) {
+	if (lockFiles && lockFiles.length > 0) {
 		try {
 			const board = new SharedBoard(join(cwd, ".agentflux"));
-			for (const fp of opts.lockFiles) {
+			for (const fp of lockFiles) {
 				if (board.acquireFileLock(lockOwner, fp)) {
 					lockedFiles.push(fp);
 				} else {
@@ -764,32 +932,50 @@ export async function runAgent(opts: {
 					? { command: opts.invocationOverride.command, args: [...opts.invocationOverride.args, ...attemptArgs] }
 					: getPiInvocation(attemptArgs);
 				const proc = spawn(invocation.command, invocation.args, {
-					cwd,
+					cwd: workspaceCwd,
 					shell: false,
 					stdio: ["ignore", "pipe", "pipe"],
 					detached: process.platform !== "win32",
 					windowsHide: true,
 					env: {
 						...process.env,
+						// Electron 主进程的 process.execPath 指向 electron.exe。
+						// 子进程只需要 Node 语义来运行 Pi CLI，避免被当作 Electron 应用启动。
+						...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
 						AGENTFLUX_AGENT_NAME: agent.name,
+						AGENTFLUX_AGENT_ROLE: capabilityRole,
 						AGENTFLUX_AGENT_INSTANCE_ID: agentInstanceId,
 						AGENTFLUX_RUN_ID: processRunId,
 						AGENTFLUX_TASK_ID: opts.taskId ?? "",
+						AGENTFLUX_CONTROL_CWD: cwd,
+						AGENTFLUX_WORKSPACE_CWD: workspaceCwd,
+						AGENTFLUX_LOCK_FILES: JSON.stringify(lockFiles ?? []),
 						AGENTFLUX_COMMUNICATION_POLICY: JSON.stringify(communicationPolicy),
 						AGENTFLUX_CAPABILITY_POLICY: JSON.stringify(capabilityPolicy.effective),
+						AGENTFLUX_RPC_INBOX_PUMP: opts.persistent ? "1" : "",
 					},
 				});
+				if (!proc.pid) throw new Error(`Agent process did not expose a pid: ${processRunId}`);
+				try {
+					markAgentRunRunning(fluxDir, processRunId, proc.pid, attemptCount);
+				} catch (error: any) {
+					void terminateProcessTree(proc);
+					finishAgentRun(fluxDir, processRunId, { status: "failed", error: `Run Registry start failed: ${error?.message ?? error}` });
+					throw error;
+				}
 				let buffer = "";
 				let settled = false;
 				let forcedExitCode: number | null = null;
 				let terminationPromise: Promise<void> | null = null;
 				let killGraceTimer: NodeJS.Timeout | undefined;
+				let controlTimer: NodeJS.Timeout | undefined;
 				const done = (code: number) => {
 					if (!settled) {
 						settled = true;
 						activeSubagentProcesses.delete(processRunId);
 						opts.signal?.removeEventListener("abort", onAbort);
 						if (killGraceTimer) clearTimeout(killGraceTimer);
+						if (controlTimer) clearInterval(controlTimer);
 						resolveExit(code);
 					}
 				};
@@ -808,6 +994,21 @@ export async function runAgent(opts: {
 				const onAbort = () => requestTermination(130);
 				activeSubagentProcesses.set(processRunId, proc);
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
+				let lastHeartbeatAt = Date.now();
+				controlTimer = setInterval(() => {
+					if (readAgentRunStop(cwd, processRunId)) requestTermination(130);
+					if (Date.now() - lastHeartbeatAt >= 2_000) {
+						try {
+							heartbeatAgentRun(fluxDir, processRunId);
+							lastHeartbeatAt = Date.now();
+						} catch (error: any) {
+							result.errorMessage = `Run Registry heartbeat failed: ${error?.message ?? error}`;
+							requestTermination(1);
+						}
+					}
+				}, 200);
+				controlTimer.unref?.();
+				if (readAgentRunStop(cwd, processRunId)) requestTermination(130);
 				const timer = setTimeout(() => requestTermination(124), attemptTimeoutMs);
 
 				const processLine = (line: string) => {
@@ -834,6 +1035,13 @@ export async function runAgent(opts: {
 							const content = msg.content;
 							if (Array.isArray(content)) {
 								for (const b of content) if (b?.type === "text" && b.text) outputParts.push(b.text);
+							}
+							if (opts.maxTurns !== undefined && result.usage.turns >= opts.maxTurns) {
+								result.errorMessage = `turn limit reached: ${result.usage.turns} >= ${opts.maxTurns}`;
+								requestTermination(74);
+							} else if (opts.maxInputTokens !== undefined && result.usage.input >= opts.maxInputTokens) {
+								result.errorMessage = `input token limit reached: ${result.usage.input} >= ${opts.maxInputTokens}`;
+								requestTermination(74);
 							}
 						}
 					}
@@ -880,7 +1088,7 @@ export async function runAgent(opts: {
 		}
 
 		// 失败 → 判断是否应该重试
-		if (result.exitCode === 130 || opts.signal?.aborted) break;
+		if ([74, 75, 130].includes(result.exitCode) || opts.signal?.aborted) break;
 		const isTimeout = result.exitCode === 124;
 		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
 		const modelErr = isModelError(result.errorMessage);
@@ -955,6 +1163,19 @@ export async function runAgent(opts: {
 		narrowed: [...capabilityPolicy.narrowed],
 		cacheBreakingChanges: capabilityCacheChanges,
 	};
+	if (opts.completionProof) {
+		const proof = evaluateAgentCompletionProof(workspaceCwd, opts.completionProof);
+		finalResult.completionProof = proof;
+		if (proof.passed && canCompletionProofRecover(finalResult)) {
+			finalResult.exitCode = 0;
+			finalResult.errorMessage = undefined;
+			finalResult.output = [finalResult.output, `[AgentFlux completion proof: passed · ${proof.checkedFiles.length} files]`]
+				.filter(Boolean).join("\n");
+		} else if (!proof.passed && finalResult.exitCode === 0 && !finalResult.errorMessage) {
+			finalResult.exitCode = 75;
+			finalResult.errorMessage = `completion proof failed: ${proof.failures.join("; ")}`;
+		}
+	}
 
 	if (finalResult.exitCode === 0 && !finalResult.errorMessage) {
 		const communication = evaluateCommunicationContract({
@@ -1013,7 +1234,26 @@ export async function runAgent(opts: {
 	});
 
 	// SharedBoard: 更新 agent 状态
-	updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
+	if (opts.persistent) {
+		try {
+			new SharedBoard(join(cwd, ".agentflux"))
+				.finalizeRuntimeAgentPresence(agent.name, agentInstanceId, finalResult.exitCode);
+		} catch {}
+	} else {
+		updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
+	}
+	finishAgentRun(fluxDir, processRunId, {
+		status: finalResult.exitCode === 0 && !finalResult.errorMessage
+			? "completed"
+			: finalResult.exitCode === 130
+				? "cancelled"
+				: finalResult.exitCode === 124
+					? "timed_out"
+					: "failed",
+		costUsd: finalResult.usage.cost,
+		error: finalResult.errorMessage,
+	});
+	clearAgentRunStop(cwd, processRunId);
 
 	// 文件锁: 释放所有锁
 	if (lockedFiles.length > 0) {

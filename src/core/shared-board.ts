@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { assertSafeOpaqueId } from "./safe-path";
 
 const PROCESS_OWNER_ID = `${process.pid}-${randomUUID()}`;
 
@@ -590,6 +591,7 @@ export class SharedBoard {
 
 	/** 向群组发送消息 */
 	sendGroupMessage(from: string, groupId: string, content: string): GroupMessage {
+		assertSafeOpaqueId(groupId, "groupId");
 		const groups = this.listGroups();
 		const group = groups.find(g => g.id === groupId);
 		if (!group) throw new Error(`Group ${groupId} not found`);
@@ -612,6 +614,7 @@ export class SharedBoard {
 
 	/** 获取群组消息 (支持 sinceTs 增量读取) */
 	getGroupMessages(groupId: string, sinceTs?: string): GroupMessage[] {
+		assertSafeOpaqueId(groupId, "groupId");
 		const msgFile = join(this.sharedDir, "groups", groupId, "messages.jsonl");
 		if (!existsSync(msgFile)) return [];
 		const lines = readFileSync(msgFile, "utf-8").trim().split("\n").filter(Boolean);
@@ -791,7 +794,7 @@ export class SharedBoard {
 			const agent = registry.find(item => item.name === name);
 			if (!agent || agent.instanceId !== expectedInstanceId) return false;
 			const preserved = agent.status === "failed" || agent.status === "cancelled";
-			agent.status = preserved ? agent.status : exitCode === 0 ? "done" : "failed";
+			agent.status = preserved ? agent.status : exitCode === 0 ? "done" : exitCode === 130 ? "cancelled" : "failed";
 			agent.lastSeen = new Date().toISOString();
 			this.writeJsonAtomic(join(this.sharedDir, "agents", "_registry.json"), registry);
 			return true;

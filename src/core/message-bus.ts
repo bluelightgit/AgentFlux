@@ -3,9 +3,11 @@ import {
 	closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync,
 	renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SharedBoard } from "./shared-board";
+import { assertSafeOpaqueId, assertSafePathSegment } from "./safe-path";
+import { writeJsonFileAtomic } from "./json-store";
 
 export type MessageChannel =
 	| { type: "direct"; id: string }
@@ -257,6 +259,25 @@ export class MessageBus {
 		});
 	}
 
+	/** Read an inbox without changing delivery state. */
+	peek(recipient: string, options: { limit?: number; includeTerminal?: boolean } = {}): DeliveredMessageV2[] {
+		this.validateAgentName(recipient, "recipient");
+		const dir = this.recipientDir(recipient);
+		if (!existsSync(dir)) return [];
+		const limit = Math.max(1, Math.min(100, options.limit ?? 20));
+		return readdirSync(dir)
+			.filter(file => file.endsWith(".json"))
+			.map(file => this.readJson<MessageDeliveryV2 | null>(join(dir, file), null))
+			.filter((delivery): delivery is MessageDeliveryV2 => !!delivery)
+			.filter(delivery => options.includeTerminal || ["pending", "delivered"].includes(delivery.status))
+			.map(delivery => ({ delivery, envelope: this.getEnvelope(delivery.messageId) }))
+			.filter((item): item is DeliveredMessageV2 => !!item.envelope)
+			.sort((a, b) =>
+				PRIORITY_WEIGHT[b.envelope.priority] - PRIORITY_WEIGHT[a.envelope.priority]
+				|| a.envelope.createdAt.localeCompare(b.envelope.createdAt))
+			.slice(0, limit);
+	}
+
 	acknowledge(recipient: string, messageId: string, now = new Date()): MessageDeliveryV2 {
 		return this.finishDelivery(recipient, messageId, "acknowledged", now);
 	}
@@ -298,6 +319,11 @@ export class MessageBus {
 			if (delivery && ["pending", "delivered"].includes(delivery.status) && this.getEnvelope(delivery.messageId)) count++;
 		}
 		return count;
+	}
+
+	/** Coordinate maintenance mutations with send/poll/ack without exposing the lock implementation. */
+	withExclusiveMaintenance<T>(operation: () => T): T {
+		return this.withMutex(operation, 5_000);
 	}
 
 	private finishDelivery(recipient: string, messageId: string, status: "acknowledged" | "rejected", now: Date, reason?: string): MessageDeliveryV2 {
@@ -350,6 +376,7 @@ export class MessageBus {
 
 	private validateAgentName(name: string, label: string): void {
 		if (!AGENT_NAME.test(name)) throw new Error(`invalid ${label} name: ${name}`);
+		assertSafePathSegment(name, `${label} name`);
 	}
 
 	private recipientDir(recipient: string): string {
@@ -357,11 +384,12 @@ export class MessageBus {
 	}
 
 	private envelopePath(messageId: string): string {
-		return join(this.envelopesDir, `${messageId}.json`);
+		return join(this.envelopesDir, `${assertSafeOpaqueId(messageId, "messageId")}.json`);
 	}
 
 	private deliveryPath(messageId: string, recipient: string): string {
 		this.validateAgentName(recipient, "recipient");
+		assertSafeOpaqueId(messageId, "messageId");
 		const dir = this.recipientDir(recipient);
 		mkdirSync(dir, { recursive: true });
 		return join(dir, `${messageId}.json`);
@@ -374,34 +402,48 @@ export class MessageBus {
 	private readJson<T>(path: string, fallback: T): T {
 		if (!existsSync(path)) return fallback;
 		try { return JSON.parse(readFileSync(path, "utf-8")) as T; }
-		catch { return fallback; }
+		catch (error) {
+			throw new Error(`Message V2 state is corrupt and was not overwritten: ${path}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private writeJsonAtomic(path: string, value: unknown): void {
-		mkdirSync(dirname(path), { recursive: true });
-		const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-		writeFileSync(temporary, JSON.stringify(value, null, 2), "utf-8");
-		renameSync(temporary, path);
+		// Message V2 has an envelope commit marker and explicit audit archival.
+		// Sidecar .bak files would bypass GC retention and keep acknowledged content alive.
+		writeJsonFileAtomic(path, value, { backup: false });
 	}
 
 	private withMutex<T>(operation: () => T, timeoutMs = 2_000): T {
 		const lockPath = join(this.root, ".mutex.lock");
 		const deadline = Date.now() + timeoutMs;
 		const waiter = new Int32Array(new SharedArrayBuffer(4));
+		const owner = `${process.pid}:${randomUUID()}`;
 		do {
 			let fd: number | null = null;
 			try {
 				fd = openSync(lockPath, "wx");
-				writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+				writeFileSync(fd, owner);
 				closeSync(fd);
 				fd = null;
 				try { return operation(); }
-				finally { try { unlinkSync(lockPath); } catch {} }
+				finally {
+					try {
+						if (readFileSync(lockPath, "utf-8") === owner) unlinkSync(lockPath);
+					} catch {}
+				}
 			} catch (error: any) {
 				if (error?.code !== "EEXIST") throw error;
+				let stale = false;
 				try {
-					if (Date.now() - statSync(lockPath).mtimeMs > 30_000) unlinkSync(lockPath);
+					stale = Date.now() - statSync(lockPath).mtimeMs > 30_000;
 				} catch {}
+				if (stale) {
+					const stalePath = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
+					try {
+						renameSync(lockPath, stalePath);
+						unlinkSync(stalePath);
+					} catch {}
+				}
 				Atomics.wait(waiter, 0, 0, 10);
 			} finally {
 				if (fd !== null) closeSync(fd);

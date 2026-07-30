@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { loadConfig } from "./core/config";
 import { AgentMessageRuntime } from "./core/agent-message-runtime";
@@ -15,7 +15,9 @@ import { resolveCommunicationPolicy } from "./core/communication-policy";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { TelemetryWriter } from "./telemetry/events";
 import type { FluxRuntimeState } from "./core/types";
-import { evaluateCapabilityToolCall, type EffectiveCapabilityPolicy } from "./core/capability-policy";
+import { evaluateCapabilityToolCall, evaluateLockFileToolCall, type EffectiveCapabilityPolicy } from "./core/capability-policy";
+import { RpcInboxPump } from "./extension/rpc-inbox-pump";
+import { SharedBoard } from "./core/shared-board";
 
 export default function (pi: ExtensionAPI) {
 	let state: FluxRuntimeState = {
@@ -28,11 +30,22 @@ export default function (pi: ExtensionAPI) {
 	const agentName = process.env.AGENTFLUX_AGENT_NAME;
 	const instanceId = process.env.AGENTFLUX_AGENT_INSTANCE_ID;
 	const runId = process.env.AGENTFLUX_RUN_ID;
+	const controlCwd = process.env.AGENTFLUX_CONTROL_CWD;
+	const agentRole = process.env.AGENTFLUX_AGENT_ROLE ?? "rpc-runtime";
+	const rpcInboxEnabled = process.env.AGENTFLUX_RPC_INBOX_PUMP === "1";
+	let rpcInboxPump: RpcInboxPump | null = null;
+	let agentBusy = false;
+	let runtimeBoard: SharedBoard | null = null;
 	let rawPolicy: any = undefined;
 	try { rawPolicy = JSON.parse(process.env.AGENTFLUX_COMMUNICATION_POLICY ?? "{}"); } catch { rawPolicy = { enabled: false }; }
 	const communicationPolicy = resolveCommunicationPolicy(rawPolicy);
 	let capabilityPolicy: EffectiveCapabilityPolicy | null = null;
 	let capabilityPolicyError: string | null = null;
+	let lockFiles: string[] = [];
+	try {
+		const parsed = JSON.parse(process.env.AGENTFLUX_LOCK_FILES ?? "[]");
+		if (Array.isArray(parsed)) lockFiles = parsed.filter((item): item is string => typeof item === "string").map(item => resolve(item));
+	} catch {}
 	if (process.env.AGENTFLUX_CAPABILITY_POLICY) {
 		try { capabilityPolicy = JSON.parse(process.env.AGENTFLUX_CAPABILITY_POLICY); }
 		catch (error: any) { capabilityPolicyError = `invalid capability policy: ${error?.message ?? error}`; }
@@ -54,7 +67,7 @@ export default function (pi: ExtensionAPI) {
 				priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high"), Type.Literal("critical")])),
 			}),
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
-				const runtime = new AgentMessageRuntime(join(ctx.cwd, ".agentflux"), {
+				const runtime = new AgentMessageRuntime(join(controlCwd || ctx.cwd, ".agentflux"), {
 					agent: agentName, instanceId, runId, taskId: process.env.AGENTFLUX_TASK_ID || undefined,
 				}, communicationPolicy, record => telemetry?.writeMessageProtocol({
 					sessionId, runId: record.runId, action: record.action, agent: record.agent,
@@ -76,19 +89,85 @@ export default function (pi: ExtensionAPI) {
 		if (!capabilityPolicy) return undefined;
 		const reason = evaluateCapabilityToolCall(capabilityPolicy, ctx.cwd, event.toolName, event.input ?? {});
 		if (reason) return { block: true, reason };
+		const lockReason = evaluateLockFileToolCall(ctx.cwd, lockFiles, event.toolName, event.input ?? {});
+		if (lockReason) return { block: true, reason: lockReason };
 		return undefined;
 	});
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		try {
-			const config = loadConfig(ctx.cwd);
-			telemetry = new TelemetryWriter(join(ctx.cwd, ".agentflux"), true);
+			const config = loadConfig(controlCwd || ctx.cwd);
+			const fluxDir = join(controlCwd || ctx.cwd, ".agentflux");
+			telemetry = new TelemetryWriter(fluxDir, true);
 			sessionId = ctx.sessionManager?.getSessionFile?.() ?? `subagent-${Date.now()}`;
+			if (rpcInboxEnabled && agentName && instanceId && runId && communicationPolicy.enabled) {
+				runtimeBoard = new SharedBoard(fluxDir);
+				runtimeBoard.registerRuntimeAgent({
+					name: agentName,
+					role: "rpc-runtime",
+					status: "idle",
+					instanceId,
+					runtimePid: process.pid,
+				}, { leaseMs: config.communication.runtime_lease_ms });
+				rpcInboxPump = new RpcInboxPump({
+					fluxDir,
+					recipient: agentName,
+					pollIntervalMs: config.communication.poll_interval_ms,
+					batchSize: config.communication.batch_size,
+					heartbeatIntervalMs: config.communication.heartbeat_interval_ms,
+					redeliveryAfterMs: config.communication.redelivery_after_ms,
+					isIdle: () => !agentBusy,
+					sendUserMessage: (content, options) => {
+						(pi.sendUserMessage as any)(content, options?.deliverAs ? { deliverAs: options.deliverAs } : undefined);
+					},
+					onHeartbeat: () => {
+						runtimeBoard?.updateAgentPresence(agentName, {
+							status: agentBusy ? "running" : "idle",
+							heartbeatAt: new Date().toISOString(),
+							runtimePid: process.pid,
+						}, instanceId);
+					},
+					onAudit: audit => telemetry?.writeMessageProtocol({
+						sessionId,
+						runId,
+						action: audit.action,
+						agent: agentName,
+						instanceId,
+						messageId: audit.messageIds[0],
+						result: audit.result,
+						detail: audit.detail ?? `${audit.messageIds.length} message(s) via ${audit.mode ?? "n/a"}`,
+					}),
+				});
+				rpcInboxPump.start({ immediate: false });
+			}
 			// stderr 标记
-			console.error(`[agentflux-subagent] prefix_layout=${config.cache.prefix_layout} capability=${capabilityPolicy ? "enforced" : "legacy"}`);
+			console.error(`[agentflux-subagent] prefix_layout=${config.cache.prefix_layout} capability=${capabilityPolicy ? "enforced" : "legacy"} rpc_inbox=${rpcInboxPump ? "on" : "off"} role=${agentRole}`);
 		} catch (e) {
 			console.error(`[agentflux-subagent] init error: ${e}`);
 		}
+	});
+
+	pi.on("agent_start", async () => {
+		agentBusy = true;
+		rpcInboxPump?.onAgentStart();
+		if (agentName && instanceId) runtimeBoard?.updateAgentPresence(agentName, { status: "running" }, instanceId);
+	});
+
+	pi.on("message_end", async (event: any) => {
+		if (event?.message?.role !== "assistant") return;
+		const success = event.message.stopReason !== "error" && event.message.stopReason !== "aborted";
+		rpcInboxPump?.onAssistantMessageEnd(success);
+	});
+
+	pi.on("agent_end", async () => {
+		agentBusy = false;
+		if (agentName && instanceId) runtimeBoard?.updateAgentPresence(agentName, { status: "idle" }, instanceId);
+		await rpcInboxPump?.tick();
+	});
+
+	pi.on("session_shutdown", async () => {
+		rpcInboxPump?.stop();
+		rpcInboxPump = null;
 	});
 
 	// ---------- F1-2 前缀布局 (唯一功能) ----------
@@ -96,7 +175,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_provider_request", async (event: any, _ctx: any) => {
 		if (!telemetry) return undefined;
 		try {
-			const config = loadConfig(_ctx.cwd);
+			const config = loadConfig(controlCwd || _ctx.cwd);
 			const { payload, result } = applyPrefixLayout(event.payload, config.cache);
 			if (result.applied) {
 				telemetry.writeContextEvent({

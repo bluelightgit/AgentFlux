@@ -311,6 +311,14 @@ export function loadRegisteredCapabilityOverride(fluxDir: string, agentName: str
 	return record?.schemaVersion === 1 && record.agentName === agentName ? record : null;
 }
 
+export function loadEffectiveCapabilitySnapshot(fluxDir: string, agentName: string): ResolvedCapabilityPolicy | null {
+	if (!NAME.test(agentName)) throw new Error(`invalid capability agent name: ${agentName}`);
+	const record = readJson<ResolvedCapabilityPolicy>(
+		join(fluxDir, "runtime", "capability-effective", `${agentName}.json`),
+	);
+	return record?.schemaVersion === 1 && record.agentName === agentName ? record : null;
+}
+
 export function saveRegisteredCapabilityOverride(input: {
 	fluxDir: string;
 	agentName: string;
@@ -399,4 +407,18 @@ export function evaluateCapabilityToolCall(
 		}
 	}
 	return null;
+}
+
+/** File-scope gate used by exact Team runs. Reads remain available for context. */
+export function evaluateLockFileToolCall(
+	cwd: string,
+	lockFiles: string[],
+	toolName: string,
+	input: Record<string, unknown>,
+): string | null {
+	if (lockFiles.length === 0 || !["edit", "write"].includes(toolName)) return null;
+	const target = typeof input.path === "string" ? resolve(cwd, input.path) : "";
+	const allowed = lockFiles.map(file => resolve(cwd, file));
+	if (target && allowed.some(file => file.toLowerCase() === target.toLowerCase())) return null;
+	return `Edit outside AgentFlux lockFiles scope: ${String(input.path ?? "(missing path)")}`;
 }

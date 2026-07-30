@@ -13,7 +13,10 @@ import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { RetentionConfig } from "./types";
 import { SharedBoard, type AgentMessage } from "./shared-board";
-import type { MessageDeliveryV2, MessageEnvelopeV2 } from "./message-bus";
+import { MessageBus, type MessageDeliveryV2, type MessageEnvelopeV2 } from "./message-bus";
+import { assertSafeOpaqueId, assertSafePathSegment } from "./safe-path";
+import { listAgentRuns, reconcileStaleAgentRuns } from "./run-registry";
+import { updateJsonStore, writeJsonFileAtomic } from "./json-store";
 
 type JsonRecord = Record<string, any>;
 
@@ -67,13 +70,6 @@ function readJson(path: string, fallback: any, warnings: string[]): any {
 	}
 }
 
-function writeJsonAtomic(path: string, value: unknown): void {
-	mkdirSync(dirname(path), { recursive: true });
-	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	writeFileSync(temporary, JSON.stringify(value, null, 2), "utf-8");
-	renameSync(temporary, path);
-}
-
 function validatePolicy(policy: RetentionConfig): string | null {
 	for (const value of [policy.stale_runtime_ttl_hours, policy.terminal_agent_ttl_hours, policy.read_message_ttl_hours, policy.orphan_session_ttl_hours]) {
 		if (!Number.isFinite(value) || value < 1) return "retention TTL values must be finite numbers >= 1 hour";
@@ -116,10 +112,28 @@ function pruneRegistryFile(
 	const removed = items.filter((item: JsonRecord) => candidateNames.has(item.name) && terminalStatuses.has(item.status));
 	const removedNames = new Set(removed.map((item: JsonRecord) => item.name));
 	const remaining = items.filter((item: JsonRecord) => !removedNames.has(item.name));
-	if (!dryRun && removed.length > 0) {
-		writeJsonAtomic(path, Array.isArray(root) ? remaining : { ...root, [key]: remaining });
+	if (dryRun || removed.length === 0) return { removed, remaining };
+	try {
+		return updateJsonStore<JsonRecord | JsonRecord[], { removed: JsonRecord[]; remaining: JsonRecord[] }>(
+			path,
+			() => ({ [key]: [] }),
+			(value: unknown): value is JsonRecord | JsonRecord[] => Array.isArray(value)
+				|| (!!value && typeof value === "object" && Array.isArray((value as JsonRecord)[key])),
+			currentRoot => {
+				const current = Array.isArray(currentRoot) ? currentRoot : currentRoot[key];
+				const currentRemoved = current.filter((item: JsonRecord) =>
+					candidateNames.has(item.name) && terminalStatuses.has(item.status));
+				const currentRemovedNames = new Set(currentRemoved.map((item: JsonRecord) => item.name));
+				const currentRemaining = current.filter((item: JsonRecord) => !currentRemovedNames.has(item.name));
+				if (Array.isArray(currentRoot)) currentRoot.splice(0, currentRoot.length, ...currentRemaining);
+				else currentRoot[key] = currentRemaining;
+				return { removed: currentRemoved, remaining: currentRemaining };
+			},
+		);
+	} catch (error: any) {
+		warnings.push(`cannot transactionally prune ${path}: ${error?.message ?? error}`);
+		return { removed: [], remaining: items };
 	}
-	return { removed, remaining };
 }
 
 function messageCandidates(messages: AgentMessage[], policy: RetentionConfig, nowMs: number): AgentMessage[] {
@@ -153,6 +167,17 @@ function collectMessageV2Candidates(
 	for (const file of readdirSync(envelopesDir).filter(file => file.endsWith(".json"))) {
 		const envelope = readJson(join(envelopesDir, file), null, warnings) as MessageEnvelopeV2 | null;
 		if (!envelope || !Array.isArray(envelope.recipients)) continue;
+		try { assertSafeOpaqueId(envelope.id, "messageId"); }
+		catch (error) {
+			warnings.push(`invalid Message V2 envelope id in ${file}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		try {
+			for (const recipient of envelope.recipients) assertSafePathSegment(recipient, "recipient");
+		} catch (error) {
+			warnings.push(`invalid Message V2 recipient in ${file}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
 		const deliveries = envelope.recipients.map(recipient =>
 			readJson(join(deliveriesDir, recipient, `${envelope.id}.json`), null, warnings) as MessageDeliveryV2 | null);
 		if (deliveries.some(delivery => !delivery || !V2_TERMINAL.has(delivery.status))) {
@@ -176,23 +201,24 @@ function archiveMessageV2Candidate(
 	fluxDir: string, archiveRoot: string, candidate: MessageV2ArchiveCandidate, warnings: string[],
 ): boolean {
 	const sourceRoot = join(fluxDir, "shared", "messages-v2");
-	const targetRoot = join(archiveRoot, "messages-v2", candidate.envelope.id);
+	const messageId = assertSafeOpaqueId(candidate.envelope.id, "messageId");
+	const targetRoot = join(archiveRoot, "messages-v2", messageId);
 	try {
 		for (const delivery of candidate.deliveries) {
-			const source = join(sourceRoot, "deliveries", delivery.recipient, `${candidate.envelope.id}.json`);
+			const source = join(sourceRoot, "deliveries", delivery.recipient, `${messageId}.json`);
 			if (!existsSync(source)) throw new Error(`delivery disappeared for ${delivery.recipient}`);
 			const target = join(targetRoot, "deliveries", `${delivery.recipient}.json`);
 			mkdirSync(dirname(target), { recursive: true });
 			copyFileSync(source, target);
 		}
-		const envelopeSource = join(sourceRoot, "envelopes", `${candidate.envelope.id}.json`);
+		const envelopeSource = join(sourceRoot, "envelopes", `${messageId}.json`);
 		const envelopeTarget = join(targetRoot, "envelope.json");
 		mkdirSync(dirname(envelopeTarget), { recursive: true });
 		copyFileSync(envelopeSource, envelopeTarget);
 		// Envelope is the active-set commit marker. Remove it only after every archive copy succeeded.
 		unlinkSync(envelopeSource);
 		for (const delivery of candidate.deliveries) {
-			const source = join(sourceRoot, "deliveries", delivery.recipient, `${candidate.envelope.id}.json`);
+			const source = join(sourceRoot, "deliveries", delivery.recipient, `${messageId}.json`);
 			try { unlinkSync(source); }
 			catch (error: any) { warnings.push(`cannot remove archived V2 delivery ${source}: ${error?.message ?? error}`); }
 		}
@@ -242,8 +268,13 @@ export function runLifecycleGc(
 		report.blockedReason = policyError;
 		return report;
 	}
-	if (!dryRun && (options.activeRunIds?.length ?? 0) > 0) {
-		report.blockedReason = `active subagent runs: ${options.activeRunIds!.join(", ")}`;
+	reconcileStaleAgentRuns(fluxDir, { now });
+	const activeRunIds = [...new Set([
+		...(options.activeRunIds ?? []),
+		...listAgentRuns(fluxDir, { activeOnly: true }).map(run => run.id),
+	])];
+	if (!dryRun && activeRunIds.length > 0) {
+		report.blockedReason = `active subagent runs: ${activeRunIds.join(", ")}`;
 		return report;
 	}
 
@@ -328,11 +359,13 @@ export function runLifecycleGc(
 	if (dryRun) {
 		report.removed.messageV2Envelopes = messageV2.candidates.map(candidate => candidate.envelope.id);
 	} else {
-		for (const candidate of messageV2.candidates) {
-			if (archiveMessageV2Candidate(fluxDir, archiveRoot, candidate, warnings)) {
-				report.removed.messageV2Envelopes.push(candidate.envelope.id);
+		new MessageBus(fluxDir).withExclusiveMaintenance(() => {
+			for (const candidate of messageV2.candidates) {
+				if (archiveMessageV2Candidate(fluxDir, archiveRoot, candidate, warnings)) {
+					report.removed.messageV2Envelopes.push(candidate.envelope.id);
+				}
 			}
-		}
+		});
 	}
 
 	const removedNames = new Set([
@@ -392,7 +425,7 @@ export function runLifecycleGc(
 	if (!dryRun && totalChanges > 0) {
 		mkdirSync(archiveRoot, { recursive: true });
 		report.archivePath = archiveRoot;
-		writeJsonAtomic(join(archiveRoot, "manifest.json"), {
+		writeJsonFileAtomic(join(archiveRoot, "manifest.json"), {
 			...report,
 			policy,
 			archivedRecords: {

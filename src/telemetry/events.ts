@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentKind, AgentOrigin, AgentStatus, WorkStyle } from "../core/types";
+import type { TaskOperation } from "../core/task-execution";
 
 export type TelemetryOutcomeStatus = "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
 export interface TelemetryOutcome { status: TelemetryOutcomeStatus; success?: boolean; exitCode?: number; gatePassed?: boolean; retryCount?: number; error?: string; }
@@ -13,6 +14,10 @@ export interface TaskExecutionEvent extends BaseEvent {
 	workStyle: WorkStyle;
 	selectedBy: "user" | "main_agent";
 	task: string;
+	operation?: TaskOperation;
+	parentTaskId?: string;
+	executionId?: string;
+	parentExecutionId?: string;
 }
 
 export interface AgentLifecycleEvent extends BaseEvent {
@@ -25,11 +30,14 @@ export interface AgentLifecycleEvent extends BaseEvent {
 	status: AgentStatus;
 	parentAgentId?: string;
 	forkPoint?: string;
+	role?: string;
+	currentTask?: string;
+	model?: string;
 }
 
 export interface ContextEvent extends BaseEvent { type: "context.event"; turnIndex: number; action: "mask_applied" | "compact_triggered" | "compaction_advice" | "fork" | "fork_created" | "tree_navigate" | "handoff" | "prefix_layout_rewrite"; detail?: string; contextPercentBefore: number | null; contextPercentAfter: number | null; }
 export interface SubagentRunEvent extends BaseEvent { type: "subagent.run"; agent: string; task: string; model: string | null; turns: number; input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; contextTokens: number; cacheHitRate: number; prefixLayout: boolean; exitCode: number; persistent?: boolean; thinking?: string; retryCount?: number; communication?: { passed: boolean; missingSendTo: string[]; unacknowledgedInbox: string[]; }; }
-export interface MessageProtocolEvent extends BaseEvent { type: "message.protocol"; action: "send" | "poll" | "ack" | "status"; agent: string; instanceId: string; messageId?: string; target?: string; result: "success" | "denied" | "failure"; detail?: string; }
+export interface MessageProtocolEvent extends BaseEvent { type: "message.protocol"; action: "send" | "poll" | "ack" | "status"; agent: string; instanceId: string; messageId?: string; target?: string; result: "success" | "denied" | "failure"; detail?: string; content?: string; deliveryStatus?: "pending" | "delivered" | "acknowledged" | "rejected" | "expired"; priority?: "low" | "normal" | "high" | "critical"; }
 export interface CapabilityPolicyEvent extends BaseEvent { type: "capability.policy"; action: "resolve" | "set" | "reject"; agent: string; role: string; instanceId?: string; revision?: number; result: "success" | "denied" | "failure"; narrowed?: string[]; cacheImpact?: string[]; detail?: string; }
 export type FluxEvent = TaskExecutionEvent | AgentLifecycleEvent | ContextEvent | SubagentRunEvent | MessageProtocolEvent | CapabilityPolicyEvent;
 
