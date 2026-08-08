@@ -144,6 +144,37 @@ npm run test:live:workflow-reuse # 同一 Pi session 创建并精确复用已保
 npm run test:live:workflow-modify # 修改得到 v2、保留 v1，再精确复用 v2
 ```
 
+### Live 测试自定义 Provider
+
+`test:live*` 默认使用本机 `~/.pi/agent` 凭据和 `octopus-anthropic` provider。
+设置以下环境变量后，会在临时 agent 目录写入 pi models.json 的 `providers` 段并
+通过 `PI_CODING_AGENT_DIR` 重定向，把测试指向任意 OpenAI 兼容 / Anthropic 兼容端点
+（结构与 pi `docs/models.md` 一致，`AGENTFLUX_LIVE_API_KEY` 对应 `apiKey` 字段，
+可用字面量或 `$ENV` 引用）：
+
+```bash
+AGENTFLUX_LIVE_BASE_URL=https://api.example.com/v1 \
+AGENTFLUX_LIVE_API=openai-completions \
+AGENTFLUX_LIVE_API_KEY=sk-xxx \
+AGENTFLUX_LIVE_MODEL_PRO=my-model \
+AGENTFLUX_LIVE_MODEL_FLASH=my-model \
+AGENTFLUX_LIVE_THINKING=off \
+AGENTFLUX_LIVE_CASES=direct,team \
+AGENTFLUX_LIVE_PROVIDER_ID=agentflux-ci \
+  npm run test:live
+```
+
+- `AGENTFLUX_LIVE_BASE_URL`：自定义端点 baseUrl；设置后 provider 切换到自定义端点，否则使用本机默认。
+- `AGENTFLUX_LIVE_API`：api 类型，默认 `openai-completions`（也支持 `openai-responses`、`anthropic-messages` 等）。
+- `AGENTFLUX_LIVE_API_KEY`：API key，可省略（改用 `--api-key` 或 `/login` 凭据）。
+- `AGENTFLUX_LIVE_MODEL_PRO` / `AGENTFLUX_LIVE_MODEL_FLASH`：高/低能力模型名，默认 `deepseek-v4-pro` / `deepseek-v4-flash`。
+- `AGENTFLUX_LIVE_THINKING`：思考等级，默认 `off`（`off|minimal|low|medium|high|xhigh|max`）。
+- `AGENTFLUX_LIVE_CASES`：core smoke 的用例子集，默认 `direct,team,workflow,community`。
+- `AGENTFLUX_LIVE_PROVIDER_ID`：provider id，默认 `agentflux-ci`。
+
+CI 中可通过仓库 `.github/workflows/live.yml` 手动触发（workflow_dispatch）或定时
+（schedule + `AGENTFLUX_LIVE_*` Secrets）运行真实链路测试。
+
 ### PiDeck 工作台
 
 PiDeck 通过 `agentflux/host` 的项目级 API 读取同一份控制面状态，不在 Renderer 中重写 AgentFlux 逻辑。Participants 抽屉中的 AgentFlux 工作台目前提供：

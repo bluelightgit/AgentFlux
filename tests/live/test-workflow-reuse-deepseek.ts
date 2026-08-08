@@ -2,11 +2,13 @@ import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { loadLiveConfig, type LiveConfig } from "./live-config";
 
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const root = mkdtempSync(join(tmpdir(), "agentflux-live-workflow-reuse-"));
 const sessionDir = join(root, "sessions");
 const piCli = resolve(sourceRoot, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+const config = loadLiveConfig();
 
 function run(prompt: string, allowPostExecutionTimeout = false): { output: string; timedOutAfterExecution: boolean } {
 	const result = spawnSync(process.execPath, [
@@ -17,9 +19,7 @@ function run(prompt: string, allowPostExecutionTimeout = false): { output: strin
 		"--tools", "read,grep,find,ls,flux_task,flux_workflow",
 		"--session-dir", sessionDir,
 		"--session-id", "workflow-reuse-live",
-		"--provider", "octopus-anthropic",
-		"--model", "deepseek-v4-pro",
-		"--thinking", "off",
+		...config.cliArgs(config.modelPro),
 		prompt,
 	], {
 		cwd: root,
@@ -27,6 +27,7 @@ function run(prompt: string, allowPostExecutionTimeout = false): { output: strin
 		timeout: 300_000,
 		maxBuffer: 32 * 1024 * 1024,
 		windowsHide: true,
+		env: config.env,
 	});
 	const output = `${result.stdout}\n${result.stderr}`;
 	const timedOut = result.status === null && (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
@@ -46,19 +47,7 @@ try {
 		budget: { max_cost_per_task: 0.25, max_iterations: 3, max_wall_clock_seconds: 240 },
 		pricing: { enable_remote_fetch: false },
 	}));
-	writeFileSync(join(root, ".agentflux", "models.json"), JSON.stringify({
-		models: {
-			"deepseek-v4-pro": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
-			"deepseek-v4-flash": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
-		},
-		roles: {
-			planner: { model: "deepseek-v4-pro", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			implementer: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			reviewer: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			tester: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-		},
-		sharedSkills: [],
-	}));
+	writeFileSync(join(root, ".agentflux", "models.json"), JSON.stringify(config.fluxModelsJson()));
 	const { output: first } = run("执行固定两步只读流程：先读取 README.md 第一行并输出 WORKFLOW_READ_OK，再由独立 reviewer 复核并输出 WORKFLOW_REVIEW_OK；全部通过后以 WORKFLOW_SEED_OK 结束。");
 	if (!first.includes("\"toolName\":\"flux_workflow\"") || !first.includes("[DAG Execution: PASSED]") || !first.includes("WORKFLOW_SEED_OK")) {
 		throw new Error(`initial Workflow did not pass\n${first.slice(-6000)}`);
@@ -93,4 +82,5 @@ try {
 	}, null, 2));
 } finally {
 	rmSync(root, { recursive: true, force: true });
+	config.cleanup();
 }

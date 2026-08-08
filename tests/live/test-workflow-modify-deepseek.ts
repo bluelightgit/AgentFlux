@@ -3,12 +3,14 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createWorkflowDefinition, getWorkflowDefinition } from "../../src/workflows/workflow-registry";
+import { loadLiveConfig } from "./live-config";
 
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const root = mkdtempSync(join(tmpdir(), "agentflux-live-workflow-modify-"));
 const sessionDir = join(root, "sessions");
 const fluxDir = join(root, ".agentflux");
 const piCli = resolve(sourceRoot, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+const config = loadLiveConfig();
 
 function run(prompt: string): string {
 	const result = spawnSync(process.execPath, [
@@ -19,9 +21,7 @@ function run(prompt: string): string {
 		"--tools", "read,grep,find,ls,flux_task,flux_workflow",
 		"--session-dir", sessionDir,
 		"--session-id", "workflow-modify-live",
-		"--provider", "octopus-anthropic",
-		"--model", "deepseek-v4-pro",
-		"--thinking", "off",
+		...config.cliArgs(config.modelPro),
 		prompt,
 	], {
 		cwd: root,
@@ -29,6 +29,7 @@ function run(prompt: string): string {
 		timeout: 300_000,
 		maxBuffer: 32 * 1024 * 1024,
 		windowsHide: true,
+		env: config.env,
 	});
 	const output = `${result.stdout}\n${result.stderr}`;
 	if (result.status !== 0) {
@@ -45,19 +46,7 @@ try {
 		budget: { max_cost_per_task: 0.25, max_iterations: 3, max_wall_clock_seconds: 240 },
 		pricing: { enable_remote_fetch: false },
 	}));
-	writeFileSync(join(fluxDir, "models.json"), JSON.stringify({
-		models: {
-			"deepseek-v4-pro": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
-			"deepseek-v4-flash": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
-		},
-		roles: {
-			planner: { model: "deepseek-v4-pro", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			implementer: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			reviewer: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-			tester: { model: "deepseek-v4-flash", thinking: "off", tools: ["read", "grep", "find", "ls"] },
-		},
-		sharedSkills: [],
-	}));
+	writeFileSync(join(fluxDir, "models.json"), JSON.stringify(config.fluxModelsJson()));
 	const seed = createWorkflowDefinition(fluxDir, {
 		name: "readme-check",
 		sourceTaskId: "seed-task",
@@ -109,4 +98,5 @@ try {
 	}, null, 2));
 } finally {
 	rmSync(root, { recursive: true, force: true });
+	config.cleanup();
 }

@@ -1,0 +1,130 @@
+name: Live E2E
+
+# 真实模型链路测试。默认不运行（避免公共 CI 产生 API 费用与 key 暴露）。
+# 触发方式：
+#   1. 手动 workflow_dispatch（推荐）：在 Actions 页面填入 provider 参数
+#   2. 定时 schedule：需先在仓库配置好 Secrets（见下方说明）
+#
+# provider 参数与 pi models.json 的 providers 段一一对应
+# （参考 pi docs/models.md；tests/live/live-config.ts 会生成临时 agent 目录）：
+#   base-url    → providers.<id>.baseUrl
+#   api-type    → providers.<id>.api（openai-completions 等）
+#   api-key     → providers.<id>.apiKey（也可用 $ENV 引用或 --api-key）
+#   model-*     → providers.<id>.models[].id
+#   thinking    → pi CLI 的 --thinking 等级
+#
+# 需要配置的 Secrets（schedule 定时任务使用；手动触发时可用 inputs 替代）：
+#   AGENTFLUX_LIVE_BASE_URL / AGENTFLUX_LIVE_API_KEY
+#   AGENTFLUX_LIVE_MODEL_PRO / AGENTFLUX_LIVE_MODEL_FLASH
+
+on:
+  workflow_dispatch:
+    inputs:
+      base-url:
+        description: "Provider base URL（对应 models.json providers.<id>.baseUrl）"
+        required: true
+        type: string
+      api-key:
+        description: "API key（会被日志打码；也可省略改用 Secrets.AGENTFLUX_LIVE_API_KEY）"
+        required: false
+        type: string
+      api-type:
+        description: "API 类型：openai-completions / openai-responses / anthropic-messages 等"
+        required: false
+        default: openai-completions
+        type: string
+      provider-id:
+        description: "provider id（默认 agentflux-ci）"
+        required: false
+        default: agentflux-ci
+        type: string
+      model-pro:
+        description: "高能力模型名（planner/reviewer 等角色）"
+        required: true
+        type: string
+      model-flash:
+        description: "低能力模型名（implementer/tester 等角色）"
+        required: true
+        type: string
+      thinking:
+        description: "思考等级：off / minimal / low / medium / high / xhigh / max"
+        required: false
+        default: off
+        type: string
+      cases:
+        description: "要跑的用例（逗号分隔）：direct,team,workflow,community,history,workflow-reuse,workflow-modify"
+        required: false
+        default: direct
+        type: string
+  schedule:
+    # 每日 03:17 定时回归（需要 Secrets.AGENTFLUX_LIVE_*）
+    - cron: "17 3 * * *"
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Mask API key
+        env:
+          KEY: ${{ inputs.api-key || secrets.AGENTFLUX_LIVE_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "::add-mask::$KEY"; fi
+
+      - name: Run live tests
+        env:
+          AGENTFLUX_LIVE_BASE_URL: ${{ inputs.base-url || secrets.AGENTFLUX_LIVE_BASE_URL }}
+          AGENTFLUX_LIVE_API_KEY: ${{ inputs.api-key || secrets.AGENTFLUX_LIVE_API_KEY }}
+          AGENTFLUX_LIVE_API: ${{ inputs.api-type || 'openai-completions' }}
+          AGENTFLUX_LIVE_PROVIDER_ID: ${{ inputs.provider-id || 'agentflux-ci' }}
+          AGENTFLUX_LIVE_MODEL_PRO: ${{ inputs.model-pro || secrets.AGENTFLUX_LIVE_MODEL_PRO }}
+          AGENTFLUX_LIVE_MODEL_FLASH: ${{ inputs.model-flash || secrets.AGENTFLUX_LIVE_MODEL_FLASH }}
+          AGENTFLUX_LIVE_THINKING: ${{ inputs.thinking || secrets.AGENTFLUX_LIVE_THINKING || 'off' }}
+        run: |
+          test -n "$AGENTFLUX_LIVE_BASE_URL" || { echo "缺少 base-url"; exit 1; }
+          test -n "$AGENTFLUX_LIVE_API_KEY" || { echo "缺少 api-key"; exit 1; }
+          test -n "$AGENTFLUX_LIVE_MODEL_PRO" || { echo "缺少 model-pro"; exit 1; }
+          test -n "$AGENTFLUX_LIVE_MODEL_FLASH" || { echo "缺少 model-flash"; exit 1; }
+          echo "provider=$AGENTFLUX_LIVE_PROVIDER_ID api=$AGENTFLUX_LIVE_API url=$AGENTFLUX_LIVE_BASE_URL"
+          echo "modelPro=$AGENTFLUX_LIVE_MODEL_PRO modelFlash=$AGENTFLUX_LIVE_MODEL_FLASH thinking=$AGENTFLUX_LIVE_THINKING"
+          CASES="${{ inputs.cases || 'direct' }}"
+          echo "cases=$CASES"
+          FAILED=0
+          for case in $(echo "$CASES" | tr ',' ' '); do
+            echo "=== case: $case ==="
+            case "$case" in
+              direct|team|workflow|community)
+                AGENTFLUX_LIVE_CASES="$case" npm run test:live || FAILED=1 ;;
+              history)
+                npm run test:live:history || FAILED=1 ;;
+              workflow-reuse)
+                npm run test:live:workflow-reuse || FAILED=1 ;;
+              workflow-modify)
+                npm run test:live:workflow-modify || FAILED=1 ;;
+              *)
+                echo "unknown case: $case"; FAILED=1 ;;
+            esac
+          done
+          exit $FAILED
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentflux-live-report
+          path: .agentflux/test-results/
+          if-no-files-found: ignore
