@@ -1,7 +1,7 @@
 {
   "name": "agentflux",
   "version": "0.1.0",
-	"type": "module",
+  "type": "module",
   "description": "A multi-Agent workbench for pi: direct work, dynamic teams, DAG workflows and issue communities",
   "keywords": [
     "pi-package",
@@ -14,56 +14,58 @@
   "author": "AgentFlux",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/bluelightgit/AgentFlux.git"
   },
-	"files": [
-	"dist/**/*",
-    "docs/*.md",
+  "files": [
+    "dist/**/*",
     ".agentflux/models.json",
     "README.md"
   ],
-	"exports": {
-		".": "./dist/extension/entry.js",
-		"./extension": "./dist/extension/entry.js",
-		"./host": {
-			"types": "./dist/types/host/index.d.ts",
-			"import": "./dist/host/index.js",
-			"require": "./dist/host/index.cjs"
-		},
-		"./contracts": {
-			"types": "./dist/types/contracts/index.d.ts",
-			"import": "./dist/contracts/index.js",
-			"require": "./dist/contracts/index.cjs"
-		}
-	},
+  "exports": {
+    ".": "./dist/extension/entry.js",
+    "./extension": "./dist/extension/entry.js",
+    "./host": {
+      "types": "./dist/types/host/index.d.ts",
+      "import": "./dist/host/index.js",
+      "require": "./dist/host/index.cjs"
+    },
+    "./contracts": {
+      "types": "./dist/types/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js",
+      "require": "./dist/contracts/index.cjs"
+    }
+  },
   "pi": {
     "extensions": [
       "./dist/extension/entry.js"
     ]
   },
   "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*"
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
     "@earendil-works/pi-tui": "^0.84.1",
     "esbuild": "^0.25.12",
     "tsx": "^4.22.4",
+    "typebox": "^1.3.7",
     "typescript": "^5.9.3"
   },
   "scripts": {
-	"build": "node scripts/build.mjs && tsc -p tsconfig.declarations.json",
-	"typecheck": "tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs && tsc -p tsconfig.declarations.json",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "npm run test:unit",
-	"test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-task-envelope.ts && tsx tests/test-task-registry.ts && tsx tests/test-workflow-registry.ts && tsx tests/test-community.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-host-workbench.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts && tsx tests/test-pricing.ts",
+    "test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-task-envelope.ts && tsx tests/test-task-registry.ts && tsx tests/test-workflow-registry.ts && tsx tests/test-community.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-host-workbench.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts && tsx tests/test-pricing.ts",
     "test:live": "tsx tests/live/test-core-deepseek-smoke.ts",
-	"test:live:history": "tsx tests/live/test-task-history-deepseek.ts",
-	"test:live:workflow-reuse": "tsx tests/live/test-workflow-reuse-deepseek.ts",
-	"test:live:workflow-modify": "tsx tests/live/test-workflow-modify-deepseek.ts",
-	"dispatch:team": "tsx scripts/run-exact-team.ts",
-	"verify": "npm run typecheck && npm run test:unit",
-	"prepack": "npm run build"
+    "test:live:history": "tsx tests/live/test-task-history-deepseek.ts",
+    "test:live:workflow-reuse": "tsx tests/live/test-workflow-reuse-deepseek.ts",
+    "test:live:workflow-modify": "tsx tests/live/test-workflow-modify-deepseek.ts",
+    "dispatch:team": "tsx scripts/run-exact-team.ts",
+    "verify": "npm run typecheck && npm run test:unit",
+    "prepack": "npm run build"
   }
 }

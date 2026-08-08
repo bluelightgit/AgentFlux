@@ -2,6 +2,20 @@
 
 AgentFlux 是基于 [pi](https://github.com/earendil-works/pi-coding-agent) 的多 Agent 工作台运行时。产品只保留一个递进的任务能力体系：Direct 是 Main Agent 基础执行；Team 在其上增加动态 Agent 调用；Workflow 和 Community 平级建立在 Team 能力之上，分别增加固定 DAG 与基于 Issue/Claim 的任务驱动协作。模型选择、Agent 生命周期、会话 fork 与权限不再包装成独立“模式”。`agent_decides` 是由 Main Agent 选择上述工作方式的入口，不是第五种工作方式。
 
+## 安装
+
+AgentFlux 是 npm 上的 pi 包（`pi-package`），安装后自动注册 `/flux` 命令族和六个调度工具：
+
+```bash
+pi install npm:agentflux          # 从 npm registry 安装（推荐，固定版本）
+pi install git:github.com/bluelightgit/AgentFlux   # 从 git 仓库安装（默认 main）
+pi install git:github.com/bluelightgit/AgentFlux@v0.1.0  # 固定 tag
+```
+
+未安装时也可以临时试用：`pi -e npm:agentflux`。
+
+依赖说明：AgentFlux 声明 `@earendil-works/pi-ai`、`pi-agent-core`、`pi-coding-agent`、`pi-tui` 与 `typebox` 为 peerDependencies（均为 `*`），运行时使用 pi 主进程自身提供的实例，发布包不携带这些依赖，也不会与 pi 自带版本产生双实例冲突。
+
 ## 使用
 
 项目已在 `.pi/settings.json` 配置本地扩展，进入仓库后直接运行 pi；也可手动加载：
