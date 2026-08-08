@@ -6,6 +6,7 @@ import { MessageBus } from "../src/core/message-bus";
 import { SharedBoard } from "../src/core/shared-board";
 import { showAgentTuiMenu, showFluxTuiMenu } from "../src/extension/tui-menu";
 import { isSlashArgumentBoundary, shouldContinueSlashCompletion } from "../src/extension/tui-autocomplete-bridge";
+import { Editor } from "@earendil-works/pi-tui";
 
 type Handler = (...args: any[]) => any;
 class FakePi {
@@ -39,12 +40,47 @@ async function main(): Promise<void> {
 		);
 		check(isSlashArgumentBoundary("/flux work ", " ") && !isSlashArgumentBoundary("plain text ", " "), "空格可触发 slash command 参数补全而不影响普通输入");
 		check(shouldContinueSlashCompletion("/flux work", "\t") && !shouldContinueSlashCompletion("/flux work ", "\t"), "Tab 补全 slash 字段后继续显示下级选单");
+		// bridge 安装后：候选列表渲染被移到输入行上方，且打开后自动关闭定时器存在
+		const bridgeMark = Symbol.for("agentflux.slash-argument-autocomplete");
+		const bridgePatched = (Editor.prototype as any)[bridgeMark] === true;
+		check(bridgePatched, "bridge 已安装到真实 pi-tui Editor 原型");
+		const proto = Editor.prototype as any;
+		const fakeEditor: any = {
+			state: { lines: ["/flux work "], cursorLine: 0, cursorCol: 11 },
+			autocompleteState: "regular",
+			autocompleteList: { render: () => ["→ direct", "  team", "  workflow", "  community"] },
+			paddingX: 1,
+			lastWidth: 0,
+			borderColor: (s: string) => s,
+			layoutText: () => [{ text: "/flux work ", hasCursor: true, cursorPos: 11 }],
+			scrollOffset: 0,
+			segment: (s: string) => [{ segment: s }],
+			focused: false,
+			tui: { terminal: { rows: 32 }, requestRender: () => undefined },
+			visibleWidth: (s: string) => s.length,
+			getBestAutocompleteMatchIndex: () => -1,
+			createAutocompleteList: () => ({ setSelectedIndex: () => undefined }),
+			cancelAutocompleteRequest: () => undefined,
+			clearAutocompleteUi: () => undefined,
+		};
+		const rendered = (proto.render ?? (() => [])).call(fakeEditor, 120);
+		check(rendered[0].includes("direct"), "候选列表渲染在输入行上方（第一行即候选，而非底部）");
+		const apply = proto.applyAutocompleteSuggestions;
+		if (typeof apply === "function") {
+			apply.call(fakeEditor, { items: [{ value: "direct" }] }, "regular");
+			check(fakeEditor[Symbol.for("agentflux.autocomplete-auto-close-timer")] !== undefined, "候选打开后注册自动关闭定时器");
+			const cancel = proto.cancelAutocomplete;
+			if (typeof cancel === "function") cancel.call(fakeEditor);
+			check(fakeEditor[Symbol.for("agentflux.autocomplete-auto-close-timer")] === undefined, "取消候选时清除自动关闭定时器");
+		}
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
 		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "task") && rootCompletions.some((item: any) => item.value === "workflow") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
 		check(await flux.getArgumentCompletions("agent") === null && await flux.getArgumentCompletions("work") === null, "补全为完整字段后退出候选态，Enter 可提交并打开菜单");
-		const workCompletions = await flux.getArgumentCompletions("work ");
-		check(workCompletions.map((item: any) => item.value).includes("work community"), "work 子命令补全显示四种工作方式");
+		// 空参数（尾随空格）不提供候选：候选列表由 pi 主进程控制，自动弹出会长时间占据输入框区域
+		check(await flux.getArgumentCompletions("work ") === null && await flux.getArgumentCompletions("task ") === null, "空参数退出候选态，避免建议文本长时间显示在输入框区域");
+		const workCompletions = await flux.getArgumentCompletions("work d");
+		check(workCompletions?.map((item: any) => item.value).includes("work direct"), "输入中（非空参数）仍显示 work 子命令候选");
 		check((await flux.getArgumentCompletions("agent list"))?.length === 0, "完整子命令退出候选态，Enter 可直接执行");
 		menuSelections = ["Multi-Agent · Team, Workflow or Community", "Team · dynamic delegation"]; menuInputs = ["coordinate review"];
 		await flux.handler("work", ctx);

@@ -41,6 +41,10 @@ function completions(prefix: string, options: Array<[string, string]>): FluxComp
 
 export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompletionItem[] | null {
 	const prefix = argumentPrefix.trimStart();
+	// 当前字段为空（尾随空格）：不提供候选，让列表立即关闭。
+	// 原因：候选列表的显示位置与生命周期由 pi 主进程控制，扩展无法移动或定时关闭；
+	// 空参数自动弹出会让“建议文本”长时间占据输入框区域。打字中（非空字段）仍提示。
+	if (prefix.endsWith(" ")) return null;
 	if (!prefix.includes(" ")) {
 		if (TOP_LEVEL_COMPLETIONS.some(item => item.value === prefix)) return null;
 		const found = TOP_LEVEL_COMPLETIONS.filter(item => item.value.startsWith(prefix));

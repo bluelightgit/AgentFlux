@@ -26,7 +26,7 @@
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默。任务信封在 input hook 被消费，不进入 session/provider；system prompt 只使用稳定通用协议与四个固定工作方式模板，不包含 taskId、任务正文或动态预算。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
 | 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。空格会触发 slash 参数补全；Tab 选择父字段后自动进入下级选单，Enter 仍可提交裸命令进入菜单。真实 PTY 已验证手输 `/flux work ` 与 `/flux wo` + Tab。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
+| TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。打字中（如 `/flux work d`）会提示 slash 参数候选；尾随空格（空参数）不弹出候选列表，避免建议文本长时间占据输入框区域（2026-08-08 调整：pi 0.84.1 下扩展 bundle 的 pi-tui Editor 与主进程渲染类为双实例，bridge patch 不生效，改为由 getArgumentCompletions 空参数返回 null 关闭列表）。Enter 仍可提交裸命令进入菜单。真实 PTY 已验证。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
 | Desktop | PiDeck migration / deterministic + real Electron verified / limited | PiDeck 已接入 Execution/Run Registry、当前 session 的任务历史分页与精确详情。Inspector 支持只读 Open，以及创建新谱系的 Continue/Reuse/Retry/Workflow Resume；状态、参与者与操作资格来自 Host snapshot 的 Registry 事实。2026-07-30 的编译 Electron 已分别通过 Direct/Team/Workflow 完整链路、53 项工作台断言、25 项 Ephemeral Stop/Retry 断言和 12 项 Workflow Inspector 断言。右侧多页签、统一 forked roster 与完整 Issue Room 仍未完成。 |
 
 ### 工作方式切换与缓存事实
@@ -161,7 +161,7 @@ PiDeck 最终确定性回归为 208/208，TypeScript 检查、Electron main/prel
 pi 0.84.0/0.84.1 更新后 AgentFlux 暴露两个可复现故障，均已修复并验证（本轮未动 PiDeck）：
 
 - [已实现] Community `issues.json` 旧数组格式自动迁移：早期版本顶层数组（仅 id/title/status/priority/created/updated/tags）会触发 `readJsonStore` fail-closed 抛错，阻塞 `/flux` Workbench 菜单。现 `community.ts` 读取时检测旧格式，迁移为 `{ issues: [...] }` 结构（`closed`→`resolved`、priority/tags 拼入 description、时间戳转 ISO），原子写回并保留 `.bak`，与 task-registry v1→v2 兼容一致。真实 TUI 复测菜单正常打开。
-- [已实现] pi-tui 双实例修复：`build.mjs` 将 `@earendil-works/*` 设为 external，避免把本地 0.80.2 Editor 类内联进 bundle（pi 0.84.1 主进程通过 jiti alias 使用自己的 0.84.1 实例，此前导致 slash 参数补全 bridge patch 到主进程从不使用的类）。devDependencies 的 pi-ai/pi-tui 升到 ^0.84.1。真实 TUI 对照验证：带扩展 `/flux work ` + Tab 补全为 `work direct`，原生 pi 则显示文件列表。
+- [已实现] pi-tui 双实例修复（外部化）：`build.mjs` 将 `@earendil-works/*` 设为 external，不再内联本地 Editor 类。但 2026-08-08 真实 TUI 行为实验证明：扩展 bundle 的 `import { Editor }` 仍解析到项目 node_modules 副本，与主进程渲染类不同（双实例），bridge 的 prototype patch 不生效。slash 参数补全改为“不打扰”策略：空参数（尾随空格）不返回候选（列表不自动弹出/不长时间挂起），打字中提示保留（`/flux work d` 显示 direct 等候选）；Tab 在参数位置回落到原生文件补全。
 - [确认兼容] CLI 参数、扩展事件、`ctx.sessionManager`/`ctx.fork` 在 0.84.1 全部保留；`message_update` delta-only 不影响 AgentFlux（agent-runner 解析 `message_end`）。PiDeck 的 `message_update` 流式修复留待后续任务。
 
 验证：`npm run verify` 全部通过（Community 30/30 含 3 个新迁移测试）、production build 通过、JSON 模式真实链路（扩展加载 + 模型回复）通过。验证脚本：`scripts/verify-flux-menu.mjs`、`scripts/verify-flux-tab-completion.mjs [native]`。
