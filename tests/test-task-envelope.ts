@@ -36,5 +36,12 @@ check("Unknown work styles fail closed", () => {
 check("Missing task body fails closed", () => {
 	assert.throws(() => parseAgentFluxTaskEnvelope(encoded.split("\n")[0]), /task is missing/);
 });
+check("Path-like task ids fail closed", () => {
+	for (const taskId of ["../escape", "..", "C:\\escape", "/absolute", "nul", "a/b"]) {
+		assert.throws(() => createAgentFluxTaskEnvelope({ taskId, workStyle: "team", task: "x" }), /opaque id/);
+	}
+	const metadata = Buffer.from(JSON.stringify({ version: 1, taskId: "../../escape", workStyle: "team" })).toString("base64url");
+	assert.throws(() => parseAgentFluxTaskEnvelope(`agentflux-task-v1:${metadata}\ntask`), /opaque id/);
+});
 
 console.log(`\n${passed} task-envelope checks passed`);

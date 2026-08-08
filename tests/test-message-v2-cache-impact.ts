@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -10,6 +10,7 @@ import {
 } from "../src/core/communication-policy";
 import { SharedBoard } from "../src/core/shared-board";
 import { runAgent, type AgentTemplate, type AgentRunResult } from "../src/agents/agent-runner";
+import { readAgentFluxProject, sendAgentGroupMessage, sendAgentMessage } from "../src/host/index";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
@@ -23,11 +24,36 @@ const fluxDir = join(root, ".agentflux");
 async function main() {
 	try {
 		const board = new SharedBoard(fluxDir);
-		for (const name of ["planner", "worker-a", "worker-b", "limited", "runner-ok", "runner-fail", "runner-contract", "runtime-sender", "concurrent"]) {
+		for (const name of ["planner", "worker-a", "worker-b", "desktop-target", "limited", "runner-ok", "runner-fail", "runner-contract", "runtime-sender", "concurrent"]) {
 			board.registerAgent({ name, role: "worker", status: "idle" });
 		}
 		const group = board.createGroup("implementation", ["planner", "worker-a", "worker-b"], "team", "planner");
+		const operatorGroup = board.createGroup("desktop-review", ["main", "desktop-target"], "team", "main");
 		const bus = new MessageBus(fluxDir, { redeliveryAfterMs: 1_000, maxPendingPerRecipient: 10 });
+		const operatorMessage = sendAgentMessage(root, {
+			taskId: "desktop-team-1",
+			target: "desktop-target",
+			content: "Please include the edge-case result",
+		});
+		const operatorEvent = readFileSync(join(fluxDir, "events.jsonl"), "utf-8")
+			.trim().split("\n").map(line => JSON.parse(line)).find(event => event.messageId === operatorMessage.envelope.id);
+		check("Desktop operator messages preserve task provenance and pending delivery",
+			operatorMessage.envelope.taskId === "desktop-team-1"
+				&& operatorMessage.deliveries[0]?.status === "pending"
+				&& operatorEvent?.agent === "operator"
+				&& operatorEvent?.content === "Please include the edge-case result",
+			`${operatorMessage.envelope.id} / ${operatorEvent?.deliveryStatus}`);
+		const operatorGroupMessage = sendAgentGroupMessage(root, {
+			taskId: "desktop-team-1",
+			groupId: operatorGroup.id,
+			content: "Please report group status",
+		});
+		check("Host snapshot and group send expose the PiDeck data contract",
+			readAgentFluxProject(root).groups.some(candidate => candidate.id === operatorGroup.id)
+				&& readAgentFluxProject(root).messages.some(item => item.envelope.id === operatorGroupMessage.envelope.id && item.deliveries.length === 1)
+				&& operatorGroupMessage.envelope.channel.type === "group"
+				&& operatorGroupMessage.envelope.taskId === "desktop-team-1",
+			`${operatorGroupMessage.envelope.channel.type}:${operatorGroupMessage.deliveries.length}`);
 
 		const direct = bus.sendDirect("planner", "worker-a", "task_update", "Use the new schema", {
 			dedupeKey: "task-1-schema-v2", taskId: "task-1",
@@ -47,6 +73,13 @@ async function main() {
 				&& groupResult.deliveries.some(delivery => delivery.recipient === "worker-a")
 				&& groupResult.deliveries.some(delivery => delivery.recipient === "worker-b"),
 			groupResult.deliveries.map(delivery => delivery.recipient).join(","));
+		const workerBPeek = bus.peek("worker-b");
+		check("peek exposes group inbox without consuming delivery",
+			workerBPeek.length === 1
+				&& workerBPeek[0].envelope.id === groupResult.envelope.id
+				&& workerBPeek[0].delivery.status === "pending"
+				&& bus.getDelivery(groupResult.envelope.id, "worker-b")?.status === "pending",
+			`${workerBPeek[0]?.envelope.channel.type}:${workerBPeek[0]?.delivery.status}`);
 
 		const workerAPoll = bus.poll("worker-a", { now: new Date("2026-07-16T12:00:00.000Z") });
 		check("poll orders high-priority messages first and marks delivery",
@@ -94,6 +127,14 @@ async function main() {
 		check("acknowledgement releases backpressure capacity",
 			limitedBus.sendDirect("planner", "limited", "two", "second").deliveries.length === 1,
 			`outstanding=${limitedBus.countOutstanding("limited")}`);
+		let unsafeMessageIdRejected = false;
+		try { limitedBus.acknowledge("limited", "../../outside"); }
+		catch (error) { unsafeMessageIdRejected = /opaque id/.test(error instanceof Error ? error.message : String(error)); }
+		check("message ids cannot escape the delivery directory", unsafeMessageIdRejected, "path-like message id rejected");
+		let reservedRecipientRejected = false;
+		try { limitedBus.sendDirect("planner", "nul", "message", "reserved"); }
+		catch (error) { reservedRecipientRejected = /safe .*path segment/.test(error instanceof Error ? error.message : String(error)); }
+		check("Windows reserved recipient names are rejected", reservedRecipientRejected, "nul");
 
 		const tsxCli = join(process.cwd(), "node_modules", "tsx", "dist", "cli.mjs");
 		const workerScript = join(process.cwd(), "tests", "helpers", "message-bus-worker.ts");
@@ -221,7 +262,7 @@ async function main() {
 		try {
 			completedContract = await runAgent({
 				cwd: root, agent: contractAgent, task: "must hand off", sessionId: "message-contract-complete",
-				prefixLayout: true, timeoutMs: 5_000, maxRetries: 0, runId: "contract-complete",
+				prefixLayout: true, timeoutMs: 5_000, maxRetries: 0, runId: "contract-complete", liveTeamCommunication: true,
 				invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
 			});
 		} finally {
@@ -237,6 +278,25 @@ async function main() {
 				&& capture.agent === "runner-contract" && capture.runId === "contract-complete"
 				&& capture.instanceId === "runner-contract:contract-complete",
 			JSON.stringify({ tools: capture.argv[toolsIndex + 1], agent: capture.agent, runId: capture.runId }));
+		check("live Team child is instructed to poll operator and peer updates before finishing",
+			capture.argv.at(-1)?.includes("action=poll") === true,
+			capture.argv.at(-1)?.slice(-180) ?? "missing task prompt");
+		const corruptRoot = mkdtempSync(join(tmpdir(), "agentflux-message-corrupt-"));
+		try {
+			const corruptFluxDir = join(corruptRoot, ".agentflux");
+			const corruptBus = new MessageBus(corruptFluxDir);
+			const sent = corruptBus.sendDirect("planner", "worker-a", "test", "preserve corrupt evidence");
+			const envelopePath = join(corruptFluxDir, "shared", "messages-v2", "envelopes", `${sent.envelope.id}.json`);
+			writeFileSync(envelopePath, "{\"schemaVersion\":2,", "utf-8");
+			let rejectedCorruption = false;
+			try { corruptBus.getEnvelope(sent.envelope.id); }
+			catch (error) { rejectedCorruption = /corrupt and was not overwritten/.test(error instanceof Error ? error.message : String(error)); }
+			check("corrupt Message V2 state fails closed without erasing evidence",
+				rejectedCorruption && readFileSync(envelopePath, "utf-8") === "{\"schemaVersion\":2,",
+				sent.envelope.id);
+		} finally {
+			rmSync(corruptRoot, { recursive: true, force: true });
+		}
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -2,6 +2,8 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentFlux from "../src/entry";
+import { MessageBus } from "../src/core/message-bus";
+import { SharedBoard } from "../src/core/shared-board";
 import { showAgentTuiMenu, showFluxTuiMenu } from "../src/extension/tui-menu";
 import { isSlashArgumentBoundary, shouldContinueSlashCompletion } from "../src/extension/tui-autocomplete-bridge";
 
@@ -29,20 +31,25 @@ async function main(): Promise<void> {
 		let menuInputs: string[] = [];
 		const ctx: any = { cwd: root, hasUI: true, mode: "tui", model: { id: "test" }, ui: { notify: (text: string) => notices.push(text), select: async () => menuSelections.shift(), input: async () => menuInputs.shift() }, sessionManager: { getSessionFile: () => "tui-session", getBranch: () => [{ type: "message", id: "entry-1", message: { role: "user", content: [{ type: "text", text: "seed context" }] } }] }, fork: async () => ({ cancelled: false }) };
 		for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
-		check(pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册四条核心工具链");
+		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册任务历史与四条核心工具链");
+		check(
+			pi.tools.get("flux_team")?.description.includes("registered template id")
+				&& pi.tools.get("flux_workflow")?.description.includes("never a DAG or object"),
+			"Team/Workflow 工具说明约束 role 模板 ID 与 Workflow selector，减少模型参数误用",
+		);
 		check(isSlashArgumentBoundary("/flux work ", " ") && !isSlashArgumentBoundary("plain text ", " "), "空格可触发 slash command 参数补全而不影响普通输入");
 		check(shouldContinueSlashCompletion("/flux work", "\t") && !shouldContinueSlashCompletion("/flux work ", "\t"), "Tab 补全 slash 字段后继续显示下级选单");
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
-		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
+		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "task") && rootCompletions.some((item: any) => item.value === "workflow") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
 		check(await flux.getArgumentCompletions("agent") === null && await flux.getArgumentCompletions("work") === null, "补全为完整字段后退出候选态，Enter 可提交并打开菜单");
 		const workCompletions = await flux.getArgumentCompletions("work ");
 		check(workCompletions.map((item: any) => item.value).includes("work community"), "work 子命令补全显示四种工作方式");
 		check((await flux.getArgumentCompletions("agent list"))?.length === 0, "完整子命令退出候选态，Enter 可直接执行");
-		menuSelections = ["team · dynamic Agent collaboration"]; menuInputs = ["coordinate review"];
+		menuSelections = ["Multi-Agent · Team, Workflow or Community", "Team · dynamic delegation"]; menuInputs = ["coordinate review"];
 		await flux.handler("work", ctx);
 		check(pi.sent.at(-1) === "coordinate review", "补全后的 /flux work 打开工作方式菜单");
-		menuSelections = ["Work · start a task", "direct · Main Agent executes"]; menuInputs = ["menu task"];
+		menuSelections = ["Work · start a task", "Direct · Main Agent only"]; menuInputs = ["menu task"];
 		await flux.handler("", ctx);
 		check(pi.sent.at(-1) === "menu task", "直接输入 /flux 可从 Workbench 菜单创建任务");
 		await flux.handler("work direct implement core", ctx);
@@ -58,10 +65,27 @@ async function main(): Promise<void> {
 		check(talkCommand === "agent run reviewer-main review this change", "选择 Agent 后可直接输入消息并生成对话命令");
 		menuSelections = ["worker-live · ephemeral · tester · running", "Message · send to active Agent"]; menuInputs = ["please report status"];
 		const messageCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "worker-live", kind: "ephemeral", role: "tester", status: "running", callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, communication: "message" }], roles: [], issues: [], forkPoints: [], activeTaskIds: [] });
-		check(messageCommand === "message worker-live please report status", "运行中的 Ephemeral Agent 可从列表发送 Message V2");
-		const menuData = { agents: [], roles: ["reviewer"], issues: [], forkPoints: [{ entryId: "entry-1", preview: "seed context" }], activeTaskIds: ["task-running"] };
+		check(messageCommand === "message send worker-live please report status", "运行中的 Ephemeral Agent 可从列表发送 Message V2");
+		const menuData = { agents: [], roles: ["reviewer"], issues: [], forkPoints: [{ entryId: "entry-1", preview: "seed context" }], activeTaskIds: ["task-running"], tasks: [{ id: "history-task", task: "previous review", workStyle: "team", status: "completed", operation: "new" }], workflows: [{ id: "workflow-one", name: "release-review", version: 2, description: "release", nodeCount: 3 }] };
+		menuSelections = ["Tasks · reuse, resume or continue", "completed · team · previous review", "Continue"];
+		check(await showFluxTuiMenu(ctx, menuData) === "task continue history-task", "Workbench Tasks 子菜单可继续历史任务");
+		menuSelections = ["Workflows · saved fixed DAGs", "release-review · v2 · 3 nodes", "Show DAG"];
+		check(await showFluxTuiMenu(ctx, menuData) === "workflow show workflow-one", "Workbench Workflows 子菜单可查看固定 DAG");
 		menuSelections = ["Community · Issues and Claims", "+ Create Community Issue"]; menuInputs = ["new issue"];
 		check(await showFluxTuiMenu(ctx, menuData) === "issue create new issue", "Workbench Community 子菜单可创建 Issue");
+		menuSelections = ["Messages · groups and Main inbox", "Groups · list, create or send", "+ Create group"]; menuInputs = ["release-room", "reviewer-main,worker-live"];
+		check(await showFluxTuiMenu(ctx, menuData) === "message group create release-room reviewer-main,worker-live", "Workbench Messages 子菜单可创建群组");
+		await flux.handler("message group create release-room reviewer-main,worker-live", ctx);
+		const group = new SharedBoard(join(root, ".agentflux")).listGroups().find(item => item.name === "release-room");
+		check(group?.members.includes("main") && group.members.includes("reviewer-main"), "TUI 群组自动包含 Main 并保存成员");
+		await flux.handler(`message group send ${group?.id} release ready`, ctx);
+		const workerInbox = new MessageBus(join(root, ".agentflux")).peek("worker-live");
+		check(workerInbox[0]?.envelope.channel.type === "group" && workerInbox[0]?.envelope.content === "release ready", "TUI 群发写入成员的 Message V2 inbox");
+		const reply = new MessageBus(join(root, ".agentflux")).sendDirect("worker-live", "main", "message", "review complete");
+		await flux.handler("message inbox main", ctx);
+		check(new MessageBus(join(root, ".agentflux")).getDelivery(reply.envelope.id, "main")?.status === "delivered", "TUI Main inbox 接收消息并进入 delivered");
+		await flux.handler(`message ack main ${reply.envelope.id}`, ctx);
+		check(new MessageBus(join(root, ".agentflux")).getDelivery(reply.envelope.id, "main")?.status === "acknowledged", "TUI 可确认 Main inbox 消息");
 		menuSelections = ["Fork · branch from session context", "entry-1 · seed context"];
 		check(await showFluxTuiMenu(ctx, menuData) === "fork entry-1", "Workbench Fork 子菜单可选择分支点");
 		menuSelections = ["Runtime · status or cancel", "Cancel task", "task-running"];
@@ -70,6 +94,8 @@ async function main(): Promise<void> {
 		check(await showFluxTuiMenu(ctx, menuData) === "gc dry-run", "Workbench Maintenance 子菜单可选择 GC 操作");
 		await flux.handler("work community coordinate fix", ctx);
 		check(pi.sent.at(-1)?.includes("Community issue") && notices.some(text => text.includes("Created issue-")), "TUI Community 创建 Issue 并交给 Main moderator");
+		await flux.handler("task list", ctx);
+		check(notices.some(text => text.includes("AgentFlux tasks")), "TUI 可列出当前 Pi 会话的 Task Registry");
 		await flux.handler("fork last", ctx);
 		check(notices.some(text => text.includes("fork success")), "TUI 从会话 entry 创建 fork");
 		for (const hook of pi.hooks.get("session_before_fork") ?? []) await hook({ targetEntryId: "entry-1" }, ctx);

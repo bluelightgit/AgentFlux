@@ -155,3 +155,13 @@ Message V2 控制面同步完成：`flux_message` 增加 `group_create/group_lis
 PiDeck 接线后的编译 Electron 主工作台证据位于 `E:\agent-projects\PiDeck\docs\test-evidence\agentflux-runtime-real-2026-07-30\`。该链路覆盖 Persistent 完成、Run Registry 状态、消息 ACK、群组、Community 和 GC；专用 Ephemeral Stop/Retry 也已在 `agentflux-ephemeral-control-real-2026-07-30` 独立通过。
 
 PiDeck 最终确定性回归为 208/208，TypeScript 检查、Electron main/preload compile 与 Vite Renderer production build 均通过。
+
+## 2026-08-08 pi 0.84 兼容修复
+
+pi 0.84.0/0.84.1 更新后 AgentFlux 暴露两个可复现故障，均已修复并验证（本轮未动 PiDeck）：
+
+- [已实现] Community `issues.json` 旧数组格式自动迁移：早期版本顶层数组（仅 id/title/status/priority/created/updated/tags）会触发 `readJsonStore` fail-closed 抛错，阻塞 `/flux` Workbench 菜单。现 `community.ts` 读取时检测旧格式，迁移为 `{ issues: [...] }` 结构（`closed`→`resolved`、priority/tags 拼入 description、时间戳转 ISO），原子写回并保留 `.bak`，与 task-registry v1→v2 兼容一致。真实 TUI 复测菜单正常打开。
+- [已实现] pi-tui 双实例修复：`build.mjs` 将 `@earendil-works/*` 设为 external，避免把本地 0.80.2 Editor 类内联进 bundle（pi 0.84.1 主进程通过 jiti alias 使用自己的 0.84.1 实例，此前导致 slash 参数补全 bridge patch 到主进程从不使用的类）。devDependencies 的 pi-ai/pi-tui 升到 ^0.84.1。真实 TUI 对照验证：带扩展 `/flux work ` + Tab 补全为 `work direct`，原生 pi 则显示文件列表。
+- [确认兼容] CLI 参数、扩展事件、`ctx.sessionManager`/`ctx.fork` 在 0.84.1 全部保留；`message_update` delta-only 不影响 AgentFlux（agent-runner 解析 `message_end`）。PiDeck 的 `message_update` 流式修复留待后续任务。
+
+验证：`npm run verify` 全部通过（Community 30/30 含 3 个新迁移测试）、production build 通过、JSON 模式真实链路（扩展加载 + 模型回复）通过。验证脚本：`scripts/verify-flux-menu.mjs`、`scripts/verify-flux-tab-completion.mjs [native]`。

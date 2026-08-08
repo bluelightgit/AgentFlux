@@ -1,5 +1,8 @@
-import { boundedNodeTimeout, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
-import { resolve } from "node:path";
+import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { TelemetryWriter } from "../src/telemetry/events";
 
 const node = (id: string, dependsOn: string[] = []): TaskNode => ({
 	id, title: id, role: "implementer", dependsOn, parallelizable: false,
@@ -23,6 +26,8 @@ check("duplicate ID rejected", throws([node("same"), node("same")], /duplicate/)
 check("missing dependency rejected", throws([node("impl", ["missing"])], /missing/), "missing");
 check("self dependency rejected", throws([node("self", ["self"])], /itself/), "self");
 check("cycle rejected", throws([node("a", ["b"]), node("b", ["a"])], /cycle/), "a↔b");
+check("path-like node ID rejected", throws([node("../../escaped")], /opaque id/), "../../escaped");
+check("Windows reserved node ID rejected", throws([node("nul")], /opaque id/), "nul");
 
 const models = {
 	strong: { provider: "broken", contextWindow: 128_000, capability: { coding: 0.9, reasoning: 0.9 } },
@@ -44,6 +49,13 @@ try { parsePlannerTaskDAG("not json", "fallback"); }
 catch { unsafePlannerOutputRejected = true; }
 check("planner repair remains fail-closed without JSON", unsafePlannerOutputRejected, "rejected");
 check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_000, 150_000, 100_000) === 50_000, `${boundedNodeTimeout(600_000, 150_000, 100_000)}ms`);
+const firstDAGRunId = createDAGRunId("execution-one", "review");
+const secondDAGRunId = createDAGRunId("execution-one", "review");
+check(
+	"quality-gate retries receive distinct immutable Run ids",
+	firstDAGRunId !== secondDAGRunId && firstDAGRunId.startsWith("dag-execution-one-review-") && secondDAGRunId.startsWith("dag-execution-one-review-"),
+	`${firstDAGRunId} != ${secondDAGRunId}`,
+);
 
 const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
 	models: {
@@ -53,6 +65,97 @@ const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "f
 	roles: { planner: { model: "deepseek-v4-pro", thinking: "off" } },
 }, "planner");
 check("DAG planner honors role model/provider configuration", configuredPlanner.model === "deepseek-v4-pro" && configuredPlanner.provider === "octopus-anthropic" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
+
+const resumeRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-resume-"));
+try {
+	const executionId = "resume-parent";
+	const childExecutionId = "resume-child";
+	const fluxDir = join(resumeRoot, ".agentflux");
+	const runDir = join(fluxDir, "runtime", "runs", executionId);
+	mkdirSync(runDir, { recursive: true });
+	writeFileSync(join(runDir, "checkpoint.json"), JSON.stringify({ executionId, nodeIds: ["done"], completed: ["done"], failed: [], status: "timed_out", totalCost: 0.01, iterationCount: 1, taskResults: [], artifactPaths: {} }));
+	const parentCheckpointBefore = readFileSync(join(runDir, "checkpoint.json"), "utf-8");
+	const resumed = await executeDAG(
+		{ description: "resume", nodes: [node("done")] },
+		{
+			cwd: resumeRoot,
+			fluxDir,
+			modelsConfig: { models: {}, roles: {} },
+			telemetry: new TelemetryWriter(fluxDir),
+			prefixLayout: false,
+			sessionId: "pi-session",
+			executionId: childExecutionId,
+			resumeFromExecutionId: executionId,
+			taskId: "continuation-task",
+			maxWallClockMs: 1_000,
+		},
+	);
+	const childCheckpoint = JSON.parse(readFileSync(join(fluxDir, "runtime", "runs", childExecutionId, "checkpoint.json"), "utf-8"));
+	check("DAG resume derives a new execution without rerunning completed nodes", resumed.status === "passed" && resumed.executionId === childExecutionId && resumed.completedNodes[0] === "done", resumed.status);
+	check("DAG resume preserves the parent checkpoint byte-for-byte", readFileSync(join(runDir, "checkpoint.json"), "utf-8") === parentCheckpointBefore, executionId);
+	check("DAG resume records its source execution in the child checkpoint", childCheckpoint.resumedFromExecutionId === executionId, childCheckpoint.resumedFromExecutionId);
+} finally { rmSync(resumeRoot, { recursive: true, force: true }); }
+
+const unsafeExecutionRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-unsafe-id-"));
+try {
+	const fluxDir = join(unsafeExecutionRoot, ".agentflux");
+	let rejected = false;
+	try {
+		await executeDAG(
+			{ description: "unsafe execution", nodes: [node("safe")] },
+			{
+				cwd: unsafeExecutionRoot,
+				fluxDir,
+				modelsConfig: { models: {}, roles: {} },
+				telemetry: new TelemetryWriter(fluxDir),
+				prefixLayout: false,
+				sessionId: "pi-session",
+				executionId: "../../escaped",
+				taskId: "safe-task",
+			},
+		);
+	} catch (error) {
+		rejected = /opaque id/.test(error instanceof Error ? error.message : String(error));
+	}
+	check("path-like execution ID rejected before filesystem writes", rejected, "../../escaped");
+} finally { rmSync(unsafeExecutionRoot, { recursive: true, force: true }); }
+
+const symlinkExecutionRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-symlink-"));
+const symlinkOutsideRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-outside-"));
+try {
+	const fluxDir = join(symlinkExecutionRoot, ".agentflux");
+	const runsDir = join(fluxDir, "runtime", "runs");
+	mkdirSync(runsDir, { recursive: true });
+	let symlinkSupported = true;
+	try { symlinkSync(symlinkOutsideRoot, join(runsDir, "linked-run"), "junction"); }
+	catch { symlinkSupported = false; }
+	if (!symlinkSupported) {
+		check("run-directory symlink escape is rejected", true, "symlink creation unavailable on this platform");
+	} else {
+		let rejected = false;
+		try {
+			await executeDAG(
+				{ description: "unsafe symlink", nodes: [node("safe")] },
+				{
+					cwd: symlinkExecutionRoot,
+					fluxDir,
+					modelsConfig: { models: {}, roles: {} },
+					telemetry: new TelemetryWriter(fluxDir),
+					prefixLayout: false,
+					sessionId: "pi-session",
+					executionId: "linked-run",
+					taskId: "safe-task",
+				},
+			);
+		} catch (error) {
+			rejected = /symlink/.test(error instanceof Error ? error.message : String(error));
+		}
+		check("run-directory symlink escape is rejected", rejected, "linked-run");
+	}
+} finally {
+	rmSync(symlinkExecutionRoot, { recursive: true, force: true });
+	rmSync(symlinkOutsideRoot, { recursive: true, force: true });
+}
 
 const failed = checks.filter(([, passed]) => !passed);
 console.log(`\nDAG contracts: ${checks.length - failed.length}/${checks.length} passed`);

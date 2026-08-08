@@ -5,6 +5,7 @@ import { createIssue, claimIssue, commentOnIssue, resolveIssue, submitClaim } fr
 import { parseWorkStyle } from "../src/core/config";
 import { createTaskExecutionPlan } from "../src/core/task-execution";
 import { DEFAULT_CONFIG } from "../src/core/types";
+import { getWorkStyleCapabilities, workStyleAllows } from "../src/core/workstyle-policy";
 import { parseFluxCommand } from "../src/extension/commands";
 
 let passed = 0;
@@ -17,8 +18,18 @@ try {
 	check(plan.workStyle === "workflow" && plan.taskId.startsWith("task-") && plan.selectedBy === "user", "任务计划只记录工作方式、选择者和预算");
 	const command = parseFluxCommand("work community fix issue coordination");
 	check(command.kind === "work" && command.style === "community", "TUI work 命令解析 Community");
+	const historyCommand = parseFluxCommand("task continue latest_workflow follow up");
+	check(historyCommand.kind === "task" && historyCommand.args[0] === "continue", "TUI task 命令解析历史操作");
+	const workflowCommand = parseFluxCommand("workflow reuse release-review run again");
+	check(workflowCommand.kind === "workflow" && workflowCommand.args[0] === "reuse", "TUI workflow 命令解析定义复用");
+	const messageCommand = parseFluxCommand("message group send release-group status");
+	check(messageCommand.kind === "message" && messageCommand.args[0] === "group", "TUI message 命令解析群组发送");
 	let rejected = false; try { parseFluxCommand("work M5 legacy"); } catch { rejected = true; }
 	check(rejected, "TUI 拒绝旧 M 编号");
+	check(getWorkStyleCapabilities("direct").length === 0, "Direct 只保留 Main 基础执行");
+	check(workStyleAllows("team", "team") && !workStyleAllows("team", "workflow") && !workStyleAllows("team", "community"), "Team 只增加动态 Agent 能力");
+	check(workStyleAllows("workflow", "team") && workStyleAllows("workflow", "workflow") && !workStyleAllows("workflow", "community"), "Workflow 继承 Team 并增加固定 DAG");
+	check(workStyleAllows("community", "team") && workStyleAllows("community", "community") && !workStyleAllows("community", "workflow"), "Community 继承 Team 并与 Workflow 平级");
 
 	const issue = createIssue(root, { title: "Core issue", description: "Implement it", acceptanceCriteria: ["tested"] });
 	commentOnIssue(root, issue.id, "planner", "split into one claim");

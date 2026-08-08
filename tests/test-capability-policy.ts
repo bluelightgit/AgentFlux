@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	evaluateLockFileToolCall,
 	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, normalizeRuntimeCapabilityOverride,
 	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
@@ -110,6 +111,15 @@ async function main() {
 			cwd: root, agentName: "a", role: "reviewer", runId: "r", template,
 			run: { workspace: { roots: [join(root, "..")] } },
 		}), /workspace roots cannot widen/);
+		check("lockFiles allows edits to the exact declared file",
+			evaluateLockFileToolCall(root, ["src/allowed.ts"], "edit", { path: "src/allowed.ts" }) === null,
+			"exact path accepted");
+		check("lockFiles blocks write tools outside the declared files",
+			evaluateLockFileToolCall(root, ["src/allowed.ts"], "write", { path: "src/other.ts" })?.includes("outside") === true,
+			"out-of-scope write rejected");
+		check("lockFiles keeps read access available for surrounding context",
+			evaluateLockFileToolCall(root, ["src/allowed.ts"], "read", { path: "src/other.ts" }) === null,
+			"read remains available");
 		rejects("non-empty MCP policy fails closed while pi lacks a server gate", () => resolveCapabilityPolicy({
 			cwd: root, agentName: "a", role: "reviewer", runId: "r",
 			template: { ...template, mcpServers: ["filesystem"] },

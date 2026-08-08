@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runLifecycleGc } from "../src/core/lifecycle-gc";
 import { DEFAULT_CONFIG } from "../src/core/types";
+import { finishAgentRun, markAgentRunRunning, registerAgentRun } from "../src/core/run-registry";
 
 let passed = 0;
 function check(value: unknown, message: string): void {
@@ -22,8 +23,19 @@ try {
 	const dryRun = runLifecycleGc(fluxDir, DEFAULT_CONFIG.retention, { dryRun: true, now: new Date("2026-07-18T00:00:00.000Z") });
 	check(dryRun.removed.persistentAgents.includes("archived-reviewer"), "GC dry-run 找到过期终态 Agent");
 	check(JSON.parse(readFileSync(join(fluxDir, "runtime", "agents.json"), "utf-8")).agents.length === 2, "GC dry-run 不修改注册表");
-	const blocked = runLifecycleGc(fluxDir, DEFAULT_CONFIG.retention, { activeRunIds: ["running-task"] });
-	check(blocked.blockedReason?.includes("running-task"), "存在运行中任务时 GC 拒绝执行");
+	registerAgentRun(fluxDir, {
+		id: "running-task",
+		sessionId: "gc-session",
+		taskId: "task-gc",
+		agent: "worker",
+		role: "reviewer",
+		currentTask: "still running",
+		kind: "ephemeral",
+	});
+	markAgentRunRunning(fluxDir, "running-task", process.pid, 1);
+	const blocked = runLifecycleGc(fluxDir, DEFAULT_CONFIG.retention);
+	check(blocked.blockedReason?.includes("running-task"), "GC 从权威 Run Registry 发现运行中任务并拒绝执行");
+	finishAgentRun(fluxDir, "running-task", { status: "cancelled" });
 	const applied = runLifecycleGc(fluxDir, DEFAULT_CONFIG.retention, { now: new Date("2026-07-18T00:00:00.000Z") });
 	const remaining = JSON.parse(readFileSync(join(fluxDir, "runtime", "agents.json"), "utf-8")).agents;
 	check(applied.removed.persistentAgents.includes("archived-reviewer") && remaining.length === 1 && remaining[0].name === "active-reviewer", "GC 仅回收终态 Agent 并保留活跃 Agent");

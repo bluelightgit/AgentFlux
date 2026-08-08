@@ -4,6 +4,10 @@ if (process.env.AGENTFLUX_TEST_CAPTURE) {
     agent: process.env.AGENTFLUX_AGENT_NAME,
     instanceId: process.env.AGENTFLUX_AGENT_INSTANCE_ID,
     runId: process.env.AGENTFLUX_RUN_ID,
+    cwd: process.cwd(),
+    controlCwd: process.env.AGENTFLUX_CONTROL_CWD,
+    workspaceCwd: process.env.AGENTFLUX_WORKSPACE_CWD,
+    lockFiles: JSON.parse(process.env.AGENTFLUX_LOCK_FILES || "[]"),
     policy: JSON.parse(process.env.AGENTFLUX_COMMUNICATION_POLICY || "{}"),
     capability: JSON.parse(process.env.AGENTFLUX_CAPABILITY_POLICY || "{}"),
   }), "utf-8");

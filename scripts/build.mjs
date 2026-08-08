@@ -9,6 +9,11 @@ const shared = {
 	target: "node20",
 	format: "esm",
 	sourcemap: true,
+	// pi 主进程通过 jiti alias 将 @earendil-works/* 重定向到它自己的运行时实例
+	// （如 pi-tui 的 Editor 0.84.x）。因此打包时不得内联这些包，否则扩展会
+	// patch 一个主进程从不使用的重复类（旧版双实例问题），slash 参数补全等
+	// bridge 会静默失效。
+	external: ["@earendil-works/*"],
 };
 
 const sharedCjs = {
@@ -17,6 +22,8 @@ const sharedCjs = {
 	target: "node20",
 	format: "cjs",
 	sourcemap: true,
+	// host/contracts 面向 PiDeck 主进程消费，同样解析到运行时提供的实例。
+	external: ["@earendil-works/*"],
 	define: { "import.meta.url": "__agentfluxImportMetaUrl" },
 	banner: { js: "const __agentfluxImportMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
 };

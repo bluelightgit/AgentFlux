@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { SharedBoard } from "../src/core/shared-board";
 import { formatAgentRunResult, getActiveAgentRunIds, isProviderQuotaError, loadAgentTemplate, runAgent, selectFallbackModel, type AgentTemplate } from "../src/agents/agent-runner";
 import { TelemetryWriter } from "../src/telemetry/events";
+import { readAgentRunStop, requestAgentRunStop } from "../src/agents/agent-run-control";
 
 const root = mkdtempSync(join(tmpdir(), "agentflux-subagent-safe-"));
 const fluxDir = join(root, ".agentflux");
@@ -102,6 +103,31 @@ try {
 		await new Promise(resolve => setTimeout(resolve, 20));
 	}
 	check("abort terminates parent and descendant process", !isAlive(processTree.parent) && !isAlive(processTree.child), `parent=${processTree.parent}, child=${processTree.child}`);
+
+	const controlPidFile = join(root, "control-process-tree.json");
+	const controlled = runAgent({
+		cwd: root,
+		agent,
+		task: "cross-process control-file cancellation",
+		sessionId: "test-session",
+		telemetry,
+		prefixLayout: false,
+		runId: "control-file-test",
+		timeoutMs: 10_000,
+		maxRetries: 2,
+		invocationOverride: {
+			command: process.execPath,
+			args: [join(process.cwd(), "tests", "helpers", "hanging-process-tree.cjs"), controlPidFile],
+		},
+	});
+	for (let attempt = 0; attempt < 100 && !getActiveAgentRunIds().includes("control-file-test"); attempt++) {
+		await new Promise(resolve => setTimeout(resolve, 20));
+	}
+	requestAgentRunStop(root, "control-file-test");
+	check("control-file stop request is observable across processes", readAgentRunStop(root, "control-file-test")?.runId === "control-file-test", "request persisted");
+	const controlResult = await controlled;
+	check("control-file stop returns cancelled without retry", controlResult.exitCode === 130 && controlResult.retryCount === 0, `exit=${controlResult.exitCode}, retries=${controlResult.retryCount}`);
+	check("control-file stop request is cleared after convergence", readAgentRunStop(root, "control-file-test") === undefined, "request cleared");
 
 	const events = readFileSync(telemetry.path, "utf-8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
 	check("cancel outcome is observable", events.some(event => event.outcome?.status === "cancelled" && event.runId), `${events.length} telemetry events`);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readJsonStore, updateJsonStore } from "./json-store";
+import { readJsonStore, updateJsonStore, writeJsonFileAtomic } from "./json-store";
 
 export type IssueStatus = "open" | "triage" | "forming" | "executing" | "reviewing" | "resolved" | "blocked";
 export interface IssueComment { id: string; author: string; body: string; createdAt: string; }
@@ -19,12 +20,84 @@ export interface CommunityIssue {
 }
 
 interface IssueStore { issues: CommunityIssue[]; }
+
+/**
+ * 早期 Community 版本的 issues.json 是顶层数组格式，缺少 description/
+ * createdBy/acceptanceCriteria/comments/claims 等字段。read/update 检测到该
+ * 格式时先迁移为当前 IssueStore 结构并原子写回（保留 .bak 备份），确保旧数据
+ * 不丢失、不阻塞后续读写；迁移逻辑与 task-registry 的 v1→v2 兼容保持一致。
+ */
+interface LegacyIssueRecord {
+	id?: string;
+	title: string;
+	description?: string;
+	status?: string;
+	priority?: string;
+	created?: number;
+	updated?: number;
+	tags?: string[];
+}
+
+function isLegacyIssueArray(value: unknown): value is LegacyIssueRecord[] {
+	return Array.isArray(value)
+		&& value.every(record => !!record && typeof record === "object"
+			&& typeof (record as LegacyIssueRecord).title === "string");
+}
+
+const LEGACY_STATUS: Record<string, IssueStatus> = {
+	open: "open",
+	triage: "triage",
+	forming: "forming",
+	executing: "executing",
+	reviewing: "reviewing",
+	resolved: "resolved",
+	closed: "resolved",
+	blocked: "blocked",
+};
+
+function migrateLegacyIssues(records: LegacyIssueRecord[]): CommunityIssue[] {
+	const now = new Date().toISOString();
+	return records.map(record => ({
+		id: record.id ?? `issue-migrated-${randomUUID()}`,
+		title: record.title.trim(),
+		description: record.description?.trim() ?? [
+			record.priority ? `priority: ${record.priority}` : "",
+			(record.tags?.length ? `tags: ${record.tags.join(", ")}` : ""),
+		].filter(Boolean).join("\n"),
+		status: LEGACY_STATUS[record.status ?? "open"] ?? "open",
+		createdBy: "main",
+		createdAt: record.created ? new Date(record.created).toISOString() : now,
+		updatedAt: record.updated ? new Date(record.updated).toISOString() : now,
+		acceptanceCriteria: [],
+		comments: [],
+		claims: [],
+	}));
+}
+
 function pathFor(cwd: string): string { return join(cwd, ".agentflux", "issues.json"); }
 const createStore = (): IssueStore => ({ issues: [] });
 const isStore = (value: unknown): value is IssueStore =>
 	!!value && typeof value === "object" && Array.isArray((value as IssueStore).issues);
-function read(cwd: string): IssueStore { return readJsonStore(pathFor(cwd), createStore, isStore); }
+function read(cwd: string): IssueStore {
+	const path = pathFor(cwd);
+	if (!existsSync(path)) return createStore();
+	let raw: unknown;
+	try {
+		raw = JSON.parse(readFileSync(path, "utf-8"));
+	} catch (error) {
+		throw new Error(`JSON store is corrupt and was not overwritten: ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (isLegacyIssueArray(raw)) {
+		const store: IssueStore = { issues: migrateLegacyIssues(raw) };
+		writeJsonFileAtomic(path, store);
+		return store;
+	}
+	if (!isStore(raw)) throw new Error(`JSON store schema is invalid and was not overwritten: ${path}`);
+	return raw;
+}
 function update<R>(cwd: string, action: (store: IssueStore) => R): R {
+	// 旧格式文件先经 read() 迁移并写回，updateJsonStore 才能通过 schema 校验。
+	read(cwd);
 	return updateJsonStore(pathFor(cwd), createStore, isStore, action);
 }
 
