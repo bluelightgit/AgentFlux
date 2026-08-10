@@ -39,9 +39,10 @@ data/local/
 .codex
 .claude
 .agentflux/
-.pi/npm/
-.pi/git/
+.pi
 or-models.json
 desktop/dist-electron/
 desktop/dist/
 AGENTS.md
+workflow-output/
+scripts/
