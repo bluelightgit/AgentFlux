@@ -939,9 +939,6 @@ export async function runAgent(opts: {
 					windowsHide: true,
 					env: {
 						...process.env,
-						// Electron 主进程的 process.execPath 指向 electron.exe。
-						// 子进程只需要 Node 语义来运行 Pi CLI，避免被当作 Electron 应用启动。
-						...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
 						AGENTFLUX_AGENT_NAME: agent.name,
 						AGENTFLUX_AGENT_ROLE: capabilityRole,
 						AGENTFLUX_AGENT_INSTANCE_ID: agentInstanceId,

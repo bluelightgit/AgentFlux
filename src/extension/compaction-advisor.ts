@@ -5,19 +5,18 @@
  * pi 的 compaction 会摧毁 L2 cache prefix (实验确认 93% read drop).
  * AgentFlux 在 session_before_compact 事件中拦截, 根据上下文状态选择策略:
  *   - 上下文占用低 → 放行 compaction (正常场景)
- *   - 上下文占用高 + 有 toolResult → 建议 mask (保 prefix)
  *   - 上下文占用高 + 长对话 → 建议 fork (保留分支)
  *   - 上下文占用极高 → 放行 compaction (别无选择)
  *
- * 注意: 当前阶段只做"建议+记录", 不自动拦截 compaction.
- * Phase 3 会接入自动决策.
+ * 注: B2 mask 策略已移除 (docs/06 实证: 高 cacheRead 折扣模型下 prefix 破坏代价超过节省)。
+ * 当前阶段只做“建议+记录”, 不自动拦截 compaction.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TelemetryWriter } from "../telemetry/events";
 
 export interface CompactionAdvice {
-	action: "allow" | "suggest_mask" | "suggest_fork" | "suggest_handoff" | "force_compact";
+	action: "allow" | "suggest_fork" | "suggest_handoff" | "force_compact";
 	reason: string;
 	contextPercent: number;
 	toolResultCount: number;
@@ -59,15 +58,7 @@ export function analyzeCompaction(ctx: any): CompactionAdvice {
 		};
 	}
 
-	// 中间区间 (60%-85%): 根据内容特征建议
-	if (toolResultCount > 10) {
-		return {
-			action: "suggest_mask",
-			reason: `上下文 ${contextPercent.toFixed(1)}%, toolResult ${toolResultCount} 个, 建议 mask 旧 tool result 保 prefix`,
-			contextPercent, toolResultCount, turnCount,
-		};
-	}
-
+	// 中间区间 (60%-85%): 长对话建议 fork 保留探索
 	if (turnCount > 15) {
 		return {
 			action: "suggest_fork",
@@ -101,7 +92,7 @@ export function registerCompactionAdvisor(pi: ExtensionAPI, getState: () => { se
 			contextPercentAfter: null,
 		});
 
-		console.error(`[flux] compaction advice: ${advice.action} — ${advice.reason}`);
+		// 诊断信息已写入 telemetry（见上）, 不向 stderr 输出（TUI 模式下会干扰输入区）
 
 		// 当前阶段: 只建议不拦截
 		// Phase 3: 根据 advice.action 返回值拦截或修改 compaction 行为
@@ -113,7 +104,6 @@ export function registerCompactionAdvisor(pi: ExtensionAPI, getState: () => { se
 export function formatCompactionAdvice(advice: CompactionAdvice): string {
 	const icons = {
 		allow: "✓",
-		suggest_mask: "◐",
 		suggest_fork: "⎇",
 		suggest_handoff: "⇄",
 		force_compact: "!",

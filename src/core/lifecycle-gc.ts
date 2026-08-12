@@ -235,7 +235,10 @@ function safeArchiveName(now: Date): string {
 
 function includesAgentSession(file: string, agentName: string): boolean {
 	const safe = agentName.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
-	return file.includes(`flux-${safe}`);
+	// 段边界匹配：agent 名后必须紧跟 "-cap-"，避免 dev 误匹配 dev-frontend 的会话；
+	// 同时认 flux-（ephemeral/Team child）与 persistent-（Persistent Agent）两种前缀，
+	// 否则 Persistent 会话（persistent-<name>-cap-<hash>）永远匹配不上归属。
+	return file.includes(`flux-${safe}-cap-`) || file.includes(`persistent-${safe}-cap-`);
 }
 
 export function runLifecycleGc(
@@ -268,7 +271,11 @@ export function runLifecycleGc(
 		report.blockedReason = policyError;
 		return report;
 	}
-	reconcileStaleAgentRuns(fluxDir, { now });
+	if (dryRun) {
+		// dry-run 只读预览：不执行 reconcile（写盘）、不阻塞（无实际清理动作）
+	} else {
+		reconcileStaleAgentRuns(fluxDir, { now });
+	}
 	const activeRunIds = [...new Set([
 		...(options.activeRunIds ?? []),
 		...listAgentRuns(fluxDir, { activeOnly: true }).map(run => run.id),
@@ -368,11 +375,6 @@ export function runLifecycleGc(
 		});
 	}
 
-	const removedNames = new Set([
-		...report.removed.persistentAgents,
-		...report.removed.sharedAgents,
-		...report.removed.blackboardStatuses,
-	]);
 	const removedSharedNames = new Set(removedShared.map(agent => agent.name));
 	const currentSharedNames = new Set(board.listAgents()
 		.filter(agent => !removedSharedNames.has(agent.name))
@@ -396,7 +398,8 @@ export function runLifecycleGc(
 				report.preserved.protectedSessions++;
 				continue;
 			}
-			const belongsToRemoved = [...removedNames].some(name => includesAgentSession(file, name));
+			// 被移除 agent 的会话与普通孤儿统一 TTL 门槛（过期才回收）；
+			// 活跃持久会话即使 mtime 较旧也由 protectedNames 优先保护。
 			let expired = false;
 			try {
 				expired = nowMs - statSync(join(sessionsDir, file)).mtimeMs
@@ -404,7 +407,7 @@ export function runLifecycleGc(
 			} catch (error: any) {
 				warnings.push(`cannot stat session ${file}: ${error?.message ?? error}`);
 			}
-			if (belongsToRemoved || expired) sessionCandidates.push(file);
+			if (expired) sessionCandidates.push(file);
 		}
 	}
 

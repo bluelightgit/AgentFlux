@@ -53,8 +53,6 @@ export interface CacheConfig {
 
 export interface ContextConfig {
 	compaction_threshold: number;
-	mask_strategy: "hide_tool_results" | "none";
-	mask_keep_last_n: number;
 }
 
 export interface BudgetConfig {
@@ -90,12 +88,19 @@ export interface FluxConfig {
 	retention: RetentionConfig;
 	communication: CommunicationRuntimeConfig;
 	pricing: PricingConfig;
+	quality_gate?: QualityGateConfig;
+}
+
+/** 质量门配置: judge 独立于节点模型, 避免节点模型慢导致 judge 超时。 */
+export interface QualityGateConfig {
+	model?: string;
+	timeout_ms?: number;
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {
 	default_work_style: "agent_decides",
 	cache: { prefix_layout: "static_first", cache_breaker_actions: [], target_hit_rate: 0.85 },
-	context: { compaction_threshold: 0.70, mask_strategy: "hide_tool_results", mask_keep_last_n: 3 },
+	context: { compaction_threshold: 0.70 },
 	budget: { max_cost_per_task: 2, max_iterations: 5, max_wall_clock_seconds: 600 },
 	retention: {
 		enabled: true,
@@ -114,6 +119,7 @@ export const DEFAULT_CONFIG: FluxConfig = {
 		runtime_lease_ms: 30_000,
 		redelivery_after_ms: 30_000,
 	},
+	quality_gate: {},
 	pricing: DEFAULT_PRICING_CONFIG,
 };
 

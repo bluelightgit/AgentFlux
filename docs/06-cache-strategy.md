@@ -86,7 +86,7 @@ AgentFlux 会对 tools schema（包含身份消息工具及其角色通信策略
 - 迭代 5+ 轮:compaction 来,L2 收益一次性吐回,可能反更贵
 - 跨多 PR 长期 reviewer:L2 = 几十 K 项目知识,收益超 compaction 代价 → 真省
 
-**对策**:用 B2 mask(隐藏旧 tool result,不摘要)替代 B1 compact,保留 prefix。JetBrains Research 实测 mask 比 compact 省 52% cost 且 +2.6% solve rate(compact 反而模糊停止信号)。
+**对策**:曾用 B2 mask(隐藏旧 tool result,不摘要)替代 B1 compact,保留 prefix。JetBrains Research 实测 mask 比 compact 省 52% cost 且 +2.6% solve rate(compact 反而模糊停止信号)。**但 2026-08-11 已移除**: 在 cacheRead 折扣高的模型 (如 deepseek-v4-flash 22.2%) 上破坏 prefix 的代价超过节省, 且 1M 窗口下几乎不触发 (见下节)。
 
 ## 各模式 Cache 表现
 
@@ -128,20 +128,72 @@ AgentFlux 会对 tools schema（包含身份消息工具及其角色通信策略
 > ⚠️ 早期实验 C 的 subagent 对比不公平 (加载 entry.ts 改变 LLM 行为, 1-2轮 vs 5-6轮)。
 > 已用 `subagent-entry.ts` (不注册 flux_subagent tool) 修复, 公平对照下 prefix layout 在多轮 subagent 场景有显著价值。
 
-## Mask 策略重设计需求
+## Mask 策略移除记录 (2026-08-11)
 
-当前 mask 策略 (F1-3) 有三个已实证的问题:
+原 mask 策略 (F1-3) 已移除(代码、配置字段、测试、docs/06/07/10 相关条目)。移除前已实证三个问题, 作为历史教训保留:
+
 1. **只对 toolResult 生效**: 纯 prompt 会话无 tool 调用, mask 从不激活
 2. **单次 prefix 破坏代价不免费**: 在 cacheRead 折扣高的模型 (如 deepseek-v4-flash 22.2%) 上, 破坏代价超过节省
 3. **1M 窗口下几乎不触发**: 85% 阈值需 ~850K token
 
-重设计方向: event-driven (按 toolResult 模式触发), batch-applied (一次性应用后让 cache 重建), model-aware (仅低 cacheRead 折扣模型值得用)。
+若未来出现 cacheRead 折扣低的模型, 应按 event-driven + batch-applied + model-aware 重新设计, 而非恢复旧实现。
 
 ## AgentFlux 的缓存守则
 
 1. 默认 `prefix_layout: static_first`,强制静态在前
 2. 禁止 cache 杀手(见清单)进入 system prompt
-3. context 满了优先 B2 mask,慎用 B1 compact — **但 mask 需重设计 (见上)**
+3. context 满了优先 fork, 慎用 B1 compact (compact 摧毁 prefix, 已实证)
 4. 监控 `target_hit_rate`,低于阈值告警
 5. subagent 调用统一前缀布局,跨调用复用 L1 — **subagent 多轮场景有 37.8% 成本优势 (实测)**
 6. 异构(D2)场景接受 cache 失效,用 model 差价补偿
+
+---
+
+## 标题解析结果(自动生成)
+
+> 本文档由工具解析,以下为对所有 `#`/`##` 标题行的提取结果。
+
+### t1: 标题结构化 JSON
+
+```json
+{
+  "headings": [
+    {"level": 1, "number": "1",     "text": "06 - 缓存策略"},
+    {"level": 2, "number": "1.1",    "text": "Prompt Cache 机制(硬事实)"},
+    {"level": 2, "number": "1.2",    "text": "三层 cache 收益模型"},
+    {"level": 2, "number": "1.3",    "text": "前缀布局原则"},
+    {"level": 2, "number": "1.4",    "text": "Cache 杀手清单"},
+    {"level": 2, "number": "1.5",    "text": "运行时变更提示"},
+    {"level": 2, "number": "1.6",    "text": "Compaction 与 Cache"},
+    {"level": 2, "number": "1.7",    "text": "各模式 Cache 表现"},
+    {"level": 2, "number": "1.8",    "text": "实测数据锚点(librarian-demo, 2026-05, Claude Opus 4.6)"},
+    {"level": 2, "number": "1.9",    "text": "成本实验结论 (A/B/C)"},
+    {"level": 2, "number": "1.10",   "text": "Mask 策略移除记录 (2026-08-11)"},
+    {"level": 2, "number": "1.11",   "text": "AgentFlux 的缓存守则"}
+  ]
+}
+```
+
+### t2: 行号列表与计数汇总
+
+| 序号 | 标题文本 | 行号 |
+|---|---|---|
+| 1 | `1` - 06 - 缓存策略 | 1 |
+| 2 | `5` - Prompt Cache 机制(硬事实) | 5 |
+| 3 | `14` - 三层 cache 收益模型 | 14 |
+| 4 | `36` - 前缀布局原则 | 36 |
+| 5 | `56` - Cache 杀手清单 | 56 |
+| 6 | `68` - 运行时变更提示 | 68 |
+| 7 | `77` - Compaction 与 Cache | 77 |
+| 8 | `91` - 各模式 Cache 表现 | 91 |
+| 9 | `103` - 实测数据锚点(librarian-demo, 2026-05, Claude Opus 4.6) | 103 |
+| 10 | `117` - 成本实验结论 (A/B/C) | 117 |
+| 11 | `131` - Mask 策略移除记录 (2026-08-11) | 131 |
+| 12 | `141` - AgentFlux 的缓存守则 | 141 |
+
+**计数汇总**:
+
+- 标题总数: **12**
+- H1(一级标题): **1** 个(line 1)
+- H2(二级标题): **11** 个(lines 5, 14, 36, 56, 68, 77, 91, 103, 117, 131, 141)
+- 行号集合: `[1, 5, 14, 36, 56, 68, 77, 91, 103, 117, 131, 141]`

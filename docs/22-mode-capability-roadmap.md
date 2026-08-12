@@ -1,6 +1,6 @@
 # 22 - 模式能力优先路线图
 
-> 历史 M1–M6 路线图。生产 Core 已改为 Direct、Team、Workflow、Community。
+> 历史 M1–M6 路线图。生产 Core 已改为 Direct、Team、Workflow、Community。**2026-08-12 决策：Electron/Tauri shell 条目取消（Desktop 已放弃），仅作历史存档。**
 
 > **已由 [28 - Agent 生命周期与工作方式重构](28-agent-workstyle-redesign.md) 取代。** 本文记录旧 M1–M6 能力补全过程，不再作为新增模式的产品路线。已完成的 fork、persistent、heterogeneous、DAG 和消息能力将迁移为 Agent 创建、生命周期、模型策略和工作方式的共享原语。
 

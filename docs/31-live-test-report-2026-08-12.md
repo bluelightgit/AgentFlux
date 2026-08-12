@@ -1,0 +1,69 @@
+# 31 - 2026-08-12 真实链路测试报告（重启 pi 后首轮）
+
+更新日期：2026-08-12。本文件记录重启 pi 后对 AgentFlux 各功能的首轮真实链路测试：测试环境、逐项结果、实测数据、发现的问题与解决方案。状态定义沿用 docs/26：`live verified` = 真实 provider 链路通过；`limited` = 能力可用但边界必须显式说明。
+
+## 测试环境
+
+- pi 全新启动（重启后首个会话），Provider `octopus-completions`，模型 **`oa/deepseek-v4-flash`**，思考等级 **xhigh（max 档）**，会话模型与测试模型一致。
+- Workflow 角色临时配置：`.agentflux/models.json` roles 四项全部改为 `oa/deepseek-v4-flash + xhigh`（原配置 oa/glm-5.2 备份为 `models.json.bak-before-workflow-test`，测试后需还原）。
+- 任务均为短小真实任务，未修改任何被测代码。
+
+## 逐项结果
+
+| 测试 | 工作方式 | 结果 | 实测数据 |
+|---|---|---|---|
+| T1 Direct | direct | ✅ live verified | 任务注册 workStyle=direct / selectedBy=main_agent；跨任务门禁 fail-closed 正确（direct 任务内调用 Team 被拒） |
+| T2 Team | team | ✅ live verified | 2 并行 implementer：wall 12.1s / sum 23.8s / **speedup 1.97x** / turns 3 / in ~3.1-3.3K / cache hit 66% / **$0.0009**；结果与本地复核一致（23 个 test-*.ts） |
+| T3 Community | community | ⚠️ live verified + **bug 实锤** | create→comment→claim→submit→resolve 全链路通过，Task↔Issue 关联正确；但 resolved 终态无保护（见问题 1） |
+| T4 Workflow | workflow | ⚠️ 部分通过 + **bug 实锤** | planner 生成 3 节点 DAG（t1/t2 并行→t3 依赖）；t1 执行+质量门通过；t2 任务本体成功但质量门 judge 超时判失败（见问题 2）；t3 级联失败；总 $0.011178 / wall 100.9s；checkpoint/artifact 持久化完整 |
+| T5 Persistent | team | ✅ live verified | 创建 stat-agent（implementer 模板，model=deepseek-v4-flash，provider octopus-anthropic）；两次运行均成功（in 267→231 递减，同一 sessionId `persistent-stat-agent`，callCount 2，总 $0.00029，status 回 idle）——会话延续生效 |
+| T5 Message V2 | team | ✅ live verified | send（envelope+delivery pending，携带 taskId）→ poll（pending→delivered, attempts 1）→ ack（acknowledged，三时间戳齐全）完整状态机 |
+
+## 问题清单与解决方案
+
+### 问题 1（高）Community resolved 终态无保护 — docs/30 已列修复项，本轮实锤
+
+**证据**：issue resolved 后仍可 `comment`（comments 1→2 无拒绝）；再次 `claim` 成功创建新 claim 并把 issue 状态从 `resolved` 倒退为 `executing`。需手动 submit+resolve 恢复现场。
+
+**解决方案**（docs/30 第 2 项）：
+- `claimIssue` / `submitClaim` / `commentOnIssue` 对 `resolved`（及未来 `cancelled`）终态直接拒绝，返回明确错误。
+- 回归测试：resolved 后 claim / submit / comment 均抛错；状态保持 resolved；历史 claim 与评论只读。
+
+### 问题 2（高）质量门 judge 超时把成功节点拖死 — docs/30 小项，本轮实锤
+
+**证据**：t2 节点 artifact 完整产出（cache 40 处/36 行），但 `gateResult: {status: "indeterminate", feedback: "Quality gate judge timed out", gateModel: "deepseek-v4-flash", gateCost: $0.000138}`；节点重试 2 次（iterationCount=3）仍超时，最终判节点失败、t3 级联失败。根因：`checkQualityGate` 未传 timeoutMs（默认 30s），且 judge 使用节点同模型（xhigh 思考档下单次判断 > 30s）。
+
+**解决方案**：
+1. 质量门增加独立 judge 配置（模型/思考档/超时可配），默认使用轻量模型 + 低思考档；节点模型不兼任 judge。
+2. `indeterminate`（judge 超时/解析失败）与真实失败（criteria 不满足）区分语义：
+   - judge 超时 → 不触发节点重试（当前重试无意义地重复执行实现+judge，成本翻倍）；可重试 judge 本身或降级放行并记录告警。
+   - 仅 criteria 明确不满足才判 gate 失败。
+3. `executeNodeWithGate` 显式传入 timeoutMs（与 nodeDeadline 关联）。
+
+## 产品侧观察（供开发方向参考）
+
+1. **Task 级工作方式固定语义的交互代价**：一个任务 = 一个工作方式 = 一轮对话。连续测试不同功能需要逐轮切换任务，TUI/PiDeck 若不能在一个会话内预览多任务，用户切换成本偏高（产品层面可考虑"任务清单/队列"视图）。
+2. **速度与成本**：flash + xhigh 下 Team 3 轮任务 $0.0009、12s 完成，链路质量高；成本监控与 cache hit 展示正常。
+3. **失败原因透明度**：本轮 DAG FAILED 的直接原因是基础设施（gate 超时）而非任务本体失败，但用户只看到"t2 失败"。失败原因需要穿透展示（区分"任务失败/判定超时/依赖级联"）。
+
+## 测试产物
+
+- T2 子代理输出：tests 23 个 test-*.ts；docs 含 roadmap/status 文档 4 份。
+- T3 issue：`issue-49461c72-c137-4bcd-a1bb-91669d14056b`（resolved，2 claims / 2 comments），结果文件 `.agentflux/runtime/issue-stats-result.txt`。
+- T4 execution：`.agentflux/runtime/runs/task-09ef3712-b0bf-420f-9e6b-6277e8d26e9e/`（dag.json / checkpoint.json / artifacts/t1.md、t2.md），保存的 workflow 定义 `workflow-7282437b`（3 节点）。
+
+## 后续
+
+- T5 已测：Persistent Agent（stat-agent：创建/两次运行/会话延续/callCount/成本累积/idle 恢复）+ Message V2（send/poll/ack）均通过，证据见上表与 `.agentflux/runtime/agents.json`、`.agentflux/shared/messages-v2/`。
+- `.agentflux/models.json` roles 已还原（planner/reviewer/tester=oa/glm-5.2，implementer=oa/deepseek-v4-flash）。
+- 依据本报告安排开发：问题 1（Community 终态保护）、问题 2（质量门超时）优先，均有实锤证据与回归测试方案。
+
+## 2026-08-12 晚间复测（扩展加载源修复后）
+
+**环境根因修复**：pi 实际加载 ~/.pi/agent/npm/node_modules/agentflux（8-10 旧快照）而非项目 dist；settings.json packages 改为 local 路径 E:/agent-projects/AgentFlux 后重启生效（print 模式验证 AgentFlux ready）。
+
+**T6 Community 终态保护复测 ✅**：issue-4d3ed65b 走完 create→claim→submit→resolve 后，claim 与 comment 均被拒（'Issue is already resolved and immutable: <id>'），与首轮（claim 打回 executing）形成对照。
+
+**T7 Workflow 质量门复测 ✅**：roles 临时全改 oa/deepseek-v4-flash+xhigh（备份 models.json.bak-gate-retest，测后已还原），reuse docs-cache-analysis（workflow-7282437b）。结果：DAG PASSED，wall 397.4s，/usr/bin/bash.1007；t1/t2/t3 全部完成，gate 均 passed（gateModel deepseek-v4-flash，t3 为 deepseek-v4-pro），retryCount 0，iterationCount 5。对照 T4：同环境修复前 judge 30s 超时→重试 2 次→DAG failed；修复后 timeoutMs 按节点剩余时间（15-90s）放宽，正常路径不再误杀。'judge 超时→重试 judge→降级放行'分支由确定性测试（test-dag-contracts judgeAction 3 例）覆盖。
+
+**遗留观察**：task-7b1f6ec8（纯工具轮次复测任务）被标记 failed，原因待查（疑似完成判定/重启中断），列入后续排查。

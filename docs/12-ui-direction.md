@@ -1,6 +1,6 @@
 # 12 - 用户界面方向：TUI、Web、Electron
 
-> 历史 UI 讨论。当前 Desktop 产品与开发规划见 [29](29-desktop-workbench-plan.md)。
+> 历史 UI 讨论。**2026-08-12 决策：Desktop/Electron/PiDeck 已放弃，开发方向聚焦 Core + TUI**，本文相关条目仅作历史存档。
 
 ## 设计总原则
 

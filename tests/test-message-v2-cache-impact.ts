@@ -10,7 +10,6 @@ import {
 } from "../src/core/communication-policy";
 import { SharedBoard } from "../src/core/shared-board";
 import { runAgent, type AgentTemplate, type AgentRunResult } from "../src/agents/agent-runner";
-import { readAgentFluxProject, sendAgentGroupMessage, sendAgentMessage } from "../src/host/index";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
@@ -28,32 +27,7 @@ async function main() {
 			board.registerAgent({ name, role: "worker", status: "idle" });
 		}
 		const group = board.createGroup("implementation", ["planner", "worker-a", "worker-b"], "team", "planner");
-		const operatorGroup = board.createGroup("desktop-review", ["main", "desktop-target"], "team", "main");
 		const bus = new MessageBus(fluxDir, { redeliveryAfterMs: 1_000, maxPendingPerRecipient: 10 });
-		const operatorMessage = sendAgentMessage(root, {
-			taskId: "desktop-team-1",
-			target: "desktop-target",
-			content: "Please include the edge-case result",
-		});
-		const operatorEvent = readFileSync(join(fluxDir, "events.jsonl"), "utf-8")
-			.trim().split("\n").map(line => JSON.parse(line)).find(event => event.messageId === operatorMessage.envelope.id);
-		check("Desktop operator messages preserve task provenance and pending delivery",
-			operatorMessage.envelope.taskId === "desktop-team-1"
-				&& operatorMessage.deliveries[0]?.status === "pending"
-				&& operatorEvent?.agent === "operator"
-				&& operatorEvent?.content === "Please include the edge-case result",
-			`${operatorMessage.envelope.id} / ${operatorEvent?.deliveryStatus}`);
-		const operatorGroupMessage = sendAgentGroupMessage(root, {
-			taskId: "desktop-team-1",
-			groupId: operatorGroup.id,
-			content: "Please report group status",
-		});
-		check("Host snapshot and group send expose the PiDeck data contract",
-			readAgentFluxProject(root).groups.some(candidate => candidate.id === operatorGroup.id)
-				&& readAgentFluxProject(root).messages.some(item => item.envelope.id === operatorGroupMessage.envelope.id && item.deliveries.length === 1)
-				&& operatorGroupMessage.envelope.channel.type === "group"
-				&& operatorGroupMessage.envelope.taskId === "desktop-team-1",
-			`${operatorGroupMessage.envelope.channel.type}:${operatorGroupMessage.deliveries.length}`);
 
 		const direct = bus.sendDirect("planner", "worker-a", "task_update", "Use the new schema", {
 			dedupeKey: "task-1-schema-v2", taskId: "task-1",
@@ -190,6 +164,10 @@ async function main() {
 				&& communicationPolicy.requiredSendTo[0] === "worker-a"
 				&& communicationPolicy.requireExplicitInboxAck && communicationPolicy.maxMessagesPerRun === 2,
 			JSON.stringify(communicationPolicy));
+		const unionPolicy = resolveCommunicationPolicy({ requiredSendTo: ["worker-a"] }, { requiredSendTo: ["worker-b"] });
+		check("requiredSendTo 按 union 合并（下层不得移除上层要求，与 narrowCommunication 一致）",
+			unionPolicy.requiredSendTo.length === 2 && unionPolicy.requiredSendTo.includes("worker-a") && unionPolicy.requiredSendTo.includes("worker-b"),
+			JSON.stringify(unionPolicy.requiredSendTo));
 
 		const audit: any[] = [];
 		const runtime = new AgentMessageRuntime(fluxDir, {

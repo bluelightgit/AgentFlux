@@ -1,6 +1,6 @@
 # 11 - 系统架构规划
 
-> 历史架构规划。当前代码边界见 [00](00-overview.md) 与 [28](28-agent-workstyle-redesign.md)。
+> 历史架构规划。当前代码边界见 [00](00-overview.md) 与 [28](28-agent-workstyle-redesign.md)。**2026-08-12 决策：Web/Electron 扩展路线已放弃，host/contracts 层已移除，本文相关条目仅作历史存档。**
 
 ## 决策结论
 

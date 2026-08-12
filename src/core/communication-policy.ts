@@ -78,7 +78,7 @@ export function resolveCommunicationPolicy(
 	const actions = (overrideActions ?? roleActions ?? DEFAULT_COMMUNICATION_POLICY.actions)
 		.filter((action): action is AgentMessageAction => ACTIONS.has(action as AgentMessageAction));
 	const allowedTargets = overrideTargets ?? roleTargets ?? DEFAULT_COMMUNICATION_POLICY.allowedTargets;
-	const requiredSendTo = overrideRequired ?? roleRequired ?? DEFAULT_COMMUNICATION_POLICY.requiredSendTo;
+	const requiredSendTo = [...new Set([...(roleRequired ?? []), ...(overrideRequired ?? [])])];
 	const maxMessagesPerRun = Number.isInteger(merged.maxMessagesPerRun) && merged.maxMessagesPerRun > 0
 		? Math.min(100, merged.maxMessagesPerRun) : DEFAULT_COMMUNICATION_POLICY.maxMessagesPerRun;
 	const policy: CommunicationPolicy = {

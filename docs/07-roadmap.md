@@ -1,6 +1,6 @@
 # 07 - 落地路线
 
-> 历史路线图。当前发布门见 [26](26-implementation-status.md)，Desktop 顺序见 [29](29-desktop-workbench-plan.md)。
+> 历史路线图。当前发布门见 [26](26-implementation-status.md)。**2026-08-12 决策：Desktop/Electron/PiDeck 路线已放弃**，本文件中的相关条目仅作历史存档。
 
 分五个阶段,按 ROI 排序。每阶段都有可验证的交付物和量化指标,前一阶段不达标不进入下一阶段。
 
@@ -11,7 +11,7 @@
 | 阶段 | 周期 | 内容 | 预期收益 |
 |---|---|---|---|
 | Phase 0 | ✅ 完成 | 文档、架构、UI 方向 | 立论成立 |
-| Phase 1 | ✅ 完成 | M1/M2 + 前缀布局 + mask + cache 监控 + 价格层 + TUI 菜单 | 成本可观测, prefix layout subagent 省 37.8% |
+| Phase 1 | ✅ 完成 | M1/M2 + 前缀布局 + cache 监控 + 价格层 + TUI 菜单 (mask 已移除) | 成本可观测, prefix layout subagent 省 37.8% |
 | Phase 2 | implemented / 部分 wired | M3 fork + 静态路由 + 多 agent 基础 | M3/M4 仍 experimental |
 | **Phase 2.5** | **M1/M2/M5 wired，验证继续** | **执行闭环、质量门、取消、锁、checkpoint** | **生产纵向链路** |
 | Phase 3 | implemented / 部分 wired | 任务级路由、经验导入、step routing；M6 experimental | 先 shadow evaluation，再开放 auto |
@@ -39,7 +39,7 @@
 
 用户反馈: 当前方向过于聚焦省钱, 但单 agent 理论上最省 token。**多模式系统和智能路由才是核心价值**, 不是成本优化。
 
-- 成本优化 (compaction 避免、mask、prefix layout) 是次要价值: 实测 compaction 避免 15%, prefix layout 主进程 2.6% / subagent 37.8%
+- 成本优化 (compaction 避免、prefix layout) 是次要价值: 实测 compaction 避免 15%, prefix layout 主进程 2.6% / subagent 37.8% (mask 已于 2026-08-11 移除)
 - **核心护城河是路由决策**: 何时用哪种模式、如何分解任务、何时异构多 agent (M6) 有不可替代价值
 - 实证依据: OneFlow 论文 (arxiv 2601.12307) 证明同构多 agent 可被单 agent 模拟, 异构才是多 agent 的唯一不可替代价值
 
@@ -74,7 +74,7 @@
 
 ## Phase 1:缓存优先(2 周,纯 TS,立刻见效)
 
-**目标**:在 pi 上,用前缀布局 + mask + cache 监控 + 价格层把 subagent 流程成本可观测并优化,不动架构。
+**目标**:在 pi 上,用前缀布局 + cache 监控 + 价格层把 subagent 流程成本可观测并优化,不动架构。
 
 **技术栈**:纯 TypeScript(pi extension),不引入 Python。
 
@@ -86,7 +86,7 @@
 |---|---|---|
 | F1-1 配置加载器 | extension 读 `.pi/agent/agentflux.yaml` + Level 1/2/3 schema | [04](04-config-schema.md) |
 | F1-2 前缀布局强制器 | `before_agent_start` hook 改 system prompt(static 在前,diff 在后) | [06](06-cache-strategy.md) |
-| F1-3 mask 策略 | `context` 事件 filter 旧 tool result(keep last N) | [06](06-cache-strategy.md) |
+| F1-3 mask 策略 | ~~`context` 事件 filter 旧 tool result~~ **已移除 (2026-08-11)**, 见 [06](06-cache-strategy.md) 移除记录 | [06](06-cache-strategy.md) |
 | F1-4 cache hit rate 监控 | `get_session_stats`/`ctx.sessionManager` 读 cacheRead/cacheWrite | [10](10-pi-integration.md) §3 |
 | F1-5 TUI footer | `setFooter` 显示 mode + cache% + context% | [10](10-pi-integration.md) §5 / [12](12-ui-direction.md) |
 | F1-6 模式选择器 | `ctx.ui.custom` overlay + SelectList(eco/balanced) | [04](04-config-schema.md) Level 1 / [12](12-ui-direction.md) |
@@ -102,12 +102,11 @@
 - 对比 naive subagent,实测成本降幅 (基准 deepseek-v4-flash, 价格层 docs/16 提供 token×单价)
   - 实测: prefix layout 在 subagent 多轮场景省 37.8%, 主进程单 agent 仅省 2.6% (见 [docs/20](20-empirical-findings.md))
 - cache hit rate ≥ 85%,footer 实时显示 ✅
-- mask 策略下 solve rate 不下降 — ⚠️ mask 需重设计 (见 [docs/06](06-cache-strategy.md) mask 策略重设计需求)
+- mask 策略已移除 (2026-08-11, 实证负收益, 见 [docs/06](06-cache-strategy.md) 移除记录)
 - Windows 下 subagent 子进程 spawn 正常 ✅
 
 **风险与对冲**:
 - 前缀布局依赖 provider cache 行为 → 先验 Claude,`before_provider_request` 观测 payload
-- mask 误删关键信息 → keep last N 可配,默认 N=3
 - subagent 子进程 Windows 路径 → Phase 1 实测,必要时走 SDK 同进程
 
 **为什么先做这步**:成本可观测是基础, 但不是核心卖点 (见战略转向)。核心价值在 Phase 2 的多模式和路由。
@@ -136,7 +135,7 @@
 | F2-8 M5 管道 handoff | 基于 `examples/extensions/handoff.ts` 串联 | [10](10-pi-integration.md) §2 M5 |
 | F2-9 Level 2 维度开关 | 配置层 + 校验(软约束 warning) | [04](04-config-schema.md) |
 | F2-10 override_mode: suggest | 非侵入式 footer hint (非弹窗), 路由建议显示在 footer 小字 | [05](05-routing.md) |
-| F2-11 运行时 B 维度自适应 | `session_before_compact` hook 拦截,按剩余工作选 mask/fork/compact/handoff | [10](10-pi-integration.md) §4 |
+| F2-11 运行时 B 维度自适应 | `session_before_compact` hook 拦截,按剩余工作选 fork/compact/handoff (mask 已移除) | [10](10-pi-integration.md) §4 |
 | F2-12 git 统计信号扩展 | 变更频率/活跃度/文件大小/测试覆盖率/TODO密度 | 本文档 |
 
 **验证指标**:

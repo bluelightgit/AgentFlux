@@ -5,7 +5,7 @@ import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agen
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
 import { archivePersistentAgent, listPersistentAgents, registerPersistentAgent, runPersistentAgent } from "../src/agents/persistent-agent";
 import { TelemetryWriter } from "../src/telemetry/events";
-import { resolveAgentFluxTeamTaskRuntime } from "../src/host/index";
+import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
 
 let passed = 0;

@@ -15,6 +15,14 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
+/**
+ * 诊断日志 sink。默认 console.error；UI 模式下由宿主置空（setDagLogSink(null)），
+ * 避免 stderr 直写终端干扰 TUI 输入区。
+ */
+let dagLogSink: ((message: string) => void) | null = console.error;
+export function setDagLogSink(sink: ((message: string) => void) | null): void { dagLogSink = sink; }
+function dagLog(message: string): void { dagLogSink?.(message); }
+
 // ─── 类型定义 ───
 
 export interface TaskNode {
@@ -198,7 +206,7 @@ Rules:
 	try {
 		return parsePlannerTaskDAG(result.output, task, result.usage.cost);
 	} catch (error: unknown) {
-		console.error(`[flux dag] planner output parse failed: ${error instanceof Error ? error.message : String(error)}`);
+		dagLog(`[flux dag] planner output parse failed: ${error instanceof Error ? error.message : String(error)}`);
 		throw new Error("DAG planner returned invalid or non-JSON task graph");
 	}
 }
@@ -321,6 +329,23 @@ export interface DAGExecutorOptions {
 	taskId?: string;
 	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
 	resumeFromExecutionId?: string; // 从只读父执行 checkpoint 派生新 execution
+	qualityGate?: {            // 质量门独立配置: judge 模型/超时, 默认沿用节点模型 + 按剩余时间
+		model?: string;
+		provider?: string;
+		timeoutMs?: number;
+	};
+}
+
+/**
+ * judge 结果 → 动作决策（纯函数, 便于单测）:
+ * - pass: 放行
+ * - retry_judge: judge 自身无法判定（超时/解析失败）, 重试 judge 而不是重跑节点
+ * - retry_node: criteria 明确不满足, 重跑节点
+ */
+export function judgeAction(gate: QualityGateResult): "pass" | "retry_judge" | "retry_node" {
+	if (gate.passed) return "pass";
+	if (gate.status === "indeterminate") return "retry_judge";
+	return "retry_node";
 }
 
 export function createDAGRunId(executionId: string, nodeId: string): string {
@@ -438,7 +463,7 @@ export async function executeDAG(
 		if (readyCandidates.length === 0) {
 			// 死锁检测
 			const remaining = dag.nodes.filter(n => !completed.has(n.id) && !failed.has(n.id));
-			console.error(`[flux dag] deadlock: remaining=${remaining.map(n => n.id).join(",")}`);
+			dagLog(`[flux dag] deadlock: remaining=${remaining.map(n => n.id).join(",")}`);
 			for (const n of remaining) failed.add(n.id);
 			status = "failed";
 			break;
@@ -459,7 +484,7 @@ export async function executeDAG(
 		}
 
 		// 并行执行就绪任务
-		console.error(`[flux dag] executing ${ready.length} task(s): ${ready.map(n => n.id).join(", ")}`);
+		dagLog(`[flux dag] executing ${ready.length} task(s): ${ready.map(n => n.id).join(", ")}`);
 
 		// 更新 SharedBoard 状态供工作台查看。
 		for (const node of ready) {
@@ -502,7 +527,7 @@ export async function executeDAG(
 			} else {
 				// executeNodeWithGate threw (spawn error, unexpected exception)
 				const node = ready[i];
-				console.error(`[flux dag] ${node.id} threw exception: ${s.reason?.message ?? s.reason}`);
+				dagLog(`[flux dag] ${node.id} threw exception: ${s.reason?.message ?? s.reason}`);
 				batchResults.push({
 					node, result: { agent: `dag-${node.id}`, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${s.reason?.message ?? s.reason}` },
 					gateResult: null, retryCount: 0, passed: false, cost: 0,
@@ -521,11 +546,11 @@ export async function executeDAG(
 
 			if (passed) {
 				completed.add(node.id);
-				console.error(`[flux dag] ${node.id} ✅ passed (retries=${retryCount}, cost=$${cost.toFixed(6)})`);
+				dagLog(`[flux dag] ${node.id} ✅ passed (retries=${retryCount}, cost=$${cost.toFixed(6)})`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "done", workingOn: node.title.slice(0, 100) }); } catch {}
 			} else {
 				failed.add(node.id);
-				console.error(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
+				dagLog(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "failed", workingOn: node.title.slice(0, 100) }); } catch {}
 
 				// reviewer 失败时允许对应 implementer 重跑一次。
@@ -533,13 +558,13 @@ export async function executeDAG(
 					const implId = findUpstreamImplementer(node, dag);
 					if (implId && completed.has(implId) && (rerunCount.get(implId) ?? 0) < 1) {
 						rerunCount.set(implId, (rerunCount.get(implId) ?? 0) + 1);
-						console.error(`[flux dag] reviewer failed, re-running implementer ${implId} (attempt ${rerunCount.get(implId)})`);
+						dagLog(`[flux dag] reviewer failed, re-running implementer ${implId} (attempt ${rerunCount.get(implId)})`);
 						failed.delete(node.id); // reviewer 在 implementer 修复后必须重新进入队列
 						completed.delete(implId); // 重新执行 implementer
 						reviewFeedback.set(implId, gateResult?.feedback ?? result.output ?? result.errorMessage ?? "review failed");
 						try { board.updateAgentStatus(`dag-${implId}`, { status: "running", workingOn: "re-run (reviewer failed)" }); } catch {}
 					} else if (implId && completed.has(implId)) {
-						console.error(`[flux dag] ${implId} already re-run once, not retrying again`);
+						dagLog(`[flux dag] ${implId} already re-run once, not retrying again`);
 					}
 				}
 			}
@@ -603,7 +628,7 @@ async function executeNodeWithGate(
 ): Promise<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> {
 	const role = roles.get(node.role);
 	if (!role) {
-		console.error(`[flux dag] role ${node.role} not found, using implementer`);
+		dagLog(`[flux dag] role ${node.role} not found, using implementer`);
 	}
 
 	// 用 assignModel 选模型 (优先 role.model 指定, 否则亲和度匹配)
@@ -618,13 +643,13 @@ async function executeNodeWithGate(
 		assignedProvider = models[assign.model]?.provider;
 		if (unavailableModels.has(assignedModel)) {
 			const healthyFallback = selectHealthyModel(assignedModel, roleRequirement, models, unavailableModels);
-			console.error(`[flux dag] ${node.id} circuit breaker skips ${assignedModel} → ${healthyFallback}`);
+			dagLog(`[flux dag] ${node.id} circuit breaker skips ${assignedModel} → ${healthyFallback}`);
 			assignedModel = healthyFallback;
 			assignedProvider = models[healthyFallback]?.provider;
 		}
-		console.error(`[flux dag] ${node.id} model: ${assignedModel} (${assign.source}${assignedModel !== assign.model ? ", circuit-breaker fallback" : ""})`);
+		dagLog(`[flux dag] ${node.id} model: ${assignedModel} (${assign.source}${assignedModel !== assign.model ? ", circuit-breaker fallback" : ""})`);
 	} catch (e: any) {
-		console.error(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using role.model`);
+		dagLog(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using role.model`);
 		assignedModel = role?.model;
 		assignedProvider = role?.model ? models[role.model]?.provider : undefined;
 	}
@@ -716,7 +741,7 @@ async function executeNodeWithGate(
 		lastResult = result;
 		if (result.fallbackFrom) {
 			unavailableModels.add(result.fallbackFrom);
-			console.error(`[flux dag] circuit breaker opened for ${result.fallbackFrom}; fallback=${result.fallbackModel ?? result.model ?? "unknown"}`);
+			dagLog(`[flux dag] circuit breaker opened for ${result.fallbackFrom}; fallback=${result.fallbackModel ?? result.model ?? "unknown"}`);
 			// 同一节点后续的质量门/进程重试也必须沿用已经验证可用的模型，
 			// 否则会再次命中刚刚熔断的 provider。
 			const healthyModel = result.fallbackModel ?? result.model ?? undefined;
@@ -734,7 +759,7 @@ async function executeNodeWithGate(
 			}
 			if (retryCount < maxRetries && Date.now() < nodeDeadline) {
 				const reason = result.exitCode === 124 ? "timeout" : result.errorMessage ?? `exit ${result.exitCode}`;
-				console.error(`[flux dag] ${node.id} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
+				dagLog(`[flux dag] ${node.id} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
 				retryCount++;
 				continue;
 			}
@@ -752,19 +777,42 @@ async function executeNodeWithGate(
 					gateResult: null, retryCount, passed: false, cost: totalNodeCost,
 				};
 			}
-			const actualModel = result.model ?? agentDef.model;
-			lastGateResult = await checkQualityGate(
-				result.output,
-				node.acceptanceCriteria,
-				{ cwd: opts.cwd, model: actualModel ?? undefined, provider: actualModel ? models[actualModel]?.provider ?? agentDef.provider : agentDef.provider, pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId, signal: opts.signal },
-			);
-			totalNodeCost += lastGateResult.gateCost;
+			// judge 独立配置优先, 否则沿用节点模型；超时按节点剩余时间（15s-90s 区间）
+			const gateCfg = opts.qualityGate;
+			const gateModel = gateCfg?.model ?? result.model ?? agentDef.model ?? "";
+			const gateProvider = gateCfg?.provider ?? (gateModel ? models[gateModel]?.provider ?? agentDef.provider : agentDef.provider);
+			const gateTimeoutMs = gateCfg?.timeoutMs ?? Math.max(15_000, Math.min(90_000, nodeDeadline - Date.now()));
+			let gateAttempts = 0;
+			for (;;) {
+				gateAttempts++;
+				lastGateResult = await checkQualityGate(
+					result.output,
+					node.acceptanceCriteria,
+					{ cwd: opts.cwd, model: gateModel, provider: gateProvider, pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId, signal: opts.signal, timeoutMs: gateTimeoutMs },
+				);
+				totalNodeCost += lastGateResult.gateCost;
 
-			if (lastGateResult.passed) {
-				return { node, result, gateResult: lastGateResult, retryCount, passed: true, cost: totalNodeCost };
+				const action = judgeAction(lastGateResult);
+				if (action === "pass") {
+					return { node, result, gateResult: lastGateResult, retryCount, passed: true, cost: totalNodeCost };
+				}
+				if (action === "retry_judge" && gateAttempts < 2) {
+					dagLog(`[flux dag] ${node.id} gate judge indeterminate (${lastGateResult.feedback.slice(0, 80)}), retrying judge ${gateAttempts + 1}/2`);
+					continue;
+				}
+				if (action === "retry_judge") {
+					// judge 基础设施无法判定: 降级放行（不惩罚已成功的任务本体）, 显式标注无判定
+					dagLog(`[flux dag] ${node.id} gate judge unavailable after ${gateAttempts} attempts (${lastGateResult.feedback.slice(0, 100)}); releasing node without verdict`);
+					return {
+						node, result,
+						gateResult: { ...lastGateResult, passed: true, feedback: `${lastGateResult.feedback} — node released without verdict (judge unavailable)` },
+						retryCount, passed: true, cost: totalNodeCost,
+					};
+				}
+				break; // retry_node: criteria 明确不满足, 走节点重试
 			}
 
-			console.error(`[flux dag] ${node.id} gate failed (attempt ${retryCount + 1}/${maxRetries + 1}): ${lastGateResult.feedback.slice(0, 100)}`);
+			dagLog(`[flux dag] ${node.id} gate failed (attempt ${retryCount + 1}/${maxRetries + 1}): ${lastGateResult.feedback.slice(0, 100)}`);
 			retryCount++;
 			continue;
 		}

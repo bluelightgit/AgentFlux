@@ -54,7 +54,7 @@ Community 与 Team 的差异不在 Agent 数量：Team 的调度权集中于 Mai
 
 - 工作方式的作用域是 task。新 task 可以选择不同工作方式；已运行 task 不在中途切换。
 - TUI `/flux work` 创建一个固定工作方式的新 task。`reuse/resume/continue` 继承来源 task 的工作方式并建立父子关系。
-- PiDeck 的选择器是下一条空闲时发送任务的偏好。运行中的 steer/follow-up 不携带新的工作方式，继续现有 task；空闲后发送会创建新 task，需要继承历史语义时显式使用 reuse/resume/continue。
+- 工作方式选择器是下一条空闲时发送任务的偏好。运行中的 steer/follow-up 不携带新的工作方式，继续现有 task；空闲后发送会创建新 task，需要继承历史语义时显式使用 reuse/resume/continue。
 - `agent_decides` 时只注入稳定通用协议。Main Agent依据任务自行决定是否调用调度工具：不调用则在 settled 时记为 Direct；首次调用 Team、Workflow 或 Community 能力时建立对应执行计划。
 - 自动选择目前是 LLM 基于语义和工具说明做出的决定，没有隐藏分类器、成本路由器或 fallback 模式。它已经通过四种自然任务 smoke，但在统一硬门禁完成前，工具误选仍可能造成越界。
 
@@ -115,7 +115,7 @@ Task 与 Execution 不再是同一个可变对象：Task 表示用户可见的�
 
 `runtime/runs.json` 是子进程运行状态的权威来源。Lifecycle telemetry 只用于审计和时间线，不再决定 Stop/Retry/can*。Run Registry 记录 `starting → running → stop_requested → terminal`、PID、心跳、成本和 task/execution provenance；过期心跳由 Host/GC 收敛为失败。
 
-PiDeck 已在 2026-07-30 接入这组事实：当前会话的任务列表来自 Task Registry 分页，选中任务的 Execution/Run/消息/Workflow 数据来自精确 detail；Participants 与管理按钮依据 Run Registry 和 Persistent record 映射。这里的“依据 Core capability”目前表示以 Host Registry 事实为输入做确定性映射，并不表示 Host 已直接返回一组统一 `can*` 布尔字段。
+（2026-07-30 记录，PiDeck 已随 2026-08-12 决策放弃：当时当前会话的任务列表来自 Task Registry 分页，选中任务的 Execution/Run/消息/Workflow 数据来自精确 detail；Participants 与管理按钮依据 Run Registry 和 Persistent record 映射。“依据 Core capability”表示以 Registry 事实为输入做确定性映射，而非一组统一 `can*` 布尔字段。）
 
 Desktop 的 Continue、Reuse、Retry 与 Workflow Resume 复用现有 Pi 主会话，通过确定性 `/flux task` 命令进入 Core；用户时间线只显示可读操作文本。每次写操作都创建新的 Task/Execution 并记录父 task/execution，Open 只改变 Inspector 选择，不修改历史。
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -10,7 +10,6 @@ import {
 	listWorkflowDefinitions,
 	reviseWorkflowDefinition,
 } from "../src/workflows/workflow-registry";
-import { readAgentFluxProject } from "../src/host/index";
 import type { TaskDAG } from "../src/workflows/dag-executor";
 
 let passed = 0;
@@ -50,14 +49,12 @@ try {
 	reviseWorkflowDefinition(hostFluxDir, hostCreated.id, {
 		dag: { description: "desktop history v2", nodes: [] },
 	});
-	check("Host snapshot exposes every version needed by historical tasks", () => {
-		assert.deepEqual(
-			readAgentFluxProject(root).workflows
-				.filter(item => item.id === hostCreated.id)
-				.map(item => item.version)
-				.sort(),
-			[1, 2],
-		);
+	check("Workflow 修订保留全部版本（1 和 2，供历史任务读取）", () => {
+		const all = JSON.parse(readFileSync(join(hostFluxDir, "runtime", "workflows.json"), "utf-8")).definitions
+			.filter((item: any) => item.id === hostCreated.id)
+			.map((item: any) => item.version)
+			.sort();
+		assert.deepEqual(all, [1, 2]);
 	});
 	check("Formatting exposes reusable selector and node count", () => {
 		assert.match(formatWorkflowDefinitions([revised]), new RegExp(`${created.id}@2`));

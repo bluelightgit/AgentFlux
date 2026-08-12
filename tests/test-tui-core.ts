@@ -28,11 +28,19 @@ async function main(): Promise<void> {
 		writeFileSync(join(root, ".agentflux", "models.json"), JSON.stringify({ models: {}, roles: {} }));
 		const pi = new FakePi(); agentFlux(pi as any);
 		const notices: string[] = [];
+		const noticeLevels: string[] = [];
+		const statuses: string[] = [];
 		let menuSelections: string[] = [];
 		let menuInputs: string[] = [];
-		const ctx: any = { cwd: root, hasUI: true, mode: "tui", model: { id: "test" }, ui: { notify: (text: string) => notices.push(text), select: async () => menuSelections.shift(), input: async () => menuInputs.shift() }, sessionManager: { getSessionFile: () => "tui-session", getBranch: () => [{ type: "message", id: "entry-1", message: { role: "user", content: [{ type: "text", text: "seed context" }] } }] }, fork: async () => ({ cancelled: false }) };
-		for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
-		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册任务历史与四条核心工具链");
+		const ctx: any = { cwd: root, hasUI: true, mode: "tui", model: { id: "test" }, ui: { notify: (text: string, level?: string) => { notices.push(text); noticeLevels.push(level ?? "info"); }, setStatus: (_k: string, t?: string) => { if (t !== undefined) statuses.push(t); }, select: async () => menuSelections.shift(), input: async () => menuInputs.shift() }, sessionManager: { getSessionFile: () => "tui-session", getBranch: () => [{ type: "message", id: "entry-1", message: { role: "user", content: [{ type: "text", text: "seed context" }] } }] }, fork: async () => ({ cancelled: false }) };
+		const fluxStderr: string[] = [];
+		const originalConsoleError = console.error;
+		console.error = (msg: unknown) => { const text = String(msg); if (text.includes("[flux")) fluxStderr.push(text); };
+		try {
+			for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
+		} finally { console.error = originalConsoleError; }
+		check(fluxStderr.length === 0, "TUI 会话启动不向 stderr 输出诊断日志（不挡输入区）");		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册任务历史与四条核心工具链");
+		check((await (pi.hooks.get("input") ?? []).reduce(async (acc, h) => (await h({ text: `agentflux-task-v1:not-valid-base64url!\ntask` })) ?? acc, undefined)) === undefined, "畸形任务信封降级为普通消息（input hook 不抛错）");
 		check(
 			pi.tools.get("flux_team")?.description.includes("registered template id")
 				&& pi.tools.get("flux_workflow")?.description.includes("never a DAG or object"),
@@ -89,7 +97,7 @@ async function main(): Promise<void> {
 		await flux.handler("", ctx);
 		check(pi.sent.at(-1) === "menu task", "直接输入 /flux 可从 Workbench 菜单创建任务");
 		await flux.handler("work direct implement core", ctx);
-		check(pi.sent.at(-1) === "implement core" && notices.some(text => text.includes("work style direct")), "TUI Direct 将任务交给 Main Agent");
+		check(pi.sent.at(-1) === "implement core" && notices.some(text => text.includes("work style direct")), "TUI Direct 将任务交给 Main Agent（对话底部浅灰小字）");
 		await flux.handler("agent create reviewer-main reviewer", ctx);
 		await flux.handler("agent list", ctx);
 		check(notices.some(text => text.includes("reviewer-main")), "TUI 创建并列出 Persistent Agent");
@@ -129,7 +137,7 @@ async function main(): Promise<void> {
 		menuSelections = ["Maintenance · lifecycle GC", "Dry run · preview only"];
 		check(await showFluxTuiMenu(ctx, menuData) === "gc dry-run", "Workbench Maintenance 子菜单可选择 GC 操作");
 		await flux.handler("work community coordinate fix", ctx);
-		check(pi.sent.at(-1)?.includes("Community issue") && notices.some(text => text.includes("Created issue-")), "TUI Community 创建 Issue 并交给 Main moderator");
+		check(pi.sent.at(-1)?.includes("Community issue") && notices.some(text => text.includes("Created issue-")), "TUI Community 创建 Issue 并交给 Main moderator（对话底部浅灰小字）");
 		await flux.handler("task list", ctx);
 		check(notices.some(text => text.includes("AgentFlux tasks")), "TUI 可列出当前 Pi 会话的 Task Registry");
 		await flux.handler("fork last", ctx);
@@ -141,6 +149,7 @@ async function main(): Promise<void> {
 		check(notices.some(text => text.includes("active runs")), "TUI 状态汇总可用");
 		await flux.handler("gc dry-run", ctx);
 		check(notices.some(text => text.includes("Lifecycle GC dry-run")), "TUI 生命周期 GC dry-run 可用");
+		check(noticeLevels.length > 0 && noticeLevels.every(level => level === "info"), `所有通知统一 info 级（对话底部浅灰小字样式）, 共 ${noticeLevels.length} 条`);
 		console.log(`\n${passed} TUI core checks passed`);
 	} finally { rmSync(root, { recursive: true, force: true }); }
 }

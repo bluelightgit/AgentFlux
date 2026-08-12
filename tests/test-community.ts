@@ -200,6 +200,39 @@ try {
 		assert.strictEqual(resolved.status, "resolved");
 	});
 
+	check("terminal state is protected: claim after resolve throws and status stays resolved", () => {
+		const issue = createIssue(root, { title: "Terminal", description: "desc" });
+		claimIssue(root, issue.id, "agent", "scope");
+		const claim = getIssue(root, issue.id)!.claims[0];
+		submitClaim(root, issue.id, claim.id);
+		resolveIssue(root, issue.id);
+		assert.throws(() => claimIssue(root, issue.id, "other", "scope2"), /already resolved and immutable/);
+		assert.strictEqual(getIssue(root, issue.id)!.status, "resolved");
+	});
+
+	check("terminal state is protected: comment after resolve throws", () => {
+		const issue = createIssue(root, { title: "Terminal", description: "desc" });
+		resolveIssue(root, issue.id);
+		assert.throws(() => commentOnIssue(root, issue.id, "main", "late comment"), /already resolved and immutable/);
+		assert.strictEqual(getIssue(root, issue.id)!.comments.length, 0);
+	});
+
+	check("terminal state is protected: submit after resolve throws", () => {
+		const issue = createIssue(root, { title: "Terminal", description: "desc" });
+		claimIssue(root, issue.id, "agent", "scope");
+		const claim = getIssue(root, issue.id)!.claims[0];
+		submitClaim(root, issue.id, claim.id);
+		resolveIssue(root, issue.id);
+		assert.throws(() => submitClaim(root, issue.id, claim.id), /already resolved and immutable/);
+		assert.strictEqual(getIssue(root, issue.id)!.status, "resolved");
+	});
+
+	check("terminal state is protected: resolve after resolve throws", () => {
+		const issue = createIssue(root, { title: "Terminal", description: "desc" });
+		resolveIssue(root, issue.id);
+		assert.throws(() => resolveIssue(root, issue.id), /already resolved and immutable/);
+	});
+
 	check("throws when resolving with active claims", () => {
 		const issue = createIssue(root, { title: "Active Claim Block", description: "desc" });
 		claimIssue(root, issue.id, "agent", "scope");

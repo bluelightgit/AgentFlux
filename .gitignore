@@ -41,8 +41,6 @@ data/local/
 .agentflux/
 .pi
 or-models.json
-desktop/dist-electron/
-desktop/dist/
 AGENTS.md
 workflow-output/
 scripts/

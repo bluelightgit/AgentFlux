@@ -22,12 +22,11 @@ import type { WorkStyle } from "./core/types";
 import { assertWorkStyleAllows, type WorkStyleCapability } from "./core/workstyle-policy";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
 import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
-import { applyMask } from "./extension/mask";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showMessageTuiMenu, showTaskTuiMenu, showWorkflowTuiMenu, showWorkTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { installSlashArgumentAutocompleteBridge } from "./extension/tui-autocomplete-bridge";
 import { TelemetryWriter } from "./telemetry/events";
-import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
+import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
 import { createWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
 
 interface RuntimeContext {
@@ -38,9 +37,50 @@ interface RuntimeContext {
 	sharedSkills: string[];
 	pricing?: PricingTable;
 }
-function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info"): void {
-	if (ctx.hasUI) ctx.ui.notify(text, level);
-	else (level === "error" ? console.error : console.log)(text);
+function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info", maxLines = 1): void {
+	const cleaned = cleanNotifyText(text, maxLines);
+	if (ctx.hasUI) {
+		// 统一走 info 级: pi 的 showStatus 在对话最底部渲染浅灰色小字（dim）,
+		// 连续通知会原地更新不堆积; warning/error 级别用前缀区分（不用彩色大字）
+		const prefixed = level === "error" ? `⚠ ${cleaned}` : level === "warning" ? `△ ${cleaned}` : cleaned;
+		ctx.ui.notify(prefixed, "info");
+	} else (level === "error" ? console.error : console.log)(cleaned);
+}
+
+/**
+ * 任务生命周期结束通知: 与普通提示一致, 对话最底部浅灰色小字（单行摘要）。
+ * print/无 UI 模式回退到 console。
+ */
+function taskNotify(ctx: any, text: string, level: "info" | "warning" | "error" = "info"): void {
+	notify(ctx, text, level, 1);
+}
+
+/**
+ * 解析任务信封的防御包装: 解析失败（畸形/恶意输入）降级为普通消息,
+ * 不让 input/before_agent_start hook 抛错中断对话处理。
+ */
+function safeParseEnvelope(text: string): AgentFluxTaskEnvelope | null {
+	try {
+		return parseAgentFluxTaskEnvelope(text);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * TUI 通知文本清洗: pi 的 ctx.ui.notify 向聊天流末尾追加文本, 多行会折行堆积在输入区上方。
+ * 事件通知默认单行 (maxLines=1), 查询类输出可显式放宽 (如 12 行) 并附折叠提示。
+ */
+function cleanNotifyText(text: string, maxLines: number): string {
+	const lines = String(text ?? "").split("\n").map(line => line.length > 200 ? `${line.slice(0, 200)}…` : line);
+	if (lines.length <= maxLines) return lines.join("\n");
+	return [...lines.slice(0, maxLines), `…（共 ${lines.length} 行, 已折叠）`].join("\n");
+}
+
+/** DAG 执行结果一行摘要 (完整详情在 checkpoint/artifact 文件中)。 */
+function dagResultSummary(r: DAGExecutionResult): string {
+	const total = r.taskResults.size;
+	return `DAG ${r.status}: ${r.completedNodes.length}/${total} nodes passed · wall ${(r.wallClockMs / 1000).toFixed(1)}s · $${r.totalCost.toFixed(4)} · run ${r.executionId}`;
 }
 
 function formatMessageGroups(groups: ReturnType<SharedBoard["listGroups"]>): string {
@@ -264,7 +304,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.executionId);
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, resumeFromExecutionId: resumeExecutionId });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		if (plan.operation === "resume") throw new Error(`Workflow checkpoint is unavailable for ${plan.parentTaskId ?? "the selected task"}`);
 		let action = request.action ?? "run";
@@ -294,7 +334,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
 			updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "workflow", id: definition.id, version: definition.version } });
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		const previous = action === "modify"
 			? getWorkflowDefinition(runtime.fluxDir, selector ?? "")
@@ -340,7 +380,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "ephemeral", origin: "fresh", status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
 			throw error;
 		}
-		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: Math.max(1, plan.budget.maxWallClockMs - (Date.now() - startedAt)), maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId });
+		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: Math.max(1, plan.budget.maxWallClockMs - (Date.now() - startedAt)), maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
@@ -351,19 +391,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
 		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig) };
-		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.model?.id); } catch {}
+		setDagLogSink(ctx.hasUI ? null : console.error);
+		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.hasUI ? undefined : ctx.model?.id); } catch {}
 		for (const warning of warnings) notify(ctx, warning, "warning");
 		notify(ctx, "AgentFlux ready · Direct / Team / Workflow / Community", "info");
 	});
 
-	pi.on("context", async (event: any) => {
-		if (!runtime) return undefined;
-		const result = applyMask(event.messages, runtime.config.context, null);
-		return result.result.applied ? { messages: result.messages } : undefined;
-	});
 	pi.on("before_provider_request", async (event: any) => runtime ? applyPrefixLayout(event.payload, runtime.config.cache).payload : undefined);
 	pi.on("input", async (event: any) => {
-		const envelope = parseAgentFluxTaskEnvelope(event.text);
+		const envelope = safeParseEnvelope(event.text);
 		if (!envelope) return undefined;
 		pendingTaskEnvelope = envelope;
 		return { action: "transform", text: envelope.task, images: event.images };
@@ -371,7 +407,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event: any) => {
 		if (!currentPlan) {
 			if (!runtime) return undefined;
-			const envelope = pendingTaskEnvelope ?? parseAgentFluxTaskEnvelope(event.prompt);
+			const envelope = pendingTaskEnvelope ?? safeParseEnvelope(event.prompt);
 			pendingTaskEnvelope = null;
 			const task = envelope?.task ?? event.prompt;
 			const fixedWorkStyle = envelope
@@ -752,16 +788,16 @@ export default function agentFlux(pi: ExtensionAPI) {
 			try {
 				const result = await runWorkflow(plan, controller.signal, request);
 				finish(result);
-				notify(ctx, formatDAGResult(result));
+				taskNotify(ctx, dagResultSummary(result));
 			} finally {
 				activeRuns.delete(plan.taskId);
 			}
 			return;
 		}
-		notify(ctx, `${formatTaskExecutionPlan(plan)}\nDispatched.`);
+		taskNotify(ctx, `Workflow dispatched: ${plan.task.slice(0, 80)}`);
 		void runWorkflow(plan, controller.signal, request)
-			.then(result => { finish(result); notify(ctx, formatDAGResult(result)); })
-				.catch(error => { updateTaskStatus(runtime!.fluxDir, plan.taskId, "failed", { executionId: plan.executionId, outcome: { status: "failure", error: String(error?.message ?? error) } }); notify(ctx, `Workflow failed: ${error?.message ?? error}`, "error"); })
+			.then(result => { finish(result); taskNotify(ctx, dagResultSummary(result)); })
+				.catch(error => { updateTaskStatus(runtime!.fluxDir, plan.taskId, "failed", { executionId: plan.executionId, outcome: { status: "failure", error: String(error?.message ?? error) } }); taskNotify(ctx, `Workflow failed: ${error?.message ?? error}`, "error"); })
 			.finally(() => activeRuns.delete(plan.taskId));
 	}
 
@@ -813,14 +849,14 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
-			if (command.kind === "status") return notify(ctx, [`work style ${currentPlan?.workStyle ?? "idle"}`, `active runs ${activeRuns.size}`, formatPersistentAgents(listPersistentAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"));
+			if (command.kind === "status") return notify(ctx, [`work style ${currentPlan?.workStyle ?? "idle"}`, `active runs ${activeRuns.size}`, formatPersistentAgents(listPersistentAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
 			if (command.kind === "task") {
 				const [action = "list", selector, ...taskParts] = command.args;
-				if (action === "list") return notify(ctx, formatTasks(listTasks(runtime.fluxDir, sessionId).slice(0, 10)));
+				if (action === "list") return notify(ctx, formatTasks(listTasks(runtime.fluxDir, sessionId).slice(0, 10)), "info", 12);
 				const source = resolveTask(runtime.fluxDir, selector, sessionId);
 				if (action === "show") {
 					if (!source) throw new Error("No matching AgentFlux task in the current session");
-					return notify(ctx, formatTasks([source]));
+					return notify(ctx, formatTasks([source]), "info", 12);
 				}
 				if (!["reuse", "resume", "continue", "retry"].includes(action) || !source) throw new Error("Usage: /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]");
 				if (action === "retry" && !["failed", "cancelled", "timed_out"].includes(source.status)) throw new Error(`Cannot retry a ${source.status} task`);
@@ -840,11 +876,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 			}
 			if (command.kind === "workflow") {
 				const [action = "list", selector, ...taskParts] = command.args;
-				if (action === "list") return notify(ctx, formatWorkflowDefinitions(listWorkflowDefinitions(runtime.fluxDir)));
+				if (action === "list") return notify(ctx, formatWorkflowDefinitions(listWorkflowDefinitions(runtime.fluxDir)), "info", 12);
 				if (!selector) throw new Error("Usage: /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>");
 				const definition = getWorkflowDefinition(runtime.fluxDir, selector);
 				if (!definition) throw new Error(`Workflow not found: ${selector}`);
-				if (action === "show") return notify(ctx, formatWorkflowDefinitions([definition], true));
+				if (action === "show") return notify(ctx, formatWorkflowDefinitions([definition], true), "info", 12);
 				if (!["reuse", "modify"].includes(action)) throw new Error("Invalid /flux workflow command");
 				const task = taskParts.join(" ").trim();
 				if (!task) throw new Error(`Workflow ${action} requires a task`);
@@ -880,7 +916,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				}
 				if (action === "inbox") {
 					const recipient = subject ?? "main";
-					return notify(ctx, formatInbox(bus.poll(recipient)));
+					return notify(ctx, formatInbox(bus.poll(recipient)), "info", 12);
 				}
 				if (action === "ack") {
 					const messageId = rest[0];
@@ -890,7 +926,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				}
 				if (action === "group") {
 					const [groupAction, groupSubject, ...groupRest] = [subject, ...rest];
-					if (groupAction === "list") return notify(ctx, formatMessageGroups(board.listGroups()));
+					if (groupAction === "list") return notify(ctx, formatMessageGroups(board.listGroups()), "info", 12);
 					if (groupAction === "create") {
 						const members = groupRest.join("").split(",").map(item => item.trim()).filter(Boolean);
 						if (!groupSubject || members.length === 0) throw new Error("Usage: /flux message group create <name> <member,...>");
@@ -906,11 +942,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 				}
 				throw new Error("Usage: /flux message send|inbox|ack|group");
 			}
-			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()] })));
+			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()] })), "info", 12);
 			if (command.kind === "cancel") { const ids = command.taskId ? [command.taskId] : [...activeRuns.keys()]; for (const id of ids) activeRuns.get(id)?.abort(); return notify(ctx, ids.length ? `Cancellation requested: ${ids.join(", ")}` : "No active runs."); }
 			if (command.kind === "agent") {
 				const [action, name, roleOrTask, ...rest] = command.args;
-				if (action === "list") return notify(ctx, formatPersistentAgents(listPersistentAgents(runtime.cwd)));
+				if (action === "list") return notify(ctx, formatPersistentAgents(listPersistentAgents(runtime.cwd)), "info", 12);
 				if (action === "create" && name && roleOrTask) {
 					const agent = registerPersistentAgent(runtime.cwd, name, roleOrTask, runtime.modelsConfig);
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "persistent", origin: "template", status: "idle", action: "created" });
@@ -921,18 +957,18 @@ export default function agentFlux(pi: ExtensionAPI) {
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "persistent", origin: agent.lineage.origin, status: "archived", action: "archived" });
 					return notify(ctx, `Archived ${agent.name}`);
 				}
-				if (action === "run" && name && roleOrTask) return notify(ctx, formatAgentRunResult(await runPersistentAgent(name, [roleOrTask, ...rest].join(" "), persistentContext())));
+				if (action === "run" && name && roleOrTask) return notify(ctx, formatAgentRunResult(await runPersistentAgent(name, [roleOrTask, ...rest].join(" "), persistentContext())), "info", 12);
 				throw new Error("Usage: /flux agent list|create <name> <role>|run <name> <task>|archive <name>");
 			}
 			if (command.kind === "issue") {
 				const [action, id, ...rest] = command.args;
-				if (action === "list") return notify(ctx, listIssues(runtime.cwd).map(formatIssue).join("\n\n") || "No Community issues.");
-				if (action === "create") return notify(ctx, formatIssue(createIssue(runtime.cwd, { title: [id, ...rest].filter(Boolean).join(" "), description: "" })));
-				if (action === "show" && id) { const issue = getIssue(runtime.cwd, id); if (!issue) throw new Error(`Issue not found: ${id}`); return notify(ctx, formatIssue(issue)); }
-				if (action === "comment" && id) return notify(ctx, formatIssue(commentOnIssue(runtime.cwd, id, "main", rest.join(" "))));
-				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(claimIssue(runtime.cwd, id, rest[0], rest.slice(1).join(" "))));
-				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0])));
-				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)));
+				if (action === "list") return notify(ctx, listIssues(runtime.cwd).map(formatIssue).join("\n\n") || "No Community issues.", "info", 12);
+				if (action === "create") return notify(ctx, formatIssue(createIssue(runtime.cwd, { title: [id, ...rest].filter(Boolean).join(" "), description: "" })), "info", 12);
+				if (action === "show" && id) { const issue = getIssue(runtime.cwd, id); if (!issue) throw new Error(`Issue not found: ${id}`); return notify(ctx, formatIssue(issue), "info", 12); }
+				if (action === "comment" && id) return notify(ctx, formatIssue(commentOnIssue(runtime.cwd, id, "main", rest.join(" "))), "info", 12);
+				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(claimIssue(runtime.cwd, id, rest[0], rest.slice(1).join(" "))), "info", 12);
+				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0])), "info", 12);
+				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)), "info", 12);
 				throw new Error("Invalid /flux issue command");
 			}
 			if (command.kind === "work") {
@@ -941,8 +977,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 					await dispatchTuiWorkflow(plan, ctx);
 					return;
 				}
-				if (plan.workStyle === "community") { const issue = createIssue(runtime.cwd, { title: plan.task.slice(0, 100), description: plan.task, acceptanceCriteria: [] }); updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "issue", id: issue.id } }); notify(ctx, `${formatTaskExecutionPlan(plan)}\nCreated ${issue.id}`); }
-				else notify(ctx, `${formatTaskExecutionPlan(plan)}\nApplied.`);
+				if (plan.workStyle === "community") { const issue = createIssue(runtime.cwd, { title: plan.task.slice(0, 100), description: plan.task, acceptanceCriteria: [] }); updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "issue", id: issue.id } }); taskNotify(ctx, `Workflow task registered (work style ${plan.workStyle}): ${plan.task.slice(0, 80)} · Created ${issue.id}`); }
+				else taskNotify(ctx, `Workflow task registered (work style ${plan.workStyle}): ${plan.task.slice(0, 80)} · Applied.`);
 				currentPlan = plan;
 				const previousTurn = turnIndex;
 				pi.sendUserMessage(plan.workStyle === "community" ? `Moderate and execute Community issue for: ${plan.task}` : plan.task);

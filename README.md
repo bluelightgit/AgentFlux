@@ -24,7 +24,7 @@ pi install git:github.com/bluelightgit/AgentFlux@v0.1.0  # 固定 tag
 pi -e ./dist/extension/entry.js --provider <provider> --model <model>
 ```
 
-先执行 `npm run build` 生成扩展入口。`src/entry.ts` 只用于源码开发和测试；全局安装及 Desktop 集成均加载 `dist/extension/entry.js`，发布包不携带 `src`。
+先执行 `npm run build` 生成扩展入口。`src/entry.ts` 只用于源码开发和测试；全局安装加载 `dist/extension/entry.js`，发布包不携带 `src`。
 
 TUI 命令：
 
@@ -75,7 +75,7 @@ Main Agent 也可以直接调用 `flux_task` 查询历史。用户只需说“�
 工作方式属于一次 AgentFlux task，而不是 Pi 会话的永久模式：
 
 - TUI 的 `/flux work <style> <task>` 为新任务创建固定工作方式；任务结束后释放当前选择。
-- Desktop 选择器保存的是“下一条空闲时发送任务”的用户偏好。运行中的 `steer` 和排队的 `followUp` 继续当前 task，不会中途改成另一种工作方式；Agent 已空闲后再次发送会创建新 task，并使用当时选择的工作方式。需要显式继承历史语义时使用 `reuse/resume/continue`。
+- 工作方式选择器保存的是“下一条空闲时发送任务”的用户偏好。运行中的 `steer` 和排队的 `followUp` 继续当前 task，不会中途改成另一种工作方式；Agent 已空闲后再次发送会创建新 task，并使用当时选择的工作方式。需要显式继承历史语义时使用 `reuse/resume/continue`。
 - `agent_decides` 不运行独立分类器。Main Agent 根据任务目标和稳定协议自行判断：不调用调度工具即落为 Direct；调用 Team、Workflow 或 Community 对应工具时记录实际工作方式。
 - `reuse`、`resume`、`continue` 默认继承来源任务的工作方式；它们创建有 `parentTaskId` 的新 task，不篡改已经完成的记录。
 
@@ -112,8 +112,8 @@ Pi session UUID
 ```
 
 - Pi 原生 UUIDv7 作为稳定 `sessionId`，重开会话不变；AgentFlux 为每次任务和 Agent run 自动生成关联标识。
-- 模型不接收 session/task/run/agent ID。ID 只存在于 Task Registry、telemetry 和 Desktop 控制面。
-- Desktop 的兼容任务信封只用于把工作方式送进 extension；`input` hook 会在 Pi 持久化和 provider 请求前将它剥离，因此会话与模型只看到用户原文。
+- 模型不接收 session/task/run/agent ID。ID 只存在于 Task Registry 和 telemetry。
+- 兼容任务信封只用于把工作方式送进 extension；`input` hook 会在 Pi 持久化和 provider 请求前将它剥离，因此会话与模型只看到用户原文。
 - system prompt 只由稳定的通用协议和四个固定工作方式模板组成，不包含随机 taskId、任务正文或动态预算。
 - Task Registry 位于 `.agentflux/runtime/tasks.json`；它让 Main Agent 在 compaction 或重开后仍能按需查询历史，而不把全部任务塞进 system prompt。
 - 复用 ID 本身不会提高缓存；真正的缓存收益来自稳定 system/tools/skills/model，以及 Persistent Agent 的稳定 session。Ephemeral Agent 仍按单次任务结束。
@@ -175,28 +175,12 @@ AGENTFLUX_LIVE_PROVIDER_ID=agentflux-ci \
 CI 中可通过仓库 `.github/workflows/live.yml` 手动触发（workflow_dispatch）或定时
 （schedule + `AGENTFLUX_LIVE_*` Secrets）运行真实链路测试。
 
-### PiDeck 工作台
+### 精确 Team 调度
 
-PiDeck 通过 `agentflux/host` 的项目级 API 读取同一份控制面状态，不在 Renderer 中重写 AgentFlux 逻辑。Participants 抽屉中的 AgentFlux 工作台目前提供：
-
-- Persistent Agent 的 Run、Wake、Retry、Stop、Archive，以及稳定 session、effective capability、cache generation 和缓存影响提示；
-- 运行中的 Ephemeral Agent 独立 Stop，以及失败/取消后的 Team Agent 单体 Retry；
-- 未归档 Agent、真实群组、Message V2 内容与 delivery 状态；Main inbox 可显式 Poll/ACK，Persistent Agent 运行期间可通过 RPC inbox 接收实时消息；
-- Community Issue 的 create、comment、claim、submit、resolve；
-- 生命周期 GC dry-run 与二次确认执行。
-
-子 Agent 对话继续复用 Main 会话的时间线和输入框。一次性 Ephemeral Agent 结束后只保留历史记录；Persistent Agent 通过稳定 session 继续。所有写操作经项目级 IPC 到 Host，Renderer 不直接读写 `.agentflux` 文件。
-
-### 精确 Team 调度（Host / 自动化）
-
-当 Desktop、CI 或仓库维护任务已经有明确分工时，可使用 `runAgentFluxTeam(cwd, spec)`，或运行：
-
-```text
-npm run dispatch:team -- <agentflux-cwd> <team-spec.json>
-```
+Team 并行调度统一通过 `flux_team` 工具（Main 驱动）入口执行；结构化自动化场景可复用同一能力契约，不再提供独立的 host 调度入口。
 
 `spec.tasks` 就是实际启动的 Agent 清单，不再经过 Main 模型二次改写。每项可固定 `workspace`、`lockFiles`、`model`、`provider`、`thinking`、`maxTurns`、`maxInputTokens` 和 `completionProof`；相对 `lockFiles` 与完成凭证文件均以目标 workspace 为基准。顶层可提供稳定 `taskId`、`sessionId` 和面向用户的 `task` 摘要。Host 会登记父 Team task 与成员，并将成功、校验异常、子进程失败、全部超时或全部取消分别收敛到明确终态，不依赖调用脚本补写状态。AgentFlux 的任务、消息、生命周期与 telemetry 仍写入控制项目的 `.agentflux`，子进程只在目标 workspace 工作。精确调度默认 `maxRetries=0`，只有 spec 显式设置时才重试。测试任务应设置顶层 `executionProfile: "low_cost_test"`：它会强制使用 `deepseek-v4-flash`、`octopus-completions`、`thinking=off`、最多 6 轮和 12000 input token，并保留调用方设置的更严格上限。
 
 精确调度用于“调用参数必须原样执行”的场景；自然语言 `flux_team` 仍适合由 Main Agent 自主拆分职责。`edit`/`write` 会拒绝修改未声明文件；这不是 OS 沙箱，允许 `bash` 的角色仍应只用于可信任务。轮次或输入 token 达到硬上限时任务以 exit 74 结束且不重试。声明 `completionProof.files[].contains` 后，模型即使正常结束也必须通过文件事实检查，否则以 exit 75 拒绝假成功；只有 exit 74 可由通过的完成凭证恢复为成功，provider、权限、通信等其他错误不会被覆盖。
 
-当前完成度、测试证据与明确限制见 [实现状态](docs/26-implementation-status.md)。架构决策见 [Agent 生命周期与工作方式](docs/28-agent-workstyle-redesign.md)，Desktop 重构顺序见 [Desktop 工作台规划](docs/29-desktop-workbench-plan.md)。
+当前完成度、测试证据与明确限制见 [实现状态](docs/26-implementation-status.md)。架构决策见 [Agent 生命周期与工作方式](docs/28-agent-workstyle-redesign.md)。

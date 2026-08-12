@@ -17,7 +17,7 @@
 | **维度 A3 fork(对话树)** | pi 原生 session tree:`ctx.fork(entryId)`、`/tree`、`SessionManager.branch/createBranchedSession`、branch summaries | ✅ 原生 + 文档全 | merge 逻辑需自定义 |
 | **维度 A4 peers(持久 multi-agent)** | 多 session + `createEventBus` 跨 extension 通信 + SessionManager 多文件 | ⚠️ 需自建共享 task list | **M4 主要风险** |
 | **维度 B1 compact** | `ctx.compact()` + `session_before_compact` hook(可 cancel / 自定义摘要) | ✅ 原生 | 无 |
-| **维度 B2 mask** | `context` 事件(`event.messages` 是 deep copy,可 filter 旧 tool result) | ✅ 原生 hook | 误删信息需谨慎 |
+| **维度 B2 mask** | ~~`context` 事件 filter 旧 tool result~~ **已移除 (2026-08-11)**: 高 cacheRead 折扣模型下破坏 prefix 代价超节省, 见 [06](06-cache-strategy.md) 移除记录 | ✅ 原生 hook | 已废弃 |
 | **维度 B3 handoff** | `examples/extensions/handoff.ts`(注释明言 "Instead of compacting which is lossy") | ✅ 现成示例 | 无 |
 | **维度 B4 fork-prune** | pi branch summaries("summarize abandoned branch, attach at new position")= volatile nodes | ✅ 原生 | 无 |
 | **维度 C1 sequential** | 默认 | ✅ | 无 |
@@ -39,13 +39,11 @@
 ## 二、六模式在 pi 上的落地路径
 
 ### M1 单 agent
-**pi 配置**:默认 + extension 监听 `context` 事件做 B2 mask。
+**pi 配置**:默认 + extension 监听 `session_before_compact` 做建议记录 (B2 mask 已于 2026-08-11 移除)。
 **关键 hook**:
 ```typescript
-pi.on("context", async (event, ctx) => {
-  // event.messages 是 deep copy,安全修改
-  const masked = maskOldToolResults(event.messages, { keepLastN: 3 });
-  return { messages: masked };
+pi.on("session_before_compact", async (event, ctx) => {
+  // 建议 fork / 放行 compact, 仅记录 telemetry, 不拦截
 });
 ```
 **结论**:零风险,Phase 1 即可。
@@ -54,9 +52,8 @@ pi.on("context", async (event, ctx) => {
 **pi 配置**:基于 `examples/extensions/subagent` 改造。
 **关键改动**:
 - subagent 调用时,`before_agent_start` 强制前缀布局(role 描述最前 → CLAUDE.md → 文件 → diff)
-- subagent 返回前,`context` 事件做 mask
 - `get_session_stats` 读 cacheRead/cacheWrite,算 hit rate,`setFooter` 显示
-**结论**:subagent 示例已解决隔离/并行/usage/abort,AgentFlux 只需加"前缀布局 + mask + 监控"三件事。
+**结论**:subagent 示例已解决隔离/并行/usage/abort,AgentFlux 只需加"前缀布局 + 监控"两件事 (B2 mask 已移除)。
 
 ### M3 对话树 fork(Phase 2 重点)
 **pi 配置**:原生 fork + tree。
@@ -115,7 +112,7 @@ pi.on("context", async (event, ctx) => {
 ```
 context 事件触发时读 contextUsage.percent
   │
-  ├─ < 70%  → 不动(B2 mask 在 context 事件里常态做)
+  ├─ < 70%  → 不动 (放行 compaction)
   │
   ├─ 70-90% → 评估剩余工作:
   │     ├─ 剩余多 → ctx.fork()(B4 fork-prune,内容进分支保留)
@@ -124,7 +121,7 @@ context 事件触发时读 contextUsage.percent
   └─ ≥ 90% → handoff.ts 逻辑(B3 新 session + 结构化摘要)
 ```
 
-`session_before_compact` hook 让 AgentFlux 能**拦截自动 compaction**,改用 mask 或 fork——这是"compaction 摧毁 cache"问题的直接控制点。
+`session_before_compact` hook 让 AgentFlux 能**拦截自动 compaction**,改用 fork 或 handoff——这是"compaction 摧毁 cache"问题的直接控制点 (B2 mask 已移除)。
 
 ---
 

@@ -97,8 +97,8 @@ src/
 ├── telemetry/
 │   └── events.ts               # Telemetry 事件写入器
 │
-└── host/
-    └── index.ts                # Desktop/外部宿主 API
+```
+（2026-08-12 已移除：原 host/ 与 contracts/ 层随 Desktop/PiDeck 放弃而删除，外部宿主 API 不再提供）
 ```
 
 ### 2.2 层依赖关系
@@ -440,7 +440,7 @@ interface FluxAgentMessageInput {
 
 运行时身份由环境变量 `AGENTFLUX_AGENT_NAME`、`AGENTFLUX_AGENT_INSTANCE_ID`、`AGENTFLUX_RUN_ID` 固定。
 
-#### `Host` 模块 API（外部宿主/Desktop）
+#### ~~`Host` 模块 API~~（2026-08-12 已移除：随 Desktop/PiDeck 放弃，外部宿主 API 层删除）
 
 ```typescript
 // 项目快照
@@ -717,7 +717,7 @@ Direct
     └── Community
 ```
 
-工作方式按 task 选择。TUI 或 Desktop 为一条新主任务固定方式，运行中的 steer/follow-up 不切换；`agent_decides` 由 Main Agent 根据任务语义选择，不运行独立分类器。不调用调度工具时落为 Direct。
+工作方式按 task 选择。TUI 为一条新主任务固定方式，运行中的 steer/follow-up 不切换；`agent_decides` 由 Main Agent 根据任务语义选择，不运行独立分类器。不调用调度工具时落为 Direct。
 
 | 当前工作方式 | Main | Agent/Team | Workflow | Issue/Claim |
 |---|---:|---:|---:|---:|
@@ -818,7 +818,7 @@ DAGExecutionResult.status:
 | 通信时效 | Ephemeral Agent 停机后不可到达；常驻 RPC agent 需要 Persistent RPC runtime |
 | 文件锁 | 基于进程 ID 的乐观锁，非 OS 级强制锁 |
 | 缓存 | Persistent Agent 缓存收益需长任务 soak 后量化 |
-| Desktop | Agent/Issue 视图仍在收口中 |
+| ~~Desktop~~ | 已放弃（2026-08-12 决策），不再提供 Desktop 交付物 |
 
 ### 7.2 策略规则
 
@@ -853,7 +853,7 @@ DAGExecutionResult.status:
 | `src/contracts/index.ts` | 公开类型导出 | re-export 所有公开类型 |
 | `src/core/types.ts` | 基础类型 + 默认配置 | `FluxConfig`, `DEFAULT_CONFIG`, `WorkStyle` 等 |
 | `src/core/config.ts` | 配置加载/合并 | `loadConfig`, `loadModelsConfig`, `validateConfig` |
-| `src/core/task-envelope.ts` | 任务信封 (AgentFlux→Desktop) | `encodeAgentFluxTaskEnvelope`, `parseAgentFluxTaskEnvelope` |
+| `src/core/task-envelope.ts` | 任务信封 | `encodeAgentFluxTaskEnvelope`, `parseAgentFluxTaskEnvelope` |
 | `src/core/task-execution.ts` | 执行计划 | `createTaskExecutionPlan`, `formatTaskExecutionPlan` |
 | `src/core/task-registry.ts` | Task 持久化 | `registerTask`, `listTasks`, `resolveTask`, `updateTaskStatus` |
 | `src/core/shared-board.ts` | 共享黑板 | `SharedBoard` class |

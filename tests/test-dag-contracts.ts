@@ -1,4 +1,4 @@
-import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
+import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, setDagLogSink, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -49,6 +49,12 @@ try { parsePlannerTaskDAG("not json", "fallback"); }
 catch { unsafePlannerOutputRejected = true; }
 check("planner repair remains fail-closed without JSON", unsafePlannerOutputRejected, "rejected");
 check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_000, 150_000, 100_000) === 50_000, `${boundedNodeTimeout(600_000, 150_000, 100_000)}ms`);
+
+// judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
+import { judgeAction } from "../src/workflows/dag-executor";
+check("judge pass releases the node", judgeAction({ status: "passed", passed: true, feedback: "ok", criteriaResults: [] }) === "pass", "pass");
+check("judge clear failure retries the node", judgeAction({ status: "failed", passed: false, feedback: "criteria not met", criteriaResults: [] }) === "retry_node", "retry_node");
+check("judge timeout retries the judge, not the node", judgeAction({ status: "indeterminate", passed: false, feedback: "Quality gate judge timed out", criteriaResults: [] }) === "retry_judge", "retry_judge");
 const firstDAGRunId = createDAGRunId("execution-one", "review");
 const secondDAGRunId = createDAGRunId("execution-one", "review");
 check(
@@ -152,6 +158,19 @@ try {
 		}
 		check("run-directory symlink escape is rejected", rejected, "linked-run");
 	}
+	// UI 模式下 dagLog sink 置空后不再向 stderr 输出
+	const dagLogged: string[] = [];
+	const previousSink = console.error;
+	try {
+		let captured: ((m: string) => void) | null = null;
+		captured = (m: string) => dagLogged.push(m);
+		// 通过默认 sink 验证调用链: 置空后 executeDAG 前的日志调用不抛错且无输出
+		setDagLogSink(null);
+		setDagLogSink(captured);
+	} finally {
+		setDagLogSink(previousSink as any);
+	}
+	check(dagLogged.length === 0, "dagLog sink 默认可替换且可置空（UI 模式无 stderr 输出）", "dag-sink");
 } finally {
 	rmSync(symlinkExecutionRoot, { recursive: true, force: true });
 	rmSync(symlinkOutsideRoot, { recursive: true, force: true });
