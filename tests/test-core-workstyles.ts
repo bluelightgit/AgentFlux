@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createIssue, claimIssue, commentOnIssue, resolveIssue, submitClaim } from "../src/core/community";
+import { createIssue, claimIssue, commentOnIssue, resolveIssue, reviewClaim, submitClaim } from "../src/core/community";
 import { parseWorkStyle } from "../src/core/config";
 import { createTaskExecutionPlan } from "../src/core/task-execution";
 import { DEFAULT_CONFIG } from "../src/core/types";
@@ -39,6 +39,9 @@ try {
 	check(activeRejected, "存在 active claim 时不能关闭 Issue");
 	const submitted = submitClaim(root, issue.id, claimed.claims[0].id);
 	check(submitted.status === "reviewing", "提交 claim 后进入 reviewing");
+	let pendingRejected = false; try { resolveIssue(root, issue.id); } catch { pendingRejected = true; }
+	check(pendingRejected, "submitted claim 待评审时不能关闭 Issue");
+	reviewClaim(root, issue.id, claimed.claims[0].id, "pass", "main");
 	check(resolveIssue(root, issue.id).status === "resolved", "完成 claim 后可以关闭 Issue");
 	console.log(`\n${passed} core workstyle checks passed`);
 } finally { rmSync(root, { recursive: true, force: true }); }

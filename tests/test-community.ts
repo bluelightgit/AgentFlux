@@ -12,10 +12,13 @@ import {
 	commentOnIssue,
 	claimIssue,
 	submitClaim,
+	reviewClaim,
 	resolveIssue,
 	listIssues,
 	getIssue,
 	formatIssue,
+	formatIssueTimeline,
+	nextActions,
 } from "../src/core/community";
 
 let passed = 0;
@@ -191,13 +194,51 @@ try {
 		assert.strictEqual(resolved.status, "resolved");
 	});
 
-	check("resolves an issue with all completed claims", () => {
+	check("resolves an issue with all reviewed claims", () => {
 		const issue = createIssue(root, { title: "Completed Claims", description: "desc" });
 		claimIssue(root, issue.id, "agent", "scope");
 		const claim = getIssue(root, issue.id)!.claims[0];
 		submitClaim(root, issue.id, claim.id);
+		reviewClaim(root, issue.id, claim.id, "pass", "main");
 		const resolved = resolveIssue(root, issue.id);
 		assert.strictEqual(resolved.status, "resolved");
+	});
+
+	check("resolve rejects while a claim is submitted (awaiting review)", () => {
+		const issue = createIssue(root, { title: "Pending Review", description: "desc" });
+		claimIssue(root, issue.id, "agent", "scope");
+		const claim = getIssue(root, issue.id)!.claims[0];
+		submitClaim(root, issue.id, claim.id);
+		assert.throws(() => resolveIssue(root, issue.id), /active or submitted claims/);
+	});
+
+	check("timeline records the full issue room lifecycle", () => {
+		const issue = createIssue(root, { title: "Timeline", description: "desc" });
+		commentOnIssue(root, issue.id, "worker-a", "let me handle this");
+		claimIssue(root, issue.id, "worker-a", "scope-a");
+		claimIssue(root, issue.id, "worker-b", "scope-b");
+		const claims = getIssue(root, issue.id)!.claims;
+		submitClaim(root, issue.id, claims[0].id);
+		submitClaim(root, issue.id, claims[1].id);
+		reviewClaim(root, issue.id, claims[0].id, "pass", "main");
+		reviewClaim(root, issue.id, claims[1].id, "rework", "main", "please add tests");
+		const final = getIssue(root, issue.id)!;
+		assert.strictEqual(final.status, "executing"); // rework 退回
+		assert.strictEqual(final.claims[1].status, "active");
+		const types = final.timeline.map(event => event.type);
+		assert.deepStrictEqual(types, ["created", "commented", "claimed", "claimed", "submitted", "submitted", "reviewed", "reworked"]);
+	});
+
+	check("nextActions derives deterministic state-machine steps", () => {
+		const issue = createIssue(root, { title: "Next", description: "desc" });
+		assert.deepStrictEqual(nextActions(issue), ["claim scope: flux_issue claim <id> <agent> <scope>"]);
+		claimIssue(root, issue.id, "agent", "scope");
+		const withClaim = getIssue(root, issue.id)!;
+		assert.deepStrictEqual(nextActions(withClaim), ["submit claim: flux_issue submit <id> <claimId>"]);
+		submitClaim(root, issue.id, withClaim.claims[0].id);
+		const pending = getIssue(root, issue.id)!;
+		assert.ok(pending.timeline.length === 3 && pending.status === "reviewing");
+		assert.deepStrictEqual(nextActions(pending), ["review claim: flux_issue review <id> <claimId> pass|rework [feedback]"]);
 	});
 
 	check("terminal state is protected: claim after resolve throws and status stays resolved", () => {
@@ -205,6 +246,7 @@ try {
 		claimIssue(root, issue.id, "agent", "scope");
 		const claim = getIssue(root, issue.id)!.claims[0];
 		submitClaim(root, issue.id, claim.id);
+		reviewClaim(root, issue.id, claim.id, "pass", "main");
 		resolveIssue(root, issue.id);
 		assert.throws(() => claimIssue(root, issue.id, "other", "scope2"), /already resolved and immutable/);
 		assert.strictEqual(getIssue(root, issue.id)!.status, "resolved");
@@ -222,6 +264,7 @@ try {
 		claimIssue(root, issue.id, "agent", "scope");
 		const claim = getIssue(root, issue.id)!.claims[0];
 		submitClaim(root, issue.id, claim.id);
+		reviewClaim(root, issue.id, claim.id, "pass", "main");
 		resolveIssue(root, issue.id);
 		assert.throws(() => submitClaim(root, issue.id, claim.id), /already resolved and immutable/);
 		assert.strictEqual(getIssue(root, issue.id)!.status, "resolved");
@@ -236,7 +279,7 @@ try {
 	check("throws when resolving with active claims", () => {
 		const issue = createIssue(root, { title: "Active Claim Block", description: "desc" });
 		claimIssue(root, issue.id, "agent", "scope");
-		assert.throws(() => resolveIssue(root, issue.id), /active claims/);
+		assert.throws(() => resolveIssue(root, issue.id), /active or submitted claims/);
 	});
 
 	check("throws on non-existent issue for resolve", () => {

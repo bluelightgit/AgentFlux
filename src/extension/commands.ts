@@ -72,7 +72,7 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	if (prefix.startsWith("issue ")) return completions(prefix, [
 		["issue list", "列出 Issues"], ["issue create", "创建 Issue"], ["issue show", "查看 Issue"],
 		["issue comment", "发表评论"], ["issue claim", "认领工作范围"], ["issue submit", "提交 Claim"],
-		["issue resolve", "关闭已完成 Issue"],
+		["issue review", "评审已提交的 Claim（pass/rework）"], ["issue resolve", "关闭已完成 Issue"],
 	]);
 	if (prefix.startsWith("fork ")) return completions(prefix, [["fork last", "从最近一条用户消息创建分支"]]);
 	if (prefix.startsWith("message ")) return completions(prefix, [
@@ -120,7 +120,7 @@ export const FLUX_HELP = [
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>",
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",
 	"  /flux fork [last|index|entryId]",
-	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|resolve <id>",
+	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|review <id> <claimId> pass|rework [feedback]|resolve <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",
 	"  /flux message group list|create <name> <member,...>|send <groupId> <text>",
 	"  /flux cancel [taskId]",

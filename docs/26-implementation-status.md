@@ -19,7 +19,7 @@
 | Team | wired / offline + live verified | Main Agent 可并行运行最多 5 个 Ephemeral/Persistent Agent 并整合；结构化 Host 调度可精确固定 Agent 数量、目标 workspace、lockFiles、model/provider/thinking、turn/input token 上限与文件完成凭证，不经 Main 二次改写。测试可启用 `low_cost_test` 档，强制 Flash、thinking off、最多 6 轮/12000 input token 且不重试；child started telemetry 在运行期携带 taskId/role/currentTask/model。 |
 | Workflow | wired / offline + live verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本和 Task Registry 关联；DeepSeek V4 Pro planner + 角色 Agent 得到 `DAG Execution: PASSED`。 |
 | Task history | wired / offline verified | Pi 原生 UUIDv7 作为 sessionId；`.agentflux/runtime/tasks.json` 保存 Task/Execution、operation 与完整父子谱系。Main/TUI 可精确读取历史；continue/reuse/retry/Workflow resume 均创建新的 Task/Execution，父历史保持只读。 |
-| Community | wired / offline + live verified / limited | Issue、comment、claim、submit、resolve 已接线；active claim 阻止关闭；DeepSeek V4 Pro 全动作 smoke 通过。Proposal/Review 独立实体和自治参与者循环后置。 |
+| Community | wired / offline + live verified / 部分 | Issue、comment、claim、submit、review（pass/rework）、resolve 已接线；resolve 需全部 claim 收敛（reviewed）；Issue Room 时间线（9 类事件）与 next-actions 确定性推导；active claim 阻止关闭。自治参与者循环与 Proposal/Decision 独立实体后置。 |
 | Ephemeral Agent | wired / offline + live verified | 单次任务结束即进入 done/failed/cancelled；运行中的 child 具有 runId，可通过跨进程 control request 独立停止；Team 中失败/取消的 child 可单体重试，不重跑整个 Team。 |
 | Persistent Agent | wired / offline verified | 模板注册、稳定身份/session、重复调用、idle 恢复、archive 与 GC 已接线。尚未做长期 cache 收益 soak。 |
 | pi session fork | wired / offline verified / limited | `/flux fork` 使用 pi `ctx.fork` 创建真实单分支，并保留原生会话树。一次从 snapshot 并行派生 N 个独立进程尚未实现，不能用 fresh Agent 冒充 fork。 |

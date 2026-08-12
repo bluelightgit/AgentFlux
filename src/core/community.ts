@@ -6,6 +6,10 @@ import { readJsonStore, updateJsonStore, writeJsonFileAtomic } from "./json-stor
 export type IssueStatus = "open" | "triage" | "forming" | "executing" | "reviewing" | "resolved" | "blocked";
 export interface IssueComment { id: string; author: string; body: string; createdAt: string; }
 export interface IssueClaim { id: string; agent: string; scope: string; status: "active" | "submitted" | "reviewed"; createdAt: string; }
+export type IssueEventType =
+	| "created" | "commented" | "claimed" | "submitted"
+	| "reviewed" | "reworked" | "resolved" | "blocked" | "unblocked";
+export interface IssueEvent { id: string; type: IssueEventType; actor: string; detail: string; createdAt: string; }
 export interface CommunityIssue {
 	id: string;
 	title: string;
@@ -17,6 +21,7 @@ export interface CommunityIssue {
 	acceptanceCriteria: string[];
 	comments: IssueComment[];
 	claims: IssueClaim[];
+	timeline: IssueEvent[];
 }
 
 interface IssueStore { issues: CommunityIssue[]; }
@@ -71,6 +76,7 @@ function migrateLegacyIssues(records: LegacyIssueRecord[]): CommunityIssue[] {
 		acceptanceCriteria: [],
 		comments: [],
 		claims: [],
+		timeline: [],
 	}));
 }
 
@@ -106,16 +112,53 @@ function assertMutable(issue: CommunityIssue): void {
 	if (issue.status === "resolved") throw new Error(`Issue is already resolved and immutable: ${issue.id}`);
 }
 
+function appendEvent(issue: CommunityIssue, type: IssueEventType, actor: string, detail: string): void {
+	if (!issue.timeline) issue.timeline = [];
+	issue.timeline.push({ id: `evt-${randomUUID()}`, type, actor, detail, createdAt: new Date().toISOString() });
+}
+
+/** 非终态 issue 的确定性下一步（状态机推导，不依赖 LLM）。 */
+export function nextActions(issue: CommunityIssue): string[] {
+	if (issue.status === "resolved") return [];
+	if (issue.status === "reviewing") {
+		const pending = issue.claims.filter(claim => claim.status === "submitted");
+		const reviewedAll = issue.claims.length > 0 && issue.claims.every(claim => claim.status === "reviewed");
+		if (pending.length > 0) return ["review claim: flux_issue review <id> <claimId> pass|rework [feedback]"];
+		if (reviewedAll) return ["resolve issue: flux_issue resolve <id>"];
+		return [];
+	}
+	if (issue.status === "executing" || issue.status === "open" || issue.status === "forming" || issue.status === "blocked") {
+		const active = issue.claims.filter(claim => claim.status === "active");
+		if (active.length > 0) return ["submit claim: flux_issue submit <id> <claimId>"];
+		return ["claim scope: flux_issue claim <id> <agent> <scope>"];
+	}
+	return [];
+}
+
 export function listIssues(cwd: string): CommunityIssue[] { return read(cwd).issues; }
 export function getIssue(cwd: string, id: string): CommunityIssue | undefined { return read(cwd).issues.find(issue => issue.id === id); }
 export function createIssue(cwd: string, input: { title: string; description: string; createdBy?: string; acceptanceCriteria?: string[] }): CommunityIssue {
 	if (!input.title.trim()) throw new Error("Issue title cannot be empty");
 	const now = new Date().toISOString();
-	const issue: CommunityIssue = { id: `issue-${randomUUID()}`, title: input.title.trim(), description: input.description.trim(), status: "open", createdBy: input.createdBy ?? "main", createdAt: now, updatedAt: now, acceptanceCriteria: input.acceptanceCriteria ?? [], comments: [], claims: [] };
-	return update(cwd, store => { store.issues.push(issue); return issue; });
+	const issue: CommunityIssue = { id: `issue-${randomUUID()}`, title: input.title.trim(), description: input.description.trim(), status: "open", createdBy: input.createdBy ?? "main", createdAt: now, updatedAt: now, acceptanceCriteria: input.acceptanceCriteria ?? [], comments: [], claims: [], timeline: [] };
+	return update(cwd, store => { store.issues.push(issue); appendEvent(issue, "created", issue.createdBy, input.title.trim()); return issue; });
 }
-export function commentOnIssue(cwd: string, id: string, author: string, body: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); issue.comments.push({ id: `comment-${randomUUID()}`, author, body: body.trim(), createdAt: new Date().toISOString() }); issue.updatedAt = new Date().toISOString(); return issue; }); }
-export function claimIssue(cwd: string, id: string, agent: string, scope: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" && claim.scope === scope)) throw new Error(`Scope already claimed: ${scope}`); issue.claims.push({ id: `claim-${randomUUID()}`, agent, scope, status: "active", createdAt: new Date().toISOString() }); issue.status = "executing"; issue.updatedAt = new Date().toISOString(); return issue; }); }
-export function submitClaim(cwd: string, id: string, claimId: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); claim.status = "submitted"; issue.status = "reviewing"; issue.updatedAt = new Date().toISOString(); return issue; }); }
-export function resolveIssue(cwd: string, id: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active")) throw new Error("Issue has active claims"); issue.status = "resolved"; issue.updatedAt = new Date().toISOString(); return issue; }); }
-export function formatIssue(issue: CommunityIssue): string { return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `claims ${issue.claims.length} · comments ${issue.comments.length}`, ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}`)].filter(Boolean).join("\n"); }
+export function commentOnIssue(cwd: string, id: string, author: string, body: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); issue.comments.push({ id: `comment-${randomUUID()}`, author, body: body.trim(), createdAt: new Date().toISOString() }); issue.updatedAt = new Date().toISOString(); appendEvent(issue, "commented", author, body.trim().slice(0, 120)); return issue; }); }
+export function claimIssue(cwd: string, id: string, agent: string, scope: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" && claim.scope === scope)) throw new Error(`Scope already claimed: ${scope}`); const claim = { id: `claim-${randomUUID()}`, agent, scope, status: "active" as const, createdAt: new Date().toISOString() }; issue.claims.push(claim); issue.status = "executing"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "claimed", agent, `${claim.id} → ${scope}`); return issue; }); }
+export function submitClaim(cwd: string, id: string, claimId: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); if (claim.status !== "active") throw new Error(`Claim is not active: ${claimId}`); claim.status = "submitted"; issue.status = "reviewing"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "submitted", claim.agent, claimId); return issue; }); }
+export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "pass" | "rework", reviewer: string, feedback = ""): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); if (claim.status !== "submitted") throw new Error(`Claim is not in review: ${claimId} (status=${claim.status})`); if (verdict === "pass") {
+		claim.status = "reviewed";
+		appendEvent(issue, "reviewed", reviewer, `${claimId} ${feedback ? `· ${feedback.slice(0, 120)}` : ""}`.trim());
+	} else {
+		claim.status = "active";
+		issue.status = "executing";
+		appendEvent(issue, "reworked", reviewer, `${claimId} ${feedback ? `· ${feedback.slice(0, 120)}` : ""}`.trim());
+	}
+	issue.updatedAt = new Date().toISOString(); return issue; }); }
+export function resolveIssue(cwd: string, id: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); issue.status = "resolved"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "resolved", "main", id); return issue; }); }
+export function formatIssue(issue: CommunityIssue): string { return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `claims ${issue.claims.length} · comments ${issue.comments.length}`, ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}`), ...(nextActions(issue).map(action => `next: ${action}`))].filter(Boolean).join("\n"); }
+export function formatIssueTimeline(issue: CommunityIssue): string {
+	const events = issue.timeline ?? [];
+	if (events.length === 0) return "(no timeline)";
+	return events.map(event => `  [${event.type}] ${event.actor} · ${event.detail} @ ${event.createdAt}`).join("\n");
+}

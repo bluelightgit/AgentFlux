@@ -139,7 +139,7 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	const issue = data.issues.find(candidate => selected.startsWith(`${candidate.id} ·`));
 	if (!issue) return null;
-	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Claim work", "Submit claim", "Resolve"]);
+	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Claim work", "Submit claim", "Review claim", "Resolve"]);
 	if (action === "Show") return `issue show ${issue.id}`;
 	if (action === "Comment") { const text = await input(ctx, "Comment", "Add facts, risks or a proposal"); return text ? `issue comment ${issue.id} ${text}` : null; }
 	if (action === "Claim work") {
@@ -148,10 +148,22 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 		return agent && scope ? `issue claim ${issue.id} ${agent} ${scope}` : null;
 	}
 	if (action === "Submit claim") {
-		const active = issue.claims.filter(claim => claim.status !== "completed");
-		const claimLabel = await select(ctx, "Claim to submit", active.map(claim => `${claim.id} · ${claim.agent} · ${claim.scope}`));
-		const claim = active.find(candidate => claimLabel?.startsWith(`${candidate.id} ·`));
+		const submittable = issue.claims.filter(claim => claim.status === "active");
+		const claimLabel = await select(ctx, "Claim to submit", submittable.map(claim => `${claim.id} · ${claim.agent} · ${claim.scope}`));
+		const claim = submittable.find(candidate => claimLabel?.startsWith(`${candidate.id} ·`));
 		return claim ? `issue submit ${issue.id} ${claim.id}` : null;
+	}
+	if (action === "Review claim") {
+		const pending = issue.claims.filter(claim => claim.status === "submitted");
+		if (pending.length === 0) { await select(ctx, "No submitted claims to review", ["OK"]); return null; }
+		const claimLabel = await select(ctx, "Claim to review", pending.map(claim => `${claim.id} · ${claim.agent} · ${claim.scope}`));
+		const claim = pending.find(candidate => claimLabel?.startsWith(`${candidate.id} ·`));
+		if (!claim) return null;
+		const verdict = await select(ctx, "Verdict", ["pass · 通过", "rework · 退回重做"]);
+		if (!verdict) return null;
+		if (verdict.startsWith("pass")) return `issue review ${issue.id} ${claim.id} pass`;
+		const feedback = await input(ctx, "Rework feedback", "What must the agent fix?");
+		return `issue review ${issue.id} ${claim.id} rework ${feedback ?? ""}`;
 	}
 	if (action === "Resolve") return `issue resolve ${issue.id}`;
 	return null;
