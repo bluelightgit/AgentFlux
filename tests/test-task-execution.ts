@@ -165,7 +165,7 @@ console.log("\n--- formatTaskExecutionPlan ---");
 
 check("formats a basic plan correctly", () => {
 	const plan: TaskExecutionPlan = {
-		taskId: "task-123", task: "do work", workStyle: "direct",
+		taskId: "task-123", executionId: "task-123", task: "do work", workStyle: "direct",
 		selectedBy: "user", operation: "new",
 		budget: { maxCostUsd: 2.5, maxIterations: 5, maxWallClockMs: 600000 },
 	};
@@ -180,7 +180,7 @@ check("formats a basic plan correctly", () => {
 
 check("formats with continuation operation and parent", () => {
 	const plan: TaskExecutionPlan = {
-		taskId: "task-456", task: "fix bugs", workStyle: "team",
+		taskId: "task-456", executionId: "task-456", task: "fix bugs", workStyle: "team",
 		selectedBy: "main_agent", operation: "continue", parentTaskId: "task-123",
 		budget: { maxCostUsd: 1, maxIterations: 3, maxWallClockMs: 300000 },
 	};

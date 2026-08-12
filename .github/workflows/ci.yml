@@ -36,8 +36,13 @@ jobs:
 
       - name: Verify package contents
         run: |
-          npm pack --dry-run 2>&1 | grep -E "Tarball Contents|dist/extension/entry.js|dist/host/index.js|dist/contracts/index.js|README.md|models.json" || true
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          grep -q "dist/extension/entry.js" /tmp/pack.txt
+          grep -q "README.md" /tmp/pack.txt
           test -f dist/extension/entry.js
-          test -f dist/host/index.js
-          test -f dist/contracts/index.js
+          test -f dist/extension/subagent-entry.js
+          if grep -q "dist/host/" /tmp/pack.txt || grep -q "dist/contracts/" /tmp/pack.txt; then
+            echo "host/contracts 已随 PiDeck 移除，不应出现在发布包中"
+            exit 1
+          fi
           echo "package layout OK"

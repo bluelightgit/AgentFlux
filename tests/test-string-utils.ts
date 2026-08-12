@@ -79,7 +79,8 @@ check("throws TypeError for non-string input", () => {
 
 check("handles unicode strings without counting non-ASCII vowels", () => {
 	assert.strictEqual(countVowels("你好世界"), 0);
-	assert.strictEqual(countVowels("Привет"), 1); // 'e' is the only ASCII vowel
+	assert.strictEqual(countVowels("Привет"), 0); // 西里尔 и/е 均非 ASCII 元音
+	assert.strictEqual(countVowels("Café Résumé"), 2); // a、u 为 ASCII 元音；é 均不计（Résumé 无 ASCII e）
 });
 
 // ─── isPalindrome ─────────────────────────────────────────────────────
@@ -123,7 +124,7 @@ check("rejects non-palindromes", () => {
 
 check("strips all non-alphanumeric characters including non-ASCII", () => {
 	assert.strictEqual(isPalindrome("A Toyota's a Toyota"), true);
-	assert.strictEqual(isPalindrome("А роза упала на лапу Азора"), false); // non-ASCII stripped
+	assert.strictEqual(isPalindrome("А роза упала на лапу Азора"), true); // 俄语回文；剥离 non-ASCII 后为空 → 真空回文
 });
 
 check("handles string with only non-alphanumeric characters", () => {

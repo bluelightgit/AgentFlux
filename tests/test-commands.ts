@@ -211,21 +211,18 @@ check("parses 'issue resolve <id>'", () => {
 	}
 });
 
-check("parses 'message <target> <text>'", () => {
-	const cmd = parseFluxCommand("message reviewer-1 please review this");
+check("parses 'message send <agent> <text>'", () => {
+	const cmd = parseFluxCommand("message send reviewer-1 please review this");
 	assert.strictEqual(cmd.kind, "message");
 	if (cmd.kind === "message") {
-		assert.strictEqual(cmd.target, "reviewer-1");
-		assert.strictEqual(cmd.text, "please review this");
+		assert.deepStrictEqual(cmd.args, ["send", "reviewer-1", "please", "review", "this"]);
 	}
 });
 
-check("rejects message without target", () => {
-	assert.throws(() => parseFluxCommand("message"), /Usage/);
-});
-
-check("rejects message with only target", () => {
-	assert.throws(() => parseFluxCommand("message agent1"), /Usage/);
+check("parses bare 'message' as menu fallback (empty args)", () => {
+	const cmd = parseFluxCommand("message");
+	assert.strictEqual(cmd.kind, "message");
+	if (cmd.kind === "message") assert.deepStrictEqual(cmd.args, []);
 });
 
 check("parses 'cancel' without taskId", () => {
@@ -301,41 +298,29 @@ check("returns filtered top-level completions", () => {
 	assert.ok(result!.some(item => item.value === "work"));
 });
 
-check("returns work subcommand completions", () => {
-	const result = getFluxArgumentCompletions("work ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "work direct"));
-	assert.ok(result!.some(item => item.value === "work team"));
+check("returns null for empty argument field (trailing space, 静默设计)", () => {
+	// 2026-08-08 设计：空参数不弹候选列表，避免列表占据输入框区域。
+	assert.strictEqual(getFluxArgumentCompletions("work "), null);
+	assert.strictEqual(getFluxArgumentCompletions("task "), null);
+	assert.strictEqual(getFluxArgumentCompletions("agent "), null);
+	assert.strictEqual(getFluxArgumentCompletions("issue "), null);
+	assert.strictEqual(getFluxArgumentCompletions("fork "), null);
+	assert.strictEqual(getFluxArgumentCompletions("gc "), null);
 });
 
-check("returns task subcommand completions", () => {
-	const result = getFluxArgumentCompletions("task ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "task list"));
-});
-
-check("returns agent subcommand completions", () => {
-	const result = getFluxArgumentCompletions("agent ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "agent list"));
-});
-
-check("returns issue subcommand completions", () => {
-	const result = getFluxArgumentCompletions("issue ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "issue list"));
-});
-
-check("returns fork subcommand completions", () => {
-	const result = getFluxArgumentCompletions("fork ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "fork last"));
-});
-
-check("returns gc subcommand completions", () => {
-	const result = getFluxArgumentCompletions("gc ");
-	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "gc dry-run"));
+check("returns partial subcommand completions while typing", () => {
+	const task = getFluxArgumentCompletions("task li");
+	assert.ok(task !== null);
+	assert.ok(task!.some(item => item.value === "task list"));
+	const work = getFluxArgumentCompletions("work di");
+	assert.ok(work !== null);
+	assert.ok(work!.some(item => item.value === "work direct"));
+	const issue = getFluxArgumentCompletions("issue cr");
+	assert.ok(issue !== null);
+	assert.ok(issue!.some(item => item.value === "issue create"));
+	const gc = getFluxArgumentCompletions("gc dr");
+	assert.ok(gc !== null);
+	assert.ok(gc!.some(item => item.value === "gc dry-run"));
 });
 
 check("returns null for unknown prefix with no space", () => {

@@ -6,6 +6,7 @@ import {
 	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, normalizeRuntimeCapabilityOverride,
 	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
+	type CapabilityPolicyInput,
 } from "../src/core/capability-policy";
 import { runAgent } from "../src/agents/agent-runner";
 import { TelemetryWriter } from "../src/telemetry/events";
@@ -26,11 +27,11 @@ const fluxDir = join(root, ".agentflux");
 
 async function main() {
 	try {
-		const template = {
+		const template: CapabilityPolicyInput = {
 			tools: ["read", "bash", "write"],
 			skills: ["base", "review"],
 			communication: {
-				enabled: true, actions: ["send", "poll", "ack", "status"] as const,
+				enabled: true, actions: ["send", "poll", "ack", "status"],
 				allowedTargets: ["worker-a", "worker-b"], maxMessagesPerRun: 20,
 			},
 			workspace: { roots: [root], deniedPaths: [join(root, ".env")], blockDangerousCommands: true },

@@ -40,7 +40,11 @@ async function main(): Promise<void> {
 			for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
 		} finally { console.error = originalConsoleError; }
 		check(fluxStderr.length === 0, "TUI 会话启动不向 stderr 输出诊断日志（不挡输入区）");		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册任务历史与四条核心工具链");
-		check((await (pi.hooks.get("input") ?? []).reduce(async (acc, h) => (await h({ text: `agentflux-task-v1:not-valid-base64url!\ntask` })) ?? acc, undefined)) === undefined, "畸形任务信封降级为普通消息（input hook 不抛错）");
+		let envelopeResult: unknown = undefined;
+		for (const h of pi.hooks.get("input") ?? []) {
+			envelopeResult = (await h({ text: `agentflux-task-v1:not-valid-base64url!\ntask` })) ?? envelopeResult;
+		}
+		check(envelopeResult === undefined, "畸形任务信封降级为普通消息（input hook 不抛错）");
 		check(
 			pi.tools.get("flux_team")?.description.includes("registered template id")
 				&& pi.tools.get("flux_workflow")?.description.includes("never a DAG or object"),

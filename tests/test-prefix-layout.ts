@@ -142,7 +142,7 @@ check("does not mutate the original payload", () => {
 	const originalText = msgs[0].content[0].text;
 	applyPrefixLayout(payload, enabledConfig);
 	// Original msgs array should not have been mutated
-	assert.strictEqual(msgs[0].content[0].cache_control, undefined);
+	assert.strictEqual((msgs[0].content[0] as { cache_control?: unknown }).cache_control, undefined);
 });
 
 check("works with more than 2 messages", () => {

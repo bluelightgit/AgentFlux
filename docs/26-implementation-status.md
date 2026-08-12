@@ -40,23 +40,32 @@
 
 ## 本轮测试
 
-`npm run verify` 包含类型检查以及以下确定性测试：
+`npm run verify` 包含类型检查以及以下确定性测试（22 个测试文件全部纳入 test:unit，2026-08-12 起）：
 
-- 工作方式能力矩阵与 Community 状态机：15/15。
-- Desktop task envelope：5/5。
-- Agent lifecycle 与精确 Team 完成凭证：15/15。
-- Task Registry：5/5。
-- Workflow Registry：7/7。
-- Main Agent 自然任务调度协议、Desktop 固定工作方式、能力矩阵、Workflow 版本链、消息群组、稳定提示词、历史任务与重试终态：37/37。
-- TUI Core：32/32。
-- Lifecycle GC：4/4。
+- 工作方式能力矩阵：15/15。
+- Task envelope（含畸形输入防御）：6/6。
+- Task Registry：11/11。
+- Workflow Registry：8/8。
+- Community 状态机（含终态保护）：34/34。
+- Main Agent 自然任务调度协议、工作方式矩阵、Workflow 版本链、消息群组、稳定提示词、历史任务与重试终态：41/41。
+- Agent lifecycle 与精确 Team 完成凭证：27/27。
+- TUI Core（含 footer 通知与信封防御）：40/40。
+- Lifecycle GC（含 dry-run 无副作用与会话段边界匹配）：11/11。
 - Capability policy：29/29。
-- Message V2 与 cache impact：28/28。
-- Agent 子进程安全生命周期：18/18。
-- DAG contracts：13/13。
+- Message V2 与 cache impact：32/32。
+- Cache impact（成本敏感度抑制）：23/23。
+- Agent 子进程安全生命周期：21/21。
+- DAG contracts（含质量门 judge 决策与 dagLog sink）：24/24。
 - Persistent RPC inbox pump：15/15。
+- Pricing：26/26。
+- /flux 命令解析与补全（当前契约：message 子命令化、空参数静默）：41/41。
+- Config 合并：24/24。
+- Prefix layout：11/11。
+- Workflow summary 渲染：24/24。
+- String utils：46/46。
+- Task execution 计划：16/16。
 
-当前 `npm run verify` 合计 323/323，通过后生产构建成功。
+当前 `npm run verify` 合计 364/364，通过后生产构建成功。
 
 `npm run test:live` 在隔离 fixture 中依次验证。四个用户 prompt 只描述任务特征与目标，不包含 AgentFlux、工作方式名称、工具名或调用指令：
 

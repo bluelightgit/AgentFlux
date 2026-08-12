@@ -52,9 +52,16 @@ check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_0
 
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
-check("judge pass releases the node", judgeAction({ status: "passed", passed: true, feedback: "ok", criteriaResults: [] }) === "pass", "pass");
-check("judge clear failure retries the node", judgeAction({ status: "failed", passed: false, feedback: "criteria not met", criteriaResults: [] }) === "retry_node", "retry_node");
-check("judge timeout retries the judge, not the node", judgeAction({ status: "indeterminate", passed: false, feedback: "Quality gate judge timed out", criteriaResults: [] }) === "retry_judge", "retry_judge");
+import type { QualityGateResult } from "../src/workflows/quality-gate";
+
+const minimalGate = (over: Partial<QualityGateResult>): QualityGateResult => ({
+	status: "passed", passed: true, feedback: "", criteriaResults: [],
+	gateCost: 0, gateModel: null, gateInputTokens: 0, gateOutputTokens: 0,
+	...over,
+});
+check("judge pass releases the node", judgeAction(minimalGate({ status: "passed", passed: true, feedback: "ok" })) === "pass", "pass");
+check("judge clear failure retries the node", judgeAction(minimalGate({ status: "failed", passed: false, feedback: "criteria not met" })) === "retry_node", "retry_node");
+check("judge timeout retries the judge, not the node", judgeAction(minimalGate({ status: "indeterminate", passed: false, feedback: "Quality gate judge timed out" })) === "retry_judge", "retry_judge");
 const firstDAGRunId = createDAGRunId("execution-one", "review");
 const secondDAGRunId = createDAGRunId("execution-one", "review");
 check(
@@ -170,7 +177,7 @@ try {
 	} finally {
 		setDagLogSink(previousSink as any);
 	}
-	check(dagLogged.length === 0, "dagLog sink 默认可替换且可置空（UI 模式无 stderr 输出）", "dag-sink");
+	check("dagLog sink 默认可替换且可置空（UI 模式无 stderr 输出）", dagLogged.length === 0, "dag-sink");
 } finally {
 	rmSync(symlinkExecutionRoot, { recursive: true, force: true });
 	rmSync(symlinkOutsideRoot, { recursive: true, force: true });
