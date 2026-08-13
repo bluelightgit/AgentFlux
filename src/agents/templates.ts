@@ -29,7 +29,7 @@ export interface RoleDefinition {
 	workspace?: WorkspaceCapabilityInput;
 	systemPrompt?: string;       // 角色 system prompt
 	source: "md" | "json" | "builtin";  // 来源
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	/** Role-template defaults. A registered/run instance may apply a narrower override. */
 	communication?: CommunicationPolicyInput;
 }
@@ -123,7 +123,7 @@ function loadRolesFromMD(agentsDir: string): Map<string, RoleDefinition> {
 		const requirement = requirementRaw ? tryParseJSON(requirementRaw) : undefined;
 
 		const thinkingRaw = frontmatter.thinking;
-		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinkingRaw)
+		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingRaw)
 			? thinkingRaw as RoleDefinition["thinking"] : undefined;
 
 		roles.set(name, {
@@ -161,7 +161,7 @@ function loadRolesFromJSON(modelsConfig: any): Map<string, RoleDefinition> {
 	for (const [name, def] of Object.entries(rolesObj)) {
 		const d = def as any;
 		const thinkingRaw = d.thinking;
-		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinkingRaw)
+		const thinking = thinkingRaw && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinkingRaw)
 			? thinkingRaw as RoleDefinition["thinking"] : undefined;
 		roles.set(name, {
 			name,

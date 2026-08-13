@@ -85,3 +85,20 @@
 | /flux issue review 命令链路 | ✅ | print 模式 `pi -p` 下对 resolved issue 正确报 immutable（同时证明最新 dist 生效） |
 
 结论：阶段 3a（reviewClaim 评审闭环、resolve 收敛校验、Issue Room 时间线、next-actions 确定性推导）真实链路全部通过。遗留：阶段 3b（Proposal/Decision 实体、运行时待办注入、停止条件 gates、多 Agent 循环）待设计。
+
+## T9：Persistent Agent soak 首轮（2026-08-13，第四阶段）
+
+环境：pi 重启后加载最新 dist；oa/deepseek-v4-flash（AgentFlux models.json 无 oa/ 键，实际路由 deepseek-v4-flash octopus-anthropic，thinking 继承 implementer=off）。
+
+| 验证点 | 结果 | 证据 |
+|---|---|---|
+| create_persistent | ✅ | soak-worker（role=implementer）创建成功 |
+| run×2 session 连续性 | ✅ | 第 1 次 in 136 / hit 95% / $0.0001；第 2 次 in 100 / hit 97% / $0.0001，回答正确接续上轮主题（"接着上一个回答"） |
+| 会话文件延续 | ✅ | 同一文件 `..._persistent-soak-worker-cap-92dba8d87c8a.jsonl`（7 行，两次运行历史在同一 session） |
+| list 累计 | ✅ | soak-worker calls=2 cost=$0.000160；stat-agent 保留原记录 |
+| archive → 拒绝运行 | ✅ | archive-test archive 后 run_persistent 报 `Persistent Agent not found` |
+| GC 混合保护 | ✅ | `/flux gc dry-run`：persistent=0，protected-sessions=2（stat-agent + soak-worker 的活跃会话受保护） |
+| 重启恢复路径 | ⏳ 设计已确认，真实待验证 | agents.json 持久化 sessionId（persistent-soak-worker），cap 后缀由 capabilityGeneration（sha256 of tools/skills/mcpServers）运行时派生——policy 不变则重启后同一 session 文件；需用户重启 pi 后 run 一次确认 |
+| Stop/Retry 入口 | ❌ **缺口** | flux_agent 与 /flux agent 只有 list/create/run/archive，无 stop/retry（原 host API 有 stop/retry/wake，随 PiDeck 删除后 Main 层无替代） |
+
+其他：thinking 枚举新增 `max` 档位（agent-runner/templates/entry schema，用户反馈 oa/deepseek-v4-flash 支持 max，xhigh 实际路由 high）；verify 367 全绿。

@@ -561,7 +561,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			provider: Type.Optional(Type.String({ description: "Explicit per-run provider override." })),
 			thinking: Type.Optional(Type.Union([
 				Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"),
-				Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"),
+				Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max"),
 			])),
 		}), { minItems: 1, maxItems: 5 }) }),
 		async execute(_id, params, signal) {

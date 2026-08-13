@@ -299,7 +299,7 @@ export interface AgentTemplate {
 	mcpServers?: string[];
 	workspace?: WorkspaceCapabilityInput;
 	systemPrompt: string;
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	communication?: CommunicationPolicyInput; // 角色模板默认；运行实例可收窄或增加完成门
 }
 
@@ -357,7 +357,7 @@ export function loadAgentTemplate(cwd: string, name: string): AgentTemplate | nu
 						blockDangerousCommands: frontmatter.block_dangerous_commands !== "false",
 					} : undefined,
 				systemPrompt: body,
-				thinking: thinking && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(thinking) ? thinking : undefined,
+				thinking: thinking && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking) ? thinking : undefined,
 				communication: communicationPolicyFromFrontmatter(frontmatter),
 			};
 		} catch { /* fall through */ }
@@ -649,7 +649,7 @@ export async function runAgent(opts: {
 	persistent?: boolean;
 	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
 	sessionDir?: string;
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
 	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
 	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
