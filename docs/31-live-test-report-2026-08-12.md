@@ -102,3 +102,15 @@
 | Stop/Retry 入口 | ❌ **缺口** | flux_agent 与 /flux agent 只有 list/create/run/archive，无 stop/retry（原 host API 有 stop/retry/wake，随 PiDeck 删除后 Main 层无替代） |
 
 其他：thinking 枚举新增 `max` 档位（agent-runner/templates/entry schema，用户反馈 oa/deepseek-v4-flash 支持 max，xhigh 实际路由 high）；verify 367 全绿。
+
+## T10：Persistent Stop/Retry 入口实链验证（2026-08-13）
+
+重启加载新 dist（commit 86d8fb2）后验证：
+
+| 验证点 | 结果 | 证据 |
+|---|---|---|
+| flux_agent retry | ✅ | `retry soak-worker` 复用 lastTask 重跑成功（agent 自知重复："我已经在上一轮回答了这个问题"）；in 311 / hit 90% / $0.0001；session 延续 |
+| flux_agent stop 错误路径 | ✅ | 空闲 agent 报 `Persistent Agent is not running` |
+| 状态累计 | ✅ | soak-worker calls=4（3 run + 1 retry）cost=$0.000358 |
+
+真实 abort 停止（运行中中止进程）因工具串行无法在同会话模拟，孤儿恢复/错误路径由单元测试覆盖（TUI core 44/44）。verify 22 组 534 断言全绿。
