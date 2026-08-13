@@ -98,7 +98,7 @@
 | list 累计 | ✅ | soak-worker calls=2 cost=$0.000160；stat-agent 保留原记录 |
 | archive → 拒绝运行 | ✅ | archive-test archive 后 run_persistent 报 `Persistent Agent not found` |
 | GC 混合保护 | ✅ | `/flux gc dry-run`：persistent=0，protected-sessions=2（stat-agent + soak-worker 的活跃会话受保护） |
-| 重启恢复路径 | ⏳ 设计已确认，真实待验证 | agents.json 持久化 sessionId（persistent-soak-worker），cap 后缀由 capabilityGeneration（sha256 of tools/skills/mcpServers）运行时派生——policy 不变则重启后同一 session 文件；需用户重启 pi 后 run 一次确认 |
+| 重启恢复路径 | ✅ **实链验证通过（pi 重启后）** | 重启后第三次 run：正确回忆起前两个历史问题（"列出 3 个 Python 常用数据结构"/"再列出 2 个并说明元组列表区别"）；in 128 / hit 96% / $0.0001；同一会话文件（7→9 行追加）；calls=3 cost=$0.000253 正确累计。agents.json 持久化 sessionId + capabilityGeneration 运行时派生 cap 后缀，policy 不变则命中同一文件——设计成立 |
 | Stop/Retry 入口 | ❌ **缺口** | flux_agent 与 /flux agent 只有 list/create/run/archive，无 stop/retry（原 host API 有 stop/retry/wake，随 PiDeck 删除后 Main 层无替代） |
 
 其他：thinking 枚举新增 `max` 档位（agent-runner/templates/entry schema，用户反馈 oa/deepseek-v4-flash 支持 max，xhigh 实际路由 high）；verify 367 全绿。
