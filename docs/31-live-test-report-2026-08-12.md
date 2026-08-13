@@ -67,3 +67,21 @@
 **T7 Workflow 质量门复测 ✅**：roles 临时全改 oa/deepseek-v4-flash+xhigh（备份 models.json.bak-gate-retest，测后已还原），reuse docs-cache-analysis（workflow-7282437b）。结果：DAG PASSED，wall 397.4s，/usr/bin/bash.1007；t1/t2/t3 全部完成，gate 均 passed（gateModel deepseek-v4-flash，t3 为 deepseek-v4-pro），retryCount 0，iterationCount 5。对照 T4：同环境修复前 judge 30s 超时→重试 2 次→DAG failed；修复后 timeoutMs 按节点剩余时间（15-90s）放宽，正常路径不再误杀。'judge 超时→重试 judge→降级放行'分支由确定性测试（test-dag-contracts judgeAction 3 例）覆盖。
 
 **遗留观察**：task-7b1f6ec8（纯工具轮次复测任务）被标记 failed，原因待查（疑似完成判定/重启中断），列入后续排查。
+
+## T8：Community 评审闭环与 Issue Room 时间线（2026-08-13 凌晨，阶段 3a 实链复测）
+
+环境：pi 重启后加载最新 dist（本地路径），模型 oa/deepseek-v4-flash。工具级全生命周期 + print 模式命令链路，无子代理 spawn，成本可忽略。
+
+| 步骤 | 结果 | 证据 |
+|---|---|---|
+| create → claim → submit | ✅ | issue-d2d059a2：open → executing → reviewing，next 每步正确推导（claim scope → submit claim → review claim） |
+| 收敛校验：submitted 未评审时 resolve | ✅ | `Issue has active or submitted claims` 拒绝 |
+| review pass | ✅ | claim → reviewed，next 变 resolve issue |
+| resolve | ✅ | status=resolved |
+| 时间线 | ✅ | 5 事件完整：created → claimed → submitted → reviewed（含反馈"验证通过"）→ resolved |
+| rework 退回 | ✅ | issue-9a6c3d81：submit → review rework（反馈"缺少测试用例，请补充"）→ 状态回 executing、claim 回 active、next 回 submit |
+| 第二轮闭环 | ✅ | 再 submit → review pass → resolve；时间线 7 事件含 reworked |
+| 终态保护 | ✅ | resolved 后 review 拒绝：`Issue is already resolved and immutable` |
+| /flux issue review 命令链路 | ✅ | print 模式 `pi -p` 下对 resolved issue 正确报 immutable（同时证明最新 dist 生效） |
+
+结论：阶段 3a（reviewClaim 评审闭环、resolve 收敛校验、Issue Room 时间线、next-actions 确定性推导）真实链路全部通过。遗留：阶段 3b（Proposal/Decision 实体、运行时待办注入、停止条件 gates、多 Agent 循环）待设计。
