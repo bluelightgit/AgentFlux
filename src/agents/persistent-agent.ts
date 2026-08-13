@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "../core/json-store";
 import type { PricingTable } from "../core/pricing";
 import { assertSafePathSegment } from "../core/safe-path";
-import type { AgentRecord } from "../core/types";
+import type { AgentRecord, AgentStatus } from "../core/types";
 import type { TelemetryWriter } from "../telemetry/events";
 import { runAgent, type AgentRunResult, type AgentTemplate } from "./agent-runner";
 import { loadAllRoles } from "./templates";
@@ -36,6 +36,16 @@ export function listPersistentAgents(cwd: string): AgentRecord[] {
 
 function updateRegistry<R>(cwd: string, update: (agents: AgentRecord[]) => R): R {
 	return updateJsonStore(registryPath(cwd), createRegistry, isRegistry, store => update(store.agents));
+}
+
+export function resetPersistentAgentStatus(cwd: string, name: string, status: Exclude<AgentStatus, "archived">): AgentRecord {
+	return updateRegistry(cwd, agents => {
+		const current = agents.find(agent => agent.name === name && agent.status !== "archived");
+		if (!current) throw new Error(`Persistent Agent not found: ${name}`);
+		current.status = status;
+		current.updatedAt = new Date().toISOString();
+		return structuredClone(current);
+	});
 }
 
 export function registerPersistentAgent(cwd: string, name: string, role: string, modelsConfig: any): AgentRecord {

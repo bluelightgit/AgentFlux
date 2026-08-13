@@ -105,6 +105,24 @@ async function main(): Promise<void> {
 		await flux.handler("agent create reviewer-main reviewer", ctx);
 		await flux.handler("agent list", ctx);
 		check(notices.some(text => text.includes("reviewer-main")), "TUI 创建并列出 Persistent Agent");
+		let mark = notices.length;
+		await flux.handler("agent stop reviewer-main", ctx);
+		check(notices.slice(mark).some(text => text.includes("not running")), "stop 空闲 Agent 报 not running");
+		mark = notices.length;
+		await flux.handler("agent stop ghost-agent", ctx);
+		check(notices.slice(mark).some(text => text.includes("not found")), "stop 不存在的 Agent 报 not found");
+		mark = notices.length;
+		await flux.handler("agent retry reviewer-main", ctx);
+		check(notices.slice(mark).some(text => text.includes("lastTask is empty")), "retry 无 lastTask 报错（不空跑子进程）");
+		// 孤儿 running 状态（无本进程句柄）→ stop 重置为 idle
+		const registryFile = join(root, ".agentflux", "runtime", "agents.json");
+		const registry = JSON.parse(readFileSync(registryFile, "utf-8"));
+		registry.agents = registry.agents.map((agent: any) => agent.name === "reviewer-main" ? { ...agent, status: "running" } : agent);
+		writeFileSync(registryFile, JSON.stringify(registry, null, 2));
+		await flux.handler("agent stop reviewer-main", ctx);
+		const afterStop = JSON.parse(readFileSync(registryFile, "utf-8"));
+		check(afterStop.agents.find((agent: any) => agent.name === "reviewer-main")?.status === "idle"
+			&& notices.some(text => text.includes("reset to idle")), "孤儿 running 通过 stop 恢复控制权并重置为 idle");
 		menuSelections = ["reviewer-main · persistent · reviewer · idle", "Details · show information"];
 		await flux.handler("agent", ctx);
 		check(notices.some(text => text.includes("Agent reviewer-main") && text.includes("capability")), "不带参数的 /flux agent 显示 Agent 列表与详细信息");

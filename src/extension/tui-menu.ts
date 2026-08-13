@@ -77,7 +77,11 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	if (agent.communication === "current_chat") actions.unshift("Talk · continue in current Main conversation");
 	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Persistent session");
 	if (agent.communication === "message") actions.unshift("Message · send to active Agent");
-	if (agent.kind === "persistent" && agent.status !== "archived") actions.push("Archive · retire this Agent");
+	if (agent.kind === "persistent" && agent.status !== "archived") {
+		if (agent.status === "running") actions.push("Stop · abort the running run");
+		else if (agent.lastTask) actions.push("Retry · re-run last task");
+		actions.push("Archive · retire this Agent");
+	}
 	const action = await select(ctx, agent.name, actions);
 	if (action?.startsWith("Talk")) {
 		const message = await input(ctx, `Talk to ${agent.name}`, "Describe the task, question or follow-up");
@@ -86,6 +90,8 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Details")) { ctx.ui.notify(agentDetails(agent), "info"); return null; }
+	if (action?.startsWith("Stop")) return `agent stop ${agent.name}`;
+	if (action?.startsWith("Retry")) return `agent retry ${agent.name}`;
 	if (action?.startsWith("Archive")) return `agent archive ${agent.name}`;
 	return null;
 }
