@@ -114,3 +114,36 @@
 | 状态累计 | ✅ | soak-worker calls=4（3 run + 1 retry）cost=$0.000358 |
 
 真实 abort 停止（运行中中止进程）因工具串行无法在同会话模拟，孤儿恢复/错误路径由单元测试覆盖（TUI core 44/44）。verify 22 组 534 断言全绿。
+
+## T11：社区协作 3b 实链验证（2026-08-15）
+
+临时目录 print 模式（C:\Users\y1582\AppData\Local\Temp\flux-3b-test），真实 pi 进程 + 真实 provider（oa/deepseek-v4-flash）。提交 d3f5d34 + 684a71b。
+
+### 全链路（提案→多提案绑定→真实子代理→提交→评审→解决）
+
+| 步骤 | 结果 | 证据 |
+|---|---|---|
+| 创建 issue（新头部格式） | ✅ | `issue-143c17a4 · open · 3b实链验证`，`rounds 0 · cost $0.0000 · claims 0 · comments 0 · proposals 0` |
+| 双提案 propose | ✅ | proposal-cfc1a2cd（方案甲）、proposal-08bdcadd（方案乙） |
+| support / oppose | ✅ | 方案甲 support 1、方案乙 oppose 1（时间线 supported/opposed 事件） |
+| claim 多提案绑定 + 方案 | ✅ | `/flux issue claim ... --props <p1>,<p2> --plan 综合甲乙两案`（命令层 --props 本次补齐），claim 记录 proposalIds×2 + plan，时间线 claimed 事件含绑定 |
+| 真实子代理执行 | ✅ | `/flux agent run worker 总结方案甲与方案乙的要点`（run 命令拉起语义本次补齐）：SUCCESS exit=0，turns 6 · in 8591 · read 24704 · hit 74% · $0.0010，workers.json calls=1 |
+| submit 细化方案 | ✅ | `--plan 综合结论：采用方案甲前缀布局并保留方案乙阈值开关` 写入 claim 并落时间线 submitted 事件 |
+| review pass | ✅ | claim → reviewed，issue 回 reviewing |
+| resolve 带理由 | ✅ | `resolvedReason` 落档 + 时间线 resolved 事件含理由，终态不可变 |
+
+### 无进展门禁 + 人工兜底
+
+| 验证点 | 结果 | 证据 |
+|---|---|---|
+| 3 次空反馈退回 | ✅ | stallStreak 0→3（允许落盘到阈值） |
+| 第 4 次 submit 拒绝 | ✅ | `stall guard: 已连续 3 次退回且无新反馈（阈值 3），无进展；请人工介入评估，或 /flux issue resolve 直接解决` |
+| 新认领拒绝 | ✅ | 同样错误 |
+| 人工 resolve 兜底 | ✅ **实链发现死锁并修复** | 门禁后 claim 卡 active，原 resolve 被 `Issue has active or submitted claims` 挡住 → 死锁；修复：停摆状态（stallStreak ≥ 阈值）resolve/delete 放行（684a71b）；复测 resolved + resolvedReason 落档 |
+
+### 实链发现并修复
+
+1. **停摆死锁**（community.ts）：门禁触发后 claim 卡 active，人工无出路 → resolveIssue/deleteIssue 停摆放行（普通状态校验不变）。
+2. **/flux agent run 无拉起语义**（entry.ts）：对不存在 Agent 报 `Agent not found`，与 flux_agent 工具不一致 → 命令层自动 createAgent 补齐。
+
+verify 24 组 551 断言全绿（community-3b 20/20）；build OK。临时目录已清理。
