@@ -62,6 +62,23 @@ export function listWorkflowDefinitions(fluxDir: string, includeVersions = false
 	return [...latest.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+/** 删除保存的 Workflow 定义（含全部版本）；运行中的定义拒绝删除。 */
+export function deleteWorkflowDefinition(fluxDir: string, selector: string, activeSelectors: ReadonlySet<string> = new Set()): WorkflowDefinition {
+	let removed: WorkflowDefinition | undefined;
+	updateStore(fluxDir, store => {
+		const target = findDefinition(store, selector);
+		if (!target) throw new Error(`Workflow not found: ${selector}`);
+		if (activeSelectors.has(target.name) || activeSelectors.has(target.id)) {
+			throw new Error(`Workflow is currently running and cannot be deleted: ${target.name}`);
+		}
+		const kept = store.definitions.filter(definition => definition.id !== target.id);
+		if (kept.length === store.definitions.length) throw new Error(`Workflow not found: ${selector}`);
+		removed = target;
+		store.definitions = kept;
+	});
+	return removed!;
+}
+
 export function getWorkflowDefinition(fluxDir: string, selector: string): WorkflowDefinition | undefined {
 	return findDefinition(readStore(fluxDir), selector);
 }

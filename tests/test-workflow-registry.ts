@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
 	createWorkflowDefinition,
+	deleteWorkflowDefinition,
 	formatWorkflowDefinitions,
 	getWorkflowDefinition,
 	listWorkflowDefinitions,
@@ -78,6 +79,19 @@ try {
 			.map(item => item.version)
 			.sort((a, b) => a - b);
 		assert.deepEqual(versions, Array.from({ length: 14 }, (_, index) => index + 1));
+	});
+	check("Workflow delete removes all versions", () => {
+		deleteWorkflowDefinition(root, created.id);
+		assert.equal(getWorkflowDefinition(root, created.id), undefined);
+		assert.equal(listWorkflowDefinitions(root, true).some(item => item.id === created.id), false);
+	});
+	check("Workflow delete rejects a running definition", () => {
+		const another = createWorkflowDefinition(root, { name: "running-wf", dag: firstDag });
+		assert.throws(
+			() => deleteWorkflowDefinition(root, "running-wf", new Set(["running-wf"])),
+			/cannot be deleted/,
+		);
+		assert.throws(() => deleteWorkflowDefinition(root, "no-such-wf"), /Workflow not found/);
 	});
 	console.log(`\n${passed} workflow registry checks passed`);
 } finally {

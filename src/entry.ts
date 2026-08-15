@@ -7,7 +7,7 @@ import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate
 import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
-import { createIssue, claimIssue, commentOnIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim, type CommunityIssue } from "./core/community";
+import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim, type CommunityIssue } from "./core/community";
 import { loadConfig, loadModelsConfig, resolveSharedSkills, validateConfig } from "./core/config";
 import { MessageBus, type DeliveredMessageV2 } from "./core/message-bus";
 import { SharedBoard } from "./core/shared-board";
@@ -25,7 +25,7 @@ import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, s
 import { installSlashArgumentAutocompleteBridge } from "./extension/tui-autocomplete-bridge";
 import { TelemetryWriter } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
-import { createWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
+import { createWorkflowDefinition, deleteWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
 
 interface RuntimeContext {
 	cwd: string;
@@ -592,7 +592,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		label: "Workflow",
 		description: "List, inspect, create, reuse or revise saved fixed-DAG Workflows. For action=run, pass only natural-language task requirements and optional name; AgentFlux plans the DAG. workflow is a saved selector string only for show/reuse/modify, never a DAG or object.",
 		parameters: Type.Object({
-			action: Type.Optional(Type.Union([Type.Literal("run"), Type.Literal("list"), Type.Literal("show"), Type.Literal("reuse"), Type.Literal("modify")])),
+			action: Type.Optional(Type.Union([Type.Literal("run"), Type.Literal("list"), Type.Literal("show"), Type.Literal("reuse"), Type.Literal("modify"), Type.Literal("delete")])),
 			task: Type.Optional(Type.String({ description: "Natural-language work requirements. Required for a new action=run Workflow." })),
 			workflow: Type.Optional(Type.String({ description: "Saved Workflow selector such as id, name, or id@version. Only for show/reuse/modify; never pass a DAG/object." })),
 			name: Type.Optional(Type.String({ description: "Optional stable name for a newly created Workflow." })),
@@ -600,6 +600,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			const action = params.action ?? "run";
+			if (action === "delete") {
+				if (!params.workflow) throw new Error("delete requires workflow");
+				const active = new Set(readActiveContext(runtime.cwd).entries.filter(entry => entry.context === "workflow").map(entry => entry.scope ?? entry.name));
+				const removed = deleteWorkflowDefinition(runtime.fluxDir, params.workflow, active);
+				return { content: [{ type: "text", text: `Deleted workflow ${removed.name} (v${removed.version})` }], details: { ok: true } };
+			}
 			if (action === "list") {
 				const definitions = listWorkflowDefinitions(runtime.fluxDir);
 				return { content: [{ type: "text", text: formatWorkflowDefinitions(definitions) }], details: { definitions } };
@@ -640,7 +646,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit, review and resolve Community work.",
-		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
+		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
@@ -829,6 +835,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const definition = getWorkflowDefinition(runtime.fluxDir, selector);
 				if (!definition) throw new Error(`Workflow not found: ${selector}`);
 				if (action === "show") return notify(ctx, formatWorkflowDefinitions([definition], true), "info", 12);
+				if (action === "delete") {
+					const active = new Set(readActiveContext(runtime.cwd).entries.filter(entry => entry.context === "workflow").map(entry => entry.scope ?? entry.name));
+					const removed = deleteWorkflowDefinition(runtime.fluxDir, selector, active);
+					return notify(ctx, `Deleted workflow ${removed.name} (v${removed.version})`);
+				}
 				if (!["reuse", "modify"].includes(action)) throw new Error("Invalid /flux workflow command");
 				const task = taskParts.join(" ").trim();
 				if (!task) throw new Error(`Workflow ${action} requires a task`);
@@ -938,6 +949,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "comment" && id) return notify(ctx, formatIssue(commentOnIssue(runtime.cwd, id, "main", rest.join(" "))), "info", 12);
 				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" "))), "info", 12);
 				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)), "info", 12);
+				if (action === "delete" && id) return notify(ctx, `Deleted issue ${deleteIssue(runtime.cwd, id).id}`);
 				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0])), "info", 12);
 				if (action === "review" && id && rest[0]) return notify(ctx, formatIssue(reviewClaim(runtime.cwd, id, rest[0], rest[1] === "rework" ? "rework" : "pass", "main", rest.slice(2).join(" "))), "info", 12);
 				throw new Error("Invalid /flux issue command");

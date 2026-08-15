@@ -11,6 +11,7 @@ import {
 	createIssue,
 	commentOnIssue,
 	claimIssue,
+	deleteIssue,
 	submitClaim,
 	reviewClaim,
 	resolveIssue,
@@ -182,6 +183,47 @@ try {
 
 	check("throws on non-existent issue for submit", () => {
 		assert.throws(() => submitClaim(root, "non-existent", "claim-1"), /not found/);
+	});
+
+	// ─── resolveIssue ───────────────────────────────────────────────
+
+	// ─── deleteIssue ────────────────────────────────────────────────
+
+	console.log("\n--- deleteIssue ---");
+
+	check("deletes an open issue with no claims", () => {
+		const issue = createIssue(root, { title: "To Delete", description: "desc" });
+		const removed = deleteIssue(root, issue.id);
+		assert.strictEqual(removed.id, issue.id);
+		assert.strictEqual(listIssues(root).some(item => item.id === issue.id), false);
+	});
+
+	check("deletes a resolved issue", () => {
+		const issue = createIssue(root, { title: "Done", description: "desc" });
+		claimIssue(root, issue.id, "agent", "scope");
+		const claim = getIssue(root, issue.id)!.claims[0];
+		submitClaim(root, issue.id, claim.id);
+		reviewClaim(root, issue.id, claim.id, "pass", "main");
+		resolveIssue(root, issue.id);
+		const removed = deleteIssue(root, issue.id);
+		assert.strictEqual(removed.status, "resolved");
+	});
+
+	check("delete rejects while a claim is active or submitted", () => {
+		const issue = createIssue(root, { title: "Active Claim", description: "desc" });
+		claimIssue(root, issue.id, "agent", "scope");
+		assert.throws(() => deleteIssue(root, issue.id), /active or submitted claims/);
+		const claim = getIssue(root, issue.id)!.claims[0];
+		submitClaim(root, issue.id, claim.id);
+		assert.throws(() => deleteIssue(root, issue.id), /active or submitted claims/);
+	});
+
+	check("delete rejects executing issues without claims", () => {
+		const issue = createIssue(root, { title: "Executing", description: "desc" });
+		const raw = JSON.parse(readFileSync(join(root, ".agentflux", "issues.json"), "utf-8"));
+		raw.issues.find((item: any) => item.id === issue.id).status = "executing";
+		writeFileSync(join(root, ".agentflux", "issues.json"), JSON.stringify(raw));
+		assert.throws(() => deleteIssue(root, issue.id), /Only resolved or open issues/);
 	});
 
 	// ─── resolveIssue ───────────────────────────────────────────────

@@ -55,15 +55,18 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	if (prefix.startsWith("workflow ")) return completions(prefix, [
 		["workflow list", "列出已保存 Workflow"], ["workflow show", "查看 Workflow DAG"],
 		["workflow reuse", "按原版本创建新执行"], ["workflow modify", "生成新版本并执行"],
+		["workflow delete", "删除已保存 Workflow 定义"],
 	]);
 	if (prefix.startsWith("agent ")) return completions(prefix, [
-		["agent list", "列出 Persistent Agents"], ["agent create", "从角色模板创建"],
-		["agent run", "运行 Persistent Agent"], ["agent archive", "归档 Persistent Agent"],
+		["agent list", "列出 Agents"], ["agent create", "创建 Agent（默认/角色模板/分叉）"],
+		["agent run", "与 Agent 对话（指令+超时）"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
+		["agent delete", "删除 Agent"], ["agent gc", "自动 GC（保留最新 k 个）"],
 	]);
 	if (prefix.startsWith("issue ")) return completions(prefix, [
 		["issue list", "列出 Issues"], ["issue create", "创建 Issue"], ["issue show", "查看 Issue"],
 		["issue comment", "发表评论"], ["issue claim", "认领工作范围"], ["issue submit", "提交 Claim"],
 		["issue review", "评审已提交的 Claim（pass/rework）"], ["issue resolve", "关闭已完成 Issue"],
+		["issue delete", "删除已结束 Issue"],
 	]);
 	if (prefix.startsWith("fork ")) return completions(prefix, [["fork last", "从最近一条用户消息创建分支"]]);
 	if (prefix.startsWith("message ")) return completions(prefix, [
@@ -101,10 +104,10 @@ export function parseFluxCommand(input: string): FluxCommand {
 export const FLUX_HELP = [
 	"AgentFlux",
 	"  /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]",
-	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>",
+	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",
 	"  /flux fork [last|index|entryId]",
-	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|review <id> <claimId> pass|rework [feedback]|resolve <id>",
+	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",
 	"  /flux message group list|create <name> <member,...>|send <groupId> <text>",
 	"  /flux cancel [taskId]",

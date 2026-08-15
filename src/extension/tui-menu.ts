@@ -145,7 +145,7 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	const issue = data.issues.find(candidate => selected.startsWith(`${candidate.id} ·`));
 	if (!issue) return null;
-	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Claim work", "Submit claim", "Review claim", "Resolve"]);
+	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Claim work", "Submit claim", "Review claim", "Resolve", "Delete"]);
 	if (action === "Show") return `issue show ${issue.id}`;
 	if (action === "Comment") { const text = await input(ctx, "Comment", "Add facts, risks or a proposal"); return text ? `issue comment ${issue.id} ${text}` : null; }
 	if (action === "Claim work") {
@@ -153,6 +153,7 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 		const scope = agent ? await input(ctx, "Claim scope", "Files, responsibility or artifact") : null;
 		return agent && scope ? `issue claim ${issue.id} ${agent} ${scope}` : null;
 	}
+	if (action === "Delete") return `issue delete ${issue.id}`;
 	if (action === "Submit claim") {
 		const submittable = issue.claims.filter(claim => claim.status === "active");
 		const claimLabel = await select(ctx, "Claim to submit", submittable.map(claim => `${claim.id} · ${claim.agent} · ${claim.scope}`));
@@ -211,8 +212,9 @@ export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Prom
 	}
 	const workflow = workflows.find((item, index) => labels[index] === selected);
 	if (!workflow) return null;
-	const action = await select(ctx, `${workflow.name} · v${workflow.version}`, ["Show DAG", "Reuse exact definition", "Modify as new version"]);
+	const action = await select(ctx, `${workflow.name} · v${workflow.version}`, ["Show DAG", "Reuse exact definition", "Modify as new version", "Delete definition"]);
 	if (action === "Show DAG") return `workflow show ${workflow.id}`;
+	if (action === "Delete definition") return `workflow delete ${workflow.id}`;
 	const task = action === "Reuse exact definition"
 		? await input(ctx, "Reuse Workflow", "Describe this execution")
 		: action === "Modify as new version"
