@@ -64,7 +64,8 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	]);
 	if (prefix.startsWith("issue ")) return completions(prefix, [
 		["issue list", "列出 Issues"], ["issue create", "创建 Issue"], ["issue show", "查看 Issue"],
-		["issue comment", "发表评论"], ["issue claim", "认领工作范围"], ["issue submit", "提交 Claim"],
+		["issue comment", "发表评论"], ["issue propose", "提出提案"], ["issue support", "支持提案"], ["issue oppose", "反对提案"],
+		["issue claim", "认领工作范围（可绑定提案与方案）"], ["issue submit", "提交 Claim"],
 		["issue review", "评审已提交的 Claim（pass/rework）"], ["issue resolve", "关闭已完成 Issue"],
 		["issue delete", "删除已结束 Issue"],
 	]);
@@ -107,7 +108,7 @@ export const FLUX_HELP = [
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",
 	"  /flux fork [last|index|entryId]",
-	"  /flux issue list|create <title>|show <id>|comment <id> <text>|claim <id> <agent> <scope>|submit <id> <claimId>|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
+	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",
 	"  /flux message group list|create <name> <member,...>|send <groupId> <text>",
 	"  /flux cancel [taskId]",

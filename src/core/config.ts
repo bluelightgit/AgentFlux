@@ -48,5 +48,6 @@ export function validateConfig(config: FluxConfig): string[] {
 	if (!Number.isFinite(config.budget.max_cost_per_task) || config.budget.max_cost_per_task <= 0) warnings.push("budget.max_cost_per_task 必须大于 0");
 	if (!Number.isInteger(config.budget.max_iterations) || config.budget.max_iterations < 1) warnings.push("budget.max_iterations 必须是正整数");
 	if (!Number.isFinite(config.budget.max_wall_clock_seconds) || config.budget.max_wall_clock_seconds < 1) warnings.push("budget.max_wall_clock_seconds 必须大于 0");
+	if (config.community_stall_threshold !== undefined && (!Number.isInteger(config.community_stall_threshold) || config.community_stall_threshold < 1)) warnings.push("community_stall_threshold 必须是正整数");
 	return warnings;
 }

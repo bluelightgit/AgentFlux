@@ -273,7 +273,7 @@ try {
 
 	check("nextActions derives deterministic state-machine steps", () => {
 		const issue = createIssue(root, { title: "Next", description: "desc" });
-		assert.deepStrictEqual(nextActions(issue), ["claim scope: flux_issue claim <id> <agent> <scope>"]);
+		assert.deepStrictEqual(nextActions(issue), ["propose a plan: flux_issue propose <id> <title> <body>", "claim scope: flux_issue claim <id> <agent> <scope> [--plan <text>]"]);
 		claimIssue(root, issue.id, "agent", "scope");
 		const withClaim = getIssue(root, issue.id)!;
 		assert.deepStrictEqual(nextActions(withClaim), ["submit claim: flux_issue submit <id> <claimId>"]);

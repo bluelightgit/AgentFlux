@@ -7,7 +7,7 @@ import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate
 import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
-import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim, type CommunityIssue } from "./core/community";
+import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
 import { loadConfig, loadModelsConfig, resolveSharedSkills, validateConfig } from "./core/config";
 import { MessageBus, type DeliveredMessageV2 } from "./core/message-bus";
 import { SharedBoard } from "./core/shared-board";
@@ -250,7 +250,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const })),
 			],
 			roles: [...loadAllRoles(runtime.cwd, runtime.modelsConfig).keys()].sort(),
-			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })) })),
+			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })), proposals: (issue.proposals ?? []).map(proposal => ({ id: proposal.id, title: proposal.title })) })),
 			forkPoints: getForkCandidates(ctx, 5),
 			activeTaskIds: [...activeRuns.keys()],
 			tasks: listTasks(runtime.fluxDir, sessionId).slice(0, 10),
@@ -381,6 +381,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
 		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig) };
+		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.budget.max_iterations });
 		setDagLogSink(ctx.hasUI ? null : console.error);
 		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.hasUI ? undefined : ctx.model?.id); } catch {}
 		for (const warning of warnings) notify(ctx, warning, "warning");
@@ -649,7 +650,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit, review and resolve Community work.",
-		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.String()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
+		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("propose"), Type.Literal("support"), Type.Literal("oppose"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.String()), proposalIds: Type.Optional(Type.Array(Type.String())), plan: Type.Optional(Type.String()), costUsd: Type.Optional(Type.Number()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
@@ -657,10 +658,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (!params.issueId) throw new Error(`${params.action} requires issueId`);
 			const issue = params.action === "show" ? getIssue(runtime.cwd, params.issueId)
 				: params.action === "comment" ? commentOnIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.body ?? "")
-					: params.action === "claim" ? claimIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.scope ?? "")
-						: params.action === "submit" ? submitClaim(runtime.cwd, params.issueId, params.claimId ?? "")
-							: params.action === "review" ? reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict === "rework" ? "rework" : "pass", params.agent ?? "main", params.body ?? "")
-								: resolveIssue(runtime.cwd, params.issueId);
+					: params.action === "propose" ? proposeIssue(runtime.cwd, params.issueId, { title: params.title ?? "", body: params.body ?? "", createdBy: params.agent ?? "main" })
+						: params.action === "support" ? supportProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main")
+							: params.action === "oppose" ? opposeProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main")
+								: params.action === "claim" ? claimIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.scope ?? "", { proposalIds: params.proposalIds, plan: params.plan })
+									: params.action === "submit" ? submitClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.plan, params.costUsd)
+										: params.action === "review" ? reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict === "rework" ? "rework" : "pass", params.agent ?? "main", params.body ?? "")
+											: resolveIssue(runtime.cwd, params.issueId, params.body);
 			if (!issue) throw new Error(`Issue not found: ${params.issueId}`);
 			const taskId = ensureImplicitPlan()?.taskId;
 			if (taskId) updateTaskMetadata(runtime.fluxDir, taskId, { resource: { type: "issue", id: issue.id } });
@@ -950,10 +954,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "create") return notify(ctx, formatIssue(createIssue(runtime.cwd, { title: [id, ...rest].filter(Boolean).join(" "), description: "" })), "info", 12);
 				if (action === "show" && id) { const issue = getIssue(runtime.cwd, id); if (!issue) throw new Error(`Issue not found: ${id}`); return notify(ctx, formatIssue(issue), "info", 12); }
 				if (action === "comment" && id) return notify(ctx, formatIssue(commentOnIssue(runtime.cwd, id, "main", rest.join(" "))), "info", 12);
-				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" "))), "info", 12);
-				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)), "info", 12);
+				if (action === "propose" && id && rest[0]) return notify(ctx, formatIssue(proposeIssue(runtime.cwd, id, { title: rest[0], body: rest.slice(1).join(" ") })), "info", 12);
+				if (action === "support" && id && rest[0]) return notify(ctx, formatIssue(supportProposal(runtime.cwd, id, rest[0], "main")), "info", 12);
+				if (action === "oppose" && id && rest[0]) return notify(ctx, formatIssue(opposeProposal(runtime.cwd, id, rest[0], "main")), "info", 12);
+				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest[1], { plan: rest.slice(2).join(" ").replace(/^--plan\s+/, "") })), "info", 12);
+				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id, rest.join(" "))), "info", 12);
 				if (action === "delete" && id) return notify(ctx, `Deleted issue ${deleteIssue(runtime.cwd, id).id}`);
-				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0])), "info", 12);
+				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" ").replace(/^--plan\s+/, ""))), "info", 12);
 				if (action === "review" && id && rest[0]) return notify(ctx, formatIssue(reviewClaim(runtime.cwd, id, rest[0], rest[1] === "rework" ? "rework" : "pass", "main", rest.slice(2).join(" "))), "info", 12);
 				throw new Error("Invalid /flux issue command");
 			}

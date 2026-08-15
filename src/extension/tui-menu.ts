@@ -18,6 +18,7 @@ export interface TuiIssueInfo {
 	title: string;
 	status: string;
 	claims: Array<{ id: string; agent: string; scope: string; status: string }>;
+	proposals: Array<{ id: string; title: string }>;
 }
 
 export interface FluxTuiMenuData {
@@ -145,9 +146,22 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	const issue = data.issues.find(candidate => selected.startsWith(`${candidate.id} ·`));
 	if (!issue) return null;
-	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Claim work", "Submit claim", "Review claim", "Resolve", "Delete"]);
+	const action = await select(ctx, `${issue.id} · ${issue.title}`, ["Show", "Comment", "Propose a plan", "Support proposal", "Oppose proposal", "Claim work", "Submit claim", "Review claim", "Resolve", "Delete"]);
 	if (action === "Show") return `issue show ${issue.id}`;
 	if (action === "Comment") { const text = await input(ctx, "Comment", "Add facts, risks or a proposal"); return text ? `issue comment ${issue.id} ${text}` : null; }
+	if (action === "Propose a plan") {
+		const title = await input(ctx, "Proposal title", "A plan for solving this issue");
+		const body = title ? await input(ctx, "Proposal body", "Approach, steps and expected result") : null;
+		return title && body ? `issue propose ${issue.id} ${title} ${body}` : null;
+	}
+	if (action === "Support proposal" || action === "Oppose proposal") {
+		const proposals = issue.proposals ?? [];
+		if (proposals.length === 0) { await select(ctx, "No proposals on this issue yet", ["OK"]); return null; }
+		const proposalLabel = await select(ctx, action === "Support proposal" ? "Proposal to support" : "Proposal to oppose", proposals.map(proposal => `${proposal.id} · ${proposal.title}`));
+		const proposal = proposals.find(candidate => proposalLabel?.startsWith(`${candidate.id} ·`));
+		if (!proposal) return null;
+		return action === "Support proposal" ? `issue support ${issue.id} ${proposal.id}` : `issue oppose ${issue.id} ${proposal.id}`;
+	}
 	if (action === "Claim work") {
 		const agent = await input(ctx, "Claiming Agent", "Agent name");
 		const scope = agent ? await input(ctx, "Claim scope", "Files, responsibility or artifact") : null;

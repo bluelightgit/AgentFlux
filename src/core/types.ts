@@ -88,6 +88,8 @@ export interface FluxConfig {
 	communication: CommunicationRuntimeConfig;
 	pricing: PricingConfig;
 	quality_gate?: QualityGateConfig;
+	/** 社区无进展门禁：连续退回且反馈为空/重复达到该次数后拒绝继续（默认 3）。 */
+	community_stall_threshold?: number;
 }
 
 /** 质量门配置: judge 独立于节点模型, 避免节点模型慢导致 judge 超时。 */
