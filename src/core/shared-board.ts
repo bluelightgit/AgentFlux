@@ -1,13 +1,13 @@
 /**
  * 共享黑板 — 多 agent 协作的共享状态层
- * 文档依据: docs/19-multi-agent-architecture.md
+
  *
  * 目录结构:
  *   .agentflux/shared/
  *     blackboard.json   — 全局状态
- *     tasks/            — 任务队列
- *     handoffs/         — 交接文档
- *     decisions/        — 决策记录
+
+
+
  *
  * 设计: 文件-based, 不做 IPC, 可审计, git 友好
  */
@@ -44,34 +44,6 @@ export interface Blackboard {
 	agentStatuses: Record<string, AgentStatus>;
 	updatedAt: string;
 }
-
-export interface Task {
-	id: string;
-	title: string;
-	assignedTo?: string;         // 实例名
-	status: "pending" | "in_progress" | "done" | "blocked" | "failed" | "cancelled" | "retry_wait";
-	dependsOn: string[];         // task IDs
-	createdAt: string;
-	inputHandoff?: string;       // handoff 文件路径
-	acceptanceCriteria: string[];
-	attempts?: number;
-	claimedAt?: string;
-	completedAt?: string;
-	retryAt?: string;
-	error?: string;
-	cancelReason?: string;
-}
-
-export interface Decision {
-	id: string;
-	by: string;                  // 实例名
-	type: string;                // "review_verdict" | "architecture" | ...
-	verdict?: string;
-	issues?: string[];
-	suggestions?: string[];
-	timestamp: string;
-}
-
 // Agent 间消息传递
 
 export interface AgentMessage {
@@ -174,6 +146,55 @@ export class SharedBoard {
 		throw new Error(`SharedBoard mutex timeout: ${name}`);
 	}
 
+	private tryAcquireMutex(name: string, ttlMs = 30_000): (() => void) | null {
+		const path = join(this.lockDir(), `.mutex-${name}.lock`);
+		const token = randomUUID();
+		const now = Date.now();
+		const create = (): boolean => {
+			let fd: number | null = null;
+			try {
+				fd = openSync(path, "wx");
+				writeFileSync(fd, JSON.stringify({ token, ownerId: PROCESS_OWNER_ID, timestamp: now }));
+				return true;
+			} catch (error: any) {
+				// Windows may report EPERM/EACCES/EBUSY instead of EEXIST while another
+				// process is creating, closing, or deleting the same wx lock file. Treat
+				// those transient sharing violations as contention and let withMutex retry;
+				// persistent directory permission failures still surface as a bounded
+				// mutex timeout rather than crashing one registry writer mid-update.
+				const transientWindowsContention = process.platform === "win32"
+					&& ["EPERM", "EACCES", "EBUSY"].includes(error?.code);
+				if (error?.code !== "EEXIST" && !transientWindowsContention) throw error;
+				return false;
+			} finally {
+				if (fd !== null) closeSync(fd);
+			}
+		};
+
+		if (!create()) {
+			let existing: any = null;
+			try {
+				existing = JSON.parse(readFileSync(path, "utf-8"));
+			} catch {
+				// 锁内容未知时 fail-closed，不能覆盖一个可能仍在工作的 owner。
+				return null;
+			}
+			// 时间超时 且 持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
+			const pid = typeof existing.ownerId === "string" ? parseOwnerPid(existing.ownerId) : undefined;
+			if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
+			if (pid === undefined || isProcessAlive(pid)) return null;
+			stealStaleLock(path);
+			if (!create()) return null;
+		}
+
+		return () => {
+			try {
+				const existing = JSON.parse(readFileSync(path, "utf-8"));
+				if (existing.token === token) unlinkSync(path);
+			} catch { /* 已释放或不再属于当前 owner */ }
+		};
+	}
+
 	// ── Blackboard ──
 
 	getBlackboard(): Blackboard {
@@ -228,57 +249,6 @@ export class SharedBoard {
 	}
 
 	// ── Tasks ──
-
-	createTask(task: Omit<Task, "id" | "createdAt">): Task {
-		const id = `task-${randomUUID()}`;
-		const full: Task = { ...task, id, createdAt: new Date().toISOString() };
-		this.writeJsonAtomic(join(this.sharedDir, "tasks", `${id}.json`), full);
-		return full;
-	}
-
-	getTask(id: string): Task | null {
-		const path = join(this.sharedDir, "tasks", `${id}.json`);
-		if (!existsSync(path)) return null;
-		return JSON.parse(readFileSync(path, "utf-8"));
-	}
-
-	listTasks(): Task[] {
-		const dir = join(this.sharedDir, "tasks");
-		if (!existsSync(dir)) return [];
-		const { readdirSync } = require("node:fs");
-		return readdirSync(dir)
-			.filter((f: string) => f.endsWith(".json"))
-			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
-			.sort((a: Task, b: Task) => a.createdAt.localeCompare(b.createdAt));
-	}
-
-	updateTask(id: string, updates: Partial<Task>): void {
-		const task = this.getTask(id);
-		if (!task) return;
-		this.writeJsonAtomic(join(this.sharedDir, "tasks", `${id}.json`), { ...task, ...updates });
-	}
-
-	// ── Handoffs ──
-
-	writeHandoff(from: string, to: string, content: string): string {
-		const filename = `${from}→${to}.md`;
-		writeFileSync(join(this.sharedDir, "handoffs", filename), content);
-		return `handoffs/${filename}`;
-	}
-
-	readHandoff(from: string, to: string): string | null {
-		const path = join(this.sharedDir, "handoffs", `${from}→${to}.md`);
-		if (!existsSync(path)) return null;
-		return readFileSync(path, "utf-8");
-	}
-
-	listHandoffs(): string[] {
-		const dir = join(this.sharedDir, "handoffs");
-		if (!existsSync(dir)) return [];
-		const { readdirSync } = require("node:fs");
-		return readdirSync(dir).filter((f: string) => f.endsWith(".md"));
-	}
-
 	// ── Messages ──
 
 	sendMessage(from: string, to: string, type: string, content: string): AgentMessage {
@@ -288,9 +258,9 @@ export class SharedBoard {
 			timestamp: new Date().toISOString(),
 			read: false,
 		};
-		// 文件名: {id}__{from}→{to}.json (便于按收件人过滤)
+		// 文件名: {id}__{from}-{to}.json (便于按收件人过滤；避免 → 等非 ASCII 字符)
 		const safeName = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
-		const filename = `${id}__${safeName(from)}→${safeName(to)}.json`;
+		const filename = `${id}__${safeName(from)}-${safeName(to)}.json`;
 		writeFileSync(join(this.sharedDir, "messages", filename), JSON.stringify(msg, null, 2));
 		return msg;
 	}
@@ -299,9 +269,16 @@ export class SharedBoard {
 	getInbox(agentName: string): AgentMessage[] {
 		const dir = join(this.sharedDir, "messages");
 		if (!existsSync(dir)) return [];
-		return readdirSync(dir)
-			.filter((f: string) => f.endsWith(".json"))
-			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as AgentMessage)
+		const messages: AgentMessage[] = [];
+		for (const file of readdirSync(dir)) {
+			if (!file.endsWith(".json")) continue;
+			try {
+				messages.push(JSON.parse(readFileSync(join(dir, file), "utf-8")) as AgentMessage);
+			} catch {
+				// 单文件损坏跳过，不阻塞收件箱读取。
+			}
+		}
+		return messages
 			.filter((m: AgentMessage) => m.to === agentName || m.to === "broadcast")
 			.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
 	}
@@ -320,7 +297,12 @@ export class SharedBoard {
 				if (!file.endsWith(".json") || !file.startsWith(msgId)) continue;
 				const path = join(dir, file);
 				if (!existsSync(path)) continue;
-				const msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
+				let msg: AgentMessage;
+				try {
+					msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
+				} catch {
+					continue;
+				}
 				msg.read = true;
 				this.writeJsonAtomic(path, msg);
 				break;
@@ -332,10 +314,16 @@ export class SharedBoard {
 	listMessages(): AgentMessage[] {
 		const dir = join(this.sharedDir, "messages");
 		if (!existsSync(dir)) return [];
-		return readdirSync(dir)
-			.filter((f: string) => f.endsWith(".json"))
-			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")) as AgentMessage)
-			.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
+		const messages: AgentMessage[] = [];
+		for (const file of readdirSync(dir)) {
+			if (!file.endsWith(".json")) continue;
+			try {
+				messages.push(JSON.parse(readFileSync(join(dir, file), "utf-8")) as AgentMessage);
+			} catch {
+				// 单文件损坏跳过，不阻塞 GC 等聚合读取。
+			}
+		}
+		return messages.sort((a: AgentMessage, b: AgentMessage) => a.timestamp.localeCompare(b.timestamp));
 	}
 
 	/**
@@ -366,200 +354,7 @@ export class SharedBoard {
 			return matched.map(item => item.message);
 		});
 	}
-
-	// ── Task Queue ──
-
-	private tryAcquireMutex(name: string, ttlMs = 30_000): (() => void) | null {
-		const path = join(this.lockDir(), `.mutex-${name}.lock`);
-		const token = randomUUID();
-		const now = Date.now();
-		const create = (): boolean => {
-			let fd: number | null = null;
-			try {
-				fd = openSync(path, "wx");
-				writeFileSync(fd, JSON.stringify({ token, ownerId: PROCESS_OWNER_ID, timestamp: now }));
-				return true;
-			} catch (error: any) {
-				// Windows may report EPERM/EACCES/EBUSY instead of EEXIST while another
-				// process is creating, closing, or deleting the same wx lock file. Treat
-				// those transient sharing violations as contention and let withMutex retry;
-				// persistent directory permission failures still surface as a bounded
-				// mutex timeout rather than crashing one registry writer mid-update.
-				const transientWindowsContention = process.platform === "win32"
-					&& ["EPERM", "EACCES", "EBUSY"].includes(error?.code);
-				if (error?.code !== "EEXIST" && !transientWindowsContention) throw error;
-				return false;
-			} finally {
-				if (fd !== null) closeSync(fd);
-			}
-		};
-
-		if (!create()) {
-			let existing: any = null;
-			try {
-				existing = JSON.parse(readFileSync(path, "utf-8"));
-			} catch {
-				// 锁内容未知时 fail-closed，不能覆盖一个可能仍在工作的 owner。
-				return null;
-			}
-			// 时间超时 且 持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
-			const pid = typeof existing.ownerId === "string" ? parseOwnerPid(existing.ownerId) : undefined;
-			if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
-			if (pid === undefined || isProcessAlive(pid)) return null;
-			stealStaleLock(path);
-			if (!create()) return null;
-		}
-
-		return () => {
-			try {
-				const existing = JSON.parse(readFileSync(path, "utf-8"));
-				if (existing.token === token) unlinkSync(path);
-			} catch { /* 已释放或不再属于当前 owner */ }
-		};
-	}
-
-	/** 认领一个就绪任务 (依赖已完成, 状态为 pending) */
-	claimNextTask(agentName: string): Task | null {
-		const tasks = this.listTasks();
-		for (const task of tasks) {
-			const release = this.tryAcquireMutex(`task-claim-${task.id}`);
-			if (!release) continue;
-			try {
-				// 必须在锁内重新读取，避免两个进程基于同一份 listTasks 快照重复认领。
-				const current = this.getTask(task.id);
-				if (!current) continue;
-				const retryReady = current.status === "retry_wait"
-					&& !!current.retryAt && Date.parse(current.retryAt) <= Date.now();
-				if (current.status !== "pending" && !retryReady) continue;
-				const depsDone = current.dependsOn.every(depId => this.getTask(depId)?.status === "done");
-				if (!depsDone) continue;
-				this.updateTask(current.id, {
-					status: "in_progress",
-					assignedTo: agentName,
-					claimedAt: new Date().toISOString(),
-					attempts: (current.attempts ?? 0) + 1,
-					retryAt: undefined,
-					error: undefined,
-				});
-				return this.getTask(current.id);
-			} finally {
-				release();
-			}
-		}
-		return null;
-	}
-
-	/** 完成任务并通知依赖者。 */
-	completeTask(taskId: string, result: { output?: string; verdict?: string }): boolean {
-		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
-		if (!release) return false;
-		let task: Task;
-		try {
-			const current = this.getTask(taskId);
-			if (!current || current.status !== "in_progress") return false;
-			task = current;
-			this.updateTask(taskId, { status: "done", completedAt: new Date().toISOString(), error: undefined });
-		} finally {
-			release();
-		}
-
-		// 通知依赖此任务的其他 Agent。
-		const allTasks = this.listTasks();
-		for (const dependent of allTasks) {
-			if (dependent.dependsOn.includes(taskId) && dependent.status === "blocked") {
-				const releaseDependent = this.tryAcquireMutex(`task-claim-${dependent.id}`);
-				if (!releaseDependent) continue;
-				try {
-					const current = this.getTask(dependent.id);
-					if (!current || current.status !== "blocked") continue;
-					const allDepsDone = current.dependsOn.every(d => this.getTask(d)?.status === "done");
-					if (allDepsDone) this.updateTask(current.id, { status: "pending" });
-				} finally {
-					releaseDependent();
-				}
-			}
-		}
-
-		// 广播任务结果。
-		if (task.assignedTo) {
-			this.sendMessage(task.assignedTo, "broadcast", "task_complete",
-				`Task ${taskId} completed. ${result.verdict ? `Verdict: ${result.verdict}.` : ""} ${result.output ? `Output: ${result.output.slice(0, 200)}` : ""}`);
-		}
-		return true;
-	}
-
-	/** 执行失败是终态，不会把依赖者解锁。 */
-	failTask(taskId: string, error: string): boolean {
-		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
-		if (!release) return false;
-		let task: Task;
-		try {
-			const current = this.getTask(taskId);
-			if (!current || ["done", "cancelled"].includes(current.status)) return false;
-			task = current;
-			this.updateTask(taskId, { status: "failed", error, completedAt: new Date().toISOString() });
-		} finally {
-			release();
-		}
-		if (task.assignedTo) {
-			this.sendMessage(task.assignedTo, "broadcast", "task_failed", `Task ${taskId} failed: ${error.slice(0, 200)}`);
-		}
-		return true;
-	}
-
-	/** 将失败任务安排到未来重试；到 retryAt 前不可认领。 */
-	scheduleTaskRetry(taskId: string, error: string, retryAt: string): boolean {
-		const timestamp = Date.parse(retryAt);
-		if (!Number.isFinite(timestamp)) return false;
-		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
-		if (!release) return false;
-		try {
-			const task = this.getTask(taskId);
-			if (!task || ["done", "cancelled"].includes(task.status)) return false;
-			this.updateTask(taskId, { status: "retry_wait", error, retryAt: new Date(timestamp).toISOString() });
-			return true;
-		} finally {
-			release();
-		}
-	}
-
-	/** 取消是终态；后续迟到的执行结果不能再把任务标记为 done。 */
-	cancelTask(taskId: string, reason = "cancelled by user"): boolean {
-		const release = this.tryAcquireMutex(`task-claim-${taskId}`);
-		if (!release) return false;
-		try {
-			const task = this.getTask(taskId);
-			if (!task || task.status === "done" || task.status === "cancelled") return false;
-			this.updateTask(taskId, {
-				status: "cancelled",
-				cancelReason: reason,
-				completedAt: new Date().toISOString(),
-			});
-			return true;
-		} finally {
-			release();
-		}
-	}
-
 	// ── Decisions ──
-
-	writeDecision(decision: Omit<Decision, "id" | "timestamp">): Decision {
-		const id = `decision-${randomUUID()}`;
-		const full: Decision = { ...decision, id, timestamp: new Date().toISOString() };
-		writeFileSync(join(this.sharedDir, "decisions", `${id}.json`), JSON.stringify(full, null, 2));
-		return full;
-	}
-
-	listDecisions(): Decision[] {
-		const dir = join(this.sharedDir, "decisions");
-		if (!existsSync(dir)) return [];
-		const { readdirSync } = require("node:fs");
-		return readdirSync(dir)
-			.filter((f: string) => f.endsWith(".json"))
-			.map((f: string) => JSON.parse(readFileSync(join(dir, f), "utf-8")))
-			.sort((a: Decision, b: Decision) => a.timestamp.localeCompare(b.timestamp));
-	}
-
 	// ── 群组/频道系统 ──
 
 	/** 创建群组 */
@@ -586,7 +381,12 @@ export class SharedBoard {
 	listGroups(): AgentGroup[] {
 		const path = join(this.sharedDir, "groups", "_registry.json");
 		if (!existsSync(path)) return [];
-		return JSON.parse(readFileSync(path, "utf-8"));
+		try {
+			return JSON.parse(readFileSync(path, "utf-8"));
+		} catch {
+			// 注册表单文件损坏时降级为空，避免阻塞 GC/消息等聚合读取。
+			return [];
+		}
 	}
 
 	/** 获取 agent 所在的群组 */
@@ -623,7 +423,14 @@ export class SharedBoard {
 		const msgFile = join(this.sharedDir, "groups", groupId, "messages.jsonl");
 		if (!existsSync(msgFile)) return [];
 		const lines = readFileSync(msgFile, "utf-8").trim().split("\n").filter(Boolean);
-		const msgs = lines.map(l => JSON.parse(l) as GroupMessage);
+		const msgs: GroupMessage[] = [];
+		for (const line of lines) {
+			try {
+				msgs.push(JSON.parse(line) as GroupMessage);
+			} catch {
+				// 单行损坏跳过，不阻塞整个群组消息读取。
+			}
+		}
 		if (sinceTs) return msgs.filter(m => m.timestamp > sinceTs);
 		return msgs;
 	}
@@ -941,65 +748,7 @@ export class SharedBoard {
 }
 
 // ──────────────────────────────── Handoff 生成 ────────────────────────────────
-
-export function generateHandoffContent(
-	from: string,
-	to: string,
-	task: string,
-	details: {
-		context?: string;
-		plan?: string[];
-		filesToRead?: string[];
-		acceptanceCriteria?: string[];
-		output?: string;
-	},
-): string {
-	const lines = [`# Handoff: ${from} → ${to}`, "", "## Task", task, ""];
-
-	if (details.context) {
-		lines.push("## Context", details.context, "");
-	}
-	if (details.plan && details.plan.length > 0) {
-		lines.push("## Plan");
-		for (const step of details.plan) lines.push(`- ${step}`);
-		lines.push("");
-	}
-	if (details.filesToRead && details.filesToRead.length > 0) {
-		lines.push("## Files to Read");
-		for (const f of details.filesToRead) lines.push(`- ${f}`);
-		lines.push("");
-	}
-	if (details.acceptanceCriteria && details.acceptanceCriteria.length > 0) {
-		lines.push("## Acceptance Criteria");
-		for (const c of details.acceptanceCriteria) lines.push(`- ${c}`);
-		lines.push("");
-	}
-	if (details.output) {
-		lines.push("## Output", details.output, "");
-	}
-
-	return lines.join("\n");
-}
-
 // ──────────────────────────────── 格式化 ────────────────────────────────
-
-export function formatBlackboard(bb: Blackboard): string {
-	const lines = ["Blackboard:", ""];
-	lines.push(`  project: ${bb.project || "(unset)"}`);
-	lines.push(`  work style: ${bb.currentWorkStyle || "(unset)"}`);
-	if (bb.sharedContext.goal) lines.push(`  goal: ${bb.sharedContext.goal}`);
-	if (bb.sharedContext.constraints?.length) {
-		lines.push(`  constraints: ${bb.sharedContext.constraints.join(", ")}`);
-	}
-	lines.push("");
-	lines.push("  Agents:");
-	for (const [name, status] of Object.entries(bb.agentStatuses)) {
-		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘", retry_wait: "↻" }[status.status] ?? "?";
-		lines.push(`    ${icon} ${name}: ${status.status}${status.workingOn ? ` (${status.workingOn})` : ""}`);
-	}
-	return lines.join("\n");
-}
-
 export function formatMessages(msgs: AgentMessage[]): string {
 	if (msgs.length === 0) return "No messages.";
 	const lines = ["Messages:", ""];
@@ -1009,19 +758,6 @@ export function formatMessages(msgs: AgentMessage[]): string {
 	}
 	return lines.join("\n");
 }
-
-export function formatTaskList(tasks: Task[]): string {
-	if (tasks.length === 0) return "No tasks.";
-	const lines = ["Tasks:", ""];
-	for (const t of tasks) {
-		const icon = { pending: "○", in_progress: "●", done: "✓", blocked: "⚠", failed: "✗", cancelled: "⊘", retry_wait: "↻" }[t.status] ?? "?";
-		lines.push(`  ${icon} ${t.id}: ${t.title}`);
-		if (t.assignedTo) lines.push(`    assigned: ${t.assignedTo}`);
-		if (t.dependsOn.length > 0) lines.push(`    depends: ${t.dependsOn.join(", ")}`);
-	}
-	return lines.join("\n");
-}
-
 // ── 群组格式化 ──
 
 export function formatGroups(groups: AgentGroup[]): string {

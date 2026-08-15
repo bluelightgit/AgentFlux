@@ -109,6 +109,67 @@ try {
 	check("DAG resume records its source execution in the child checkpoint", childCheckpoint.resumedFromExecutionId === executionId, childCheckpoint.resumedFromExecutionId);
 } finally { rmSync(resumeRoot, { recursive: true, force: true }); }
 
+// checkpoint 防御：损坏的 checkpoint 明确报错；节点集合顺序无关比较
+const corruptCheckpointRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-corrupt-cp-"));
+try {
+	const executionId = "corrupt-parent";
+	const fluxDir = join(corruptCheckpointRoot, ".agentflux");
+	const runDir = join(fluxDir, "runtime", "runs", executionId);
+	mkdirSync(runDir, { recursive: true });
+	writeFileSync(join(runDir, "checkpoint.json"), "{ broken json", "utf-8");
+	let corruptRejected = "";
+	try {
+		await executeDAG(
+			{ description: "resume", nodes: [node("done")] },
+			{
+				cwd: corruptCheckpointRoot, fluxDir,
+				modelsConfig: { models: {}, roles: {} },
+				telemetry: new TelemetryWriter(fluxDir),
+				prefixLayout: false, sessionId: "pi-session",
+				executionId: "corrupt-child",
+				resumeFromExecutionId: executionId,
+				taskId: "corrupt-task", maxWallClockMs: 1_000,
+			},
+		);
+	} catch (error) {
+		corruptRejected = error instanceof Error ? error.message : String(error);
+	}
+	check("corrupt checkpoint fails closed with a clear message",
+		/corrupt and was not overwritten/.test(corruptRejected) && readFileSync(join(runDir, "checkpoint.json"), "utf-8") === "{ broken json",
+		corruptRejected.slice(0, 80));
+} finally { rmSync(corruptCheckpointRoot, { recursive: true, force: true }); }
+
+const reorderedRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-reordered-"));
+try {
+	const executionId = "reordered-parent";
+	const fluxDir = join(reorderedRoot, ".agentflux");
+	const runDir = join(fluxDir, "runtime", "runs", executionId);
+	mkdirSync(runDir, { recursive: true });
+	// 相同节点集合但顺序不同 → 允许恢复（顺序无关比较）；全部节点已完成避免真实 spawn
+	writeFileSync(join(runDir, "checkpoint.json"), JSON.stringify({ executionId, nodeIds: ["impl", "plan", "review"], completed: ["plan", "impl", "review"], failed: [], status: "timed_out", totalCost: 0.01, iterationCount: 1, taskResults: [], artifactPaths: {} }));
+	let reorderOk = false;
+	let reorderError = "";
+	try {
+		const resumed = await executeDAG(
+			{ description: "resume", nodes: [node("plan"), node("impl", ["plan"]), node("review", ["impl"])] },
+			{
+				cwd: reorderedRoot, fluxDir,
+				modelsConfig: { models: {}, roles: {} },
+				telemetry: new TelemetryWriter(fluxDir),
+				prefixLayout: false, sessionId: "pi-session",
+				executionId: "reordered-child",
+				resumeFromExecutionId: executionId,
+				taskId: "reordered-task", maxWallClockMs: 1_000,
+			},
+		);
+		reorderOk = resumed.status === "passed" && resumed.completedNodes.includes("plan");
+	} catch (error) {
+		reorderError = error instanceof Error ? error.message : String(error);
+	}
+	check("checkpoint node set comparison is order-insensitive",
+		reorderOk, reorderError || "not resumed");
+} finally { rmSync(reorderedRoot, { recursive: true, force: true }); }
+
 const unsafeExecutionRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-unsafe-id-"));
 try {
 	const fluxDir = join(unsafeExecutionRoot, ".agentflux");

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -272,6 +272,30 @@ async function main() {
 			check("corrupt Message V2 state fails closed without erasing evidence",
 				rejectedCorruption && readFileSync(envelopePath, "utf-8") === "{\"schemaVersion\":2,",
 				sent.envelope.id);
+
+			// V1 消息/群组单文件损坏容忍：聚合读取跳过损坏项，GC 不被阻塞
+			const v1Board = new SharedBoard(corruptFluxDir);
+			v1Board.sendMessage("planner", "worker-a", "handoff", "intact v1 message");
+			const v1Dir = join(corruptFluxDir, "shared", "messages");
+			writeFileSync(join(v1Dir, "corrupt-broken.json"), "{ not json", "utf-8");
+			const v1Messages = v1Board.listMessages();
+			check("corrupt V1 message file is skipped by listMessages (GC not blocked)",
+				v1Messages.length === 1 && v1Messages[0].content === "intact v1 message",
+				`count=${v1Messages.length}`);
+			const inbox = v1Board.getInbox("worker-a");
+			check("corrupt V1 message file is skipped by getInbox",
+				inbox.length === 1 && inbox[0].to === "worker-a", `count=${inbox.length}`);
+			const corruptGroup = join(corruptFluxDir, "shared", "groups", "corrupt-grp");
+			mkdirSync(corruptGroup, { recursive: true });
+			writeFileSync(join(corruptGroup, "messages.jsonl"), '{"id":1}\n{ broken\n{"id":3}\n', "utf-8");
+			const groupMessages = v1Board.getGroupMessages("corrupt-grp");
+			check("corrupt V1 group message line is skipped by getGroupMessages",
+				groupMessages.length === 2, `count=${groupMessages.length}`);
+			writeFileSync(join(corruptFluxDir, "shared", "groups", "_registry.json"), "{ broken", "utf-8");
+			const groupsAfterCorruption = v1Board.listGroups();
+			check("corrupt group registry file degrades to empty list",
+				Array.isArray(groupsAfterCorruption) && groupsAfterCorruption.length === 0,
+				`count=${groupsAfterCorruption.length}`);
 		} finally {
 			rmSync(corruptRoot, { recursive: true, force: true });
 		}

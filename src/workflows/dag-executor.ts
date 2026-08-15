@@ -429,9 +429,16 @@ export async function executeDAG(
 	}
 
 	if (resumeCheckpointFile && existsSync(resumeCheckpointFile)) {
-		const checkpoint = JSON.parse(readFileSync(resumeCheckpointFile, "utf-8"));
-		if (JSON.stringify(checkpoint.nodeIds) !== JSON.stringify(dag.nodes.map(node => node.id))) {
-			throw new Error(`checkpoint ${resumeFromExecutionId} does not match current DAG`);
+		let checkpoint: any;
+		try {
+			checkpoint = JSON.parse(readFileSync(resumeCheckpointFile, "utf-8"));
+		} catch (error: any) {
+			throw new Error(`checkpoint ${resumeFromExecutionId} is corrupt and was not overwritten: ${error?.message ?? String(error)}`);
+		}
+		const checkpointIds = new Set(Array.isArray(checkpoint.nodeIds) ? checkpoint.nodeIds : []);
+		const dagIds = new Set(dag.nodes.map(node => node.id));
+		if (checkpointIds.size !== dagIds.size || ![...dagIds].every(id => checkpointIds.has(id))) {
+			throw new Error(`checkpoint ${resumeFromExecutionId} does not match current DAG (node set differs)`);
 		}
 		for (const id of checkpoint.completed ?? []) completed.add(id);
 		// resume starts a new bounded attempt: completed nodes stay complete, failed nodes become runnable again.

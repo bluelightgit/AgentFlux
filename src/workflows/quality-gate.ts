@@ -11,7 +11,7 @@
  *   - 延迟: 单次 LLM 调用, ~3-5s
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -237,14 +237,30 @@ Respond with ONLY the JSON, no other text.`;
 			}
 			if (!cliPath) cliPath = process.argv[1] ?? "";
 
-			const proc = spawn(process.execPath, [cliPath, ...args], { cwd: opts.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+			const proc = spawn(process.execPath, [cliPath, ...args], {
+				cwd: opts.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"],
+				detached: process.platform !== "win32", windowsHide: true,
+			});
 			let buffer = "";
 			let settled = false;
 			let forcedExitCode: number | null = null;
+			const killTree = () => {
+				if (!proc.pid) { try { proc.kill("SIGKILL"); } catch {} return; }
+				// Windows 用 taskkill /T 遍历整个进程树；POSIX 负 PID 杀独立进程组。
+				if (process.platform === "win32") {
+					try {
+						spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
+							shell: false, stdio: "ignore", windowsHide: true, timeout: 7000,
+						});
+					} catch { try { proc.kill("SIGKILL"); } catch {} }
+					return;
+				}
+				try { process.kill(-proc.pid, "SIGKILL"); } catch { try { proc.kill("SIGKILL"); } catch {} }
+			};
 			const onAbort = () => {
 				forcedExitCode = 130;
 				errorMessage = "cancelled during quality gate";
-				try { proc.kill("SIGKILL"); } catch {}
+				killTree();
 				done(130);
 			};
 			const done = (code: number) => {
@@ -258,7 +274,7 @@ Respond with ONLY the JSON, no other text.`;
 			const timer = setTimeout(() => {
 				timedOut = true;
 				errorMessage = `timeout after ${opts.timeoutMs ?? 30000}ms`;
-				try { proc.kill("SIGKILL"); } catch {}
+				killTree();
 				done(124);
 			}, opts.timeoutMs ?? 30000);
 
