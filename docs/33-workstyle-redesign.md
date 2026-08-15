@@ -105,3 +105,42 @@ TUI `/flux`：移除 work 模式选择；新增空间查看（workflow/community
 - Agent：create 三路径、重名 `xxx(1)` 后缀、按 name 多匹配返回 list、run last(1)/last(k)、busy 排队、stop/retry/delete、GC k 规则（无引用且非最新 k 个删除，有引用保留）。
 - 作用域：global/project/session 三层存储隔离；session 清理避开运行中。
 - 回归：现有 22 组测试按新模型更新（移除 workstyle 相关断言）。
+
+## 七、社区协作 3b 设计（2026-08-15 用户决策，开发待启动）
+
+> 用户已确认三个决策点：提案为轻量独立实体且认领可绑定多提案、停止条件门禁挂在核心模块、不做社区执行器（先跑通半自动）。
+
+### 7.1 提案实体（轻量，非状态机）
+
+- 数据：`CommunityIssue` 新增 `proposals: IssueProposal[]`；`IssueProposal = { id, title, body, createdBy, createdAt, supporters: string[], opposers: string[] }`。
+- 无提案自身状态机（无打开/关闭/投票计数）；支持/反对仅是简单列表，用于结构化表达方案倾向。
+- 操作：`proposeIssue`（提出提案）、`supportProposal` / `opposeProposal`（支持/反对，去重且同一人不能同时支持又反对）。
+- 时间线新增事件类型：`proposed` / `supported` / `opposed`。
+- 接线：flux_issue 新增 propose/support/oppose 动作；/flux issue 命令；TUI 菜单；show 输出提案列表。
+
+### 7.2 认领绑定多提案 + 执行方案总结
+
+- `IssueClaim` 新增 `proposalIds: string[]`（可绑定 0..N 个提案；绑定不存在的提案报错）与 `plan: string`（认领者结合所选提案与自身理解总结出的实际执行方案）。
+- 提交（submit）时允许更新 plan（执行过程中方案可能细化），时间线 `submitted` 事件记录最终方案。
+- 评审（review）时反馈（feedback）说明该方案与提案的吻合度，`reworked` 退回后认领者可调整 plan 再提交。
+
+### 7.3 停止条件（核心模块门禁，非工具层）
+
+- 数据：`CommunityIssue` 新增 `rounds: number`（认领次数累计）与 `costUsd: number`（累计成本，由 submit 时可选传入的执行成本累加）。
+- 三类条件，全部在 community.ts 核心模块内检查（任何入口统一生效）：
+  1. **无进展**：连续 N 次 `reworked` 且反馈为空或与上一次相同（默认 N=3，配置项 `community_stall_threshold`）。
+  2. **预算超支**：`costUsd` 超过配置的每任务成本上限（复用 budget.max_cost_per_task）。
+  3. **最大轮次**：`rounds` 超过配置上限（复用 budget.max_iterations）。
+- 触发时：认领/提交/评审入口抛错并给出具体原因（如“已连续 3 次退回无新反馈”），主代理据此决定停止或人工调整配置后继续。
+- 未来若做全自动执行器，条件检查与计数/成本字段已就位，可直接挂入执行器循环（渐进路径）。
+
+### 7.4 半自动运行（不做执行器）
+
+- 社区协作保持主代理驱动：对话轮次内调用工具推进（提案→认领→提交→评审→解决），具体干活派发子代理；用户随时可见可干预。
+- 自动化程度验证通过（真实链路跑通多次、门禁行为正确）后再评估全自动执行器设计。
+
+### 7.5 验收与测试
+
+- 确定性：提案生命周期（propose/support/oppose/去重/不存在报错）；认领多提案绑定与方案总结；门禁三条件触发（连续退回、预算、轮次）；时间线事件完整。
+- 实链：低成本档真实模型跑通 提案→认领（多提案+方案）→提交→评审→解决 全链路；验证门禁触发后的报错可读。
+- 文档：docs/26 状态表 Community 行更新；CONTINUATION 记录。
