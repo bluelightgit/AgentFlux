@@ -258,6 +258,20 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 	return result;
 }
 
+/** 会话结束清理：删除本会话创建的 session 作用域 Agent（运行中保留）。 */
+export function deleteSessionAgents(cwd: string, ownerSessionId: string): string[] {
+	const removed: string[] = [];
+	const path = join(cwd, ".agentflux", "runtime", "agents.json");
+	updateRegistry(path, agents => {
+		const kept = agents.filter(agent => !(agent.scope === "session" && agent.ownerSessionId === ownerSessionId && agent.status !== "running"));
+		for (const agent of agents) {
+			if (!kept.includes(agent) && agent.status !== "running") removed.push(agent.name);
+		}
+		agents.splice(0, agents.length, ...kept);
+	});
+	return removed;
+}
+
 /** 重置状态（孤儿 running 恢复等）。 */
 export function resetAgentStatus(cwd: string, selector: string, status: Exclude<AgentStatus, "archived">): AgentRecord {
 	const record = findSingle(cwd, selector);

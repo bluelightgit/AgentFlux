@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -183,6 +183,14 @@ async function main(): Promise<void> {
 		check(deleteAgent(root, "gc-b").name === "gc-b", "手动删除 Agent");
 		check(!listAgents(root).some(agent => agent.name === "gc-b"), "删除后不再出现在列表");
 		check(formatAgents(listAgents(root)).includes("scope=project"), "formatAgents 展示作用域");
+		// session 作用域与会话结束清理
+		const sessionAgent = createAgent(root, { name: "session-scope", scope: "session", ownerSessionId: "ses-1", modelsConfig: { models: {} } });
+		check(sessionAgent.scope === "session" && sessionAgent.ownerSessionId === "ses-1", "session 作用域记录 ownerSessionId");
+		createAgent(root, { name: "session-other", scope: "session", ownerSessionId: "ses-2", modelsConfig: { models: {} } });
+		const cleaned = deleteSessionAgents(root, "ses-1");
+		check(cleaned.includes("session-scope") && !cleaned.includes("session-other"), "会话结束清理本会话的 session Agent（保留其他会话）");
+		const afterCleanup = listAgents(root);
+		check(!afterCleanup.some(agent => agent.name === "session-scope") && afterCleanup.some(agent => agent.name === "session-other"), "清理后本会话 Agent 消失，其他会话保留");
 		console.log(`\n${passed} Agent lifecycle checks passed`);
 	} finally { delete process.env.AGENTFLUX_TEST_CAPTURE; rmSync(root, { recursive: true, force: true }); }
 }

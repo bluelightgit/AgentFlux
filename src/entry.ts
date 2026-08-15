@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim, type CommunityIssue } from "./core/community";
@@ -425,6 +425,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		for (const controller of activeRuns.values()) controller.abort();
 		activeRuns.clear();
+		if (runtime) {
+			try { deleteSessionAgents(runtime.cwd, sessionId); } catch { /* 清理尽力而为 */ }
+		}
 		if (currentPlan || implicitPlan || implicitTask) {
 			finishCurrentPlan(executionOutcome ?? {
 				action: "cancelled",
