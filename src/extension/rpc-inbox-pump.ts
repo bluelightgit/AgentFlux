@@ -35,6 +35,8 @@ export interface RpcInboxPumpOptions {
 		detail?: string;
 	}) => void;
 	onHeartbeat?: (now: Date) => void;
+	/** 注入后等待 agent_start / 轮次结束的超时（默认 60s）；超时重置批次，消息保留重投。 */
+	agentStartTimeoutMs?: number;
 }
 
 interface ActiveBatch {
@@ -44,9 +46,15 @@ interface ActiveBatch {
 	waitingForCurrentTurnEnd: boolean;
 	/** A fresh prompt must wait for its own subsequent agent_start. */
 	waitingForAgentStart: boolean;
+	/** 批次创建时刻（watchdog 用）。 */
+	startedAtMs: number;
+	/** followUp 第一次 message_end（当前轮次结束）时刻；之后等待排空轮次结束。 */
+	currentTurnEndedAtMs?: number;
 }
 
 const PRIORITY_WEIGHT: Record<MessagePriority, number> = { low: 0, normal: 1, high: 2, critical: 3 };
+
+const DEFAULT_AGENT_START_TIMEOUT_MS = 60_000;
 
 export class RpcInboxPump {
 	private readonly bus: MessageBus;
@@ -58,6 +66,7 @@ export class RpcInboxPump {
 	private activeBatch: ActiveBatch | null = null;
 	private lastHeartbeatMs = 0;
 	private stats: RpcInboxPumpStats;
+	private agentStartTimer: NodeJS.Timeout | null = null;
 
 	constructor(private readonly options: RpcInboxPumpOptions) {
 		if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(options.recipient)) {
@@ -84,6 +93,7 @@ export class RpcInboxPump {
 	stop(): void {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = null;
+		this.clearAgentStartWatchdog();
 		this.stats.running = false;
 	}
 
@@ -104,8 +114,10 @@ export class RpcInboxPump {
 				mode,
 				waitingForCurrentTurnEnd: mode === "followUp",
 				waitingForAgentStart: mode === "prompt",
+				startedAtMs: Date.now(),
 			};
 			this.syncInFlightStats();
+			this.armAgentStartWatchdog();
 			try {
 				const content = this.formatMessages(messages);
 				if (mode === "steer") this.options.sendUserMessage(content, { deliverAs: "steer" });
@@ -131,8 +143,45 @@ export class RpcInboxPump {
 		}
 	}
 
+	/**
+	 * watchdog：注入后若 agent_start（prompt）或下一次 message_end（followUp）
+	 * 迟迟不出现，批次会卡死并阻塞后续所有投递（in-flight 守卫）。
+	 * 超时后重置批次，消息保留在投递队列等待租约重投。
+	 */
+	checkAgentStartTimeout(now = Date.now()): boolean {
+		const batch = this.activeBatch;
+		if (!batch) return false;
+		const waitingForStart = batch.waitingForAgentStart || batch.waitingForCurrentTurnEnd;
+		const anchorMs = waitingForStart ? batch.startedAtMs : batch.currentTurnEndedAtMs;
+		if (anchorMs === undefined) return false;
+		const timeoutMs = this.options.agentStartTimeoutMs ?? DEFAULT_AGENT_START_TIMEOUT_MS;
+		if (now - anchorMs <= timeoutMs) return false;
+		this.clearAgentStartWatchdog();
+		this.activeBatch = null;
+		this.syncInFlightStats();
+		this.stats.failed += batch.messageIds.length;
+		this.stats.lastError = `agent_start/message_end never fired within ${timeoutMs}ms; delivery retained for lease redelivery`;
+		this.options.onAudit?.({
+			action: "ack", result: "failure", messageIds: batch.messageIds,
+			mode: batch.mode, detail: this.stats.lastError,
+		});
+		return true;
+	}
+
+	private armAgentStartWatchdog(): void {
+		this.clearAgentStartWatchdog();
+		this.agentStartTimer = setTimeout(() => { this.checkAgentStartTimeout(); }, DEFAULT_AGENT_START_TIMEOUT_MS);
+		this.agentStartTimer.unref?.();
+	}
+
+	private clearAgentStartWatchdog(): void {
+		if (this.agentStartTimer) clearTimeout(this.agentStartTimer);
+		this.agentStartTimer = null;
+	}
+
 	/** Called for every pi agent_start event. */
 	onAgentStart(): void {
+		this.clearAgentStartWatchdog();
 		if (this.activeBatch?.waitingForAgentStart && !this.activeBatch.waitingForCurrentTurnEnd) {
 			this.activeBatch.waitingForAgentStart = false;
 		}
@@ -140,6 +189,7 @@ export class RpcInboxPump {
 
 	/** ACK only after the assistant response belonging to the injected batch succeeds. */
 	onAssistantMessageEnd(success: boolean, now = new Date()): number {
+		this.clearAgentStartWatchdog();
 		const batch = this.activeBatch;
 		if (!batch) return 0;
 		if (batch.waitingForCurrentTurnEnd) {
@@ -148,6 +198,7 @@ export class RpcInboxPump {
 			// not emit a second agent_start. The next assistant message_end belongs
 			// to the queued follow-up, so it is the ACK boundary.
 			batch.waitingForAgentStart = false;
+			batch.currentTurnEndedAtMs = Date.now();
 			return 0;
 		}
 		if (batch.waitingForAgentStart) return 0;

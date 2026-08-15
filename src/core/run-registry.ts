@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { readJsonStore, updateJsonStore } from "./json-store";
 import { assertSafeOpaqueId } from "./safe-path";
+import { isProcessAlive } from "./fs-lock";
 
 export type AgentRunStatus =
 	| "starting"
@@ -167,6 +168,9 @@ export function reconcileStaleAgentRuns(
 			if (TERMINAL.has(run.status)) continue;
 			const heartbeatMs = Date.parse(run.heartbeatAt);
 			if (Number.isFinite(heartbeatMs) && nowMs - heartbeatMs <= staleAfterMs) continue;
+			// 心跳超时但进程仍存活：可能是长操作或心跳写失败，不能误标为残留
+			//（进程活着可能仍在写 checkpoint，标记 failed 会与其写入竞争）。
+			if (typeof run.pid === "number" && isProcessAlive(run.pid)) continue;
 			run.status = "failed";
 			run.error = "runtime heartbeat expired before terminal convergence";
 			run.updatedAt = nowDate.toISOString();

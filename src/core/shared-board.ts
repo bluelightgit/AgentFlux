@@ -19,6 +19,7 @@ import {
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { assertSafeOpaqueId } from "./safe-path";
+import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
 
 const PROCESS_OWNER_ID = `${process.pid}-${randomUUID()}`;
 
@@ -394,14 +395,18 @@ export class SharedBoard {
 		};
 
 		if (!create()) {
+			let existing: any = null;
 			try {
-				const existing = JSON.parse(readFileSync(path, "utf-8"));
-				if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
-				unlinkSync(path);
+				existing = JSON.parse(readFileSync(path, "utf-8"));
 			} catch {
 				// 锁内容未知时 fail-closed，不能覆盖一个可能仍在工作的 owner。
 				return null;
 			}
+			// 时间超时 且 持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
+			const pid = typeof existing.ownerId === "string" ? parseOwnerPid(existing.ownerId) : undefined;
+			if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
+			if (pid === undefined || isProcessAlive(pid)) return null;
+			stealStaleLock(path);
 			if (!create()) return null;
 		}
 

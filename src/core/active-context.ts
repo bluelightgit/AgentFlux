@@ -10,6 +10,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { isProcessAlive as isAlive } from "./fs-lock";
 import { readJsonStore, updateJsonStore } from "./json-store";
 
 export type SpaceContext = "main" | "workflow" | "community";
@@ -51,16 +52,6 @@ export function readActiveContext(cwd: string): ActiveContextState {
 	};
 }
 
-/** 进程存活探测（Windows 上 process.kill(pid, 0) 也可用）。 */
-function isAlive(pid: number): boolean {
-	if (!pid || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 /** stale 阈值：超过该时长且 pid 消失的条目视为崩溃残留。 */
 export const STALE_ENTRY_MS = 60 * 60 * 1000;

@@ -169,6 +169,53 @@ async function main() {
 			beforeCrashLease === 0 && afterCrashLease === 1 && replacementCalls.length === 1
 				&& bus.getDelivery(crashMessage.envelope.id, "desktop-crash")?.attempts === 2,
 			`before=${beforeCrashLease} after=${afterCrashLease} attempts=${bus.getDelivery(crashMessage.envelope.id, "desktop-crash")?.attempts}`);
+
+		// ── watchdog：prompt 注入后 agent_start 永不触发 → 批次重置、消息保留重投 ──
+		const wdCalls: string[] = [];
+		const wdMessage = bus.sendDirect("main", "desktop-wd", "handoff", "stuck before agent_start");
+		const wdPump = new RpcInboxPump({
+			fluxDir, recipient: "desktop-wd", isIdle: () => true,
+			agentStartTimeoutMs: 1_000, redeliveryAfterMs: 1_000,
+			sendUserMessage: content => wdCalls.push(content),
+		});
+		await wdPump.tick(new Date("2026-07-16T12:23:00.000Z"));
+		check("watchdog arm: batch waits for agent_start",
+			wdCalls.length === 1 && wdPump.getStats().inFlightMessageIds[0] === wdMessage.envelope.id,
+			`calls=${wdCalls.length} inFlight=${wdPump.getStats().inFlightMessageIds.length}`);
+		const timedOut = wdPump.checkAgentStartTimeout(Date.now() + 2_000) ?? false;
+		check("watchdog fires and resets the batch after agent_start timeout",
+			timedOut === true && wdPump.getStats().inFlightMessageIds.length === 0
+				&& (wdPump.getStats().lastError?.includes("retained for lease redelivery") ?? false),
+			`timedOut=${timedOut} inFlight=${wdPump.getStats().inFlightMessageIds.length} err=${wdPump.getStats().lastError}`);
+		check("watchdog reset keeps the delivery unacknowledged for redelivery",
+			bus.getDelivery(wdMessage.envelope.id, "desktop-wd")?.status === "delivered"
+				&& bus.getDelivery(wdMessage.envelope.id, "desktop-wd")?.attempts === 1,
+			bus.getDelivery(wdMessage.envelope.id, "desktop-wd")?.status ?? "missing");
+		const afterWatchdog = await wdPump.tick(new Date("2026-07-16T12:23:03.000Z"));
+		check("watchdog reset unblocks later injection after lease",
+			afterWatchdog === 1 && wdCalls.length === 2,
+			`after=${afterWatchdog} calls=${wdCalls.length}`);
+		wdPump.onAssistantMessageEnd(true);
+
+		// ── followUp 卡死（下一次 message_end 永不出现）同样由 watchdog 兜底 ──
+		const fuCalls: Array<string | undefined> = [];
+		const fuMessage = bus.sendDirect("main", "desktop-fu-wd", "task_update", "queued follow-up never drains");
+		const fuPump = new RpcInboxPump({
+			fluxDir, recipient: "desktop-fu-wd", isIdle: () => false,
+			agentStartTimeoutMs: 1_000,
+			sendUserMessage: (_content, options) => fuCalls.push(options?.deliverAs),
+		});
+		await fuPump.tick(new Date("2026-07-16T12:24:00.000Z"));
+		// 当前轮次正常结束（第一次 message_end 属于当前轮次，不 ACK followUp）
+		fuPump.onAssistantMessageEnd(true);
+		check("followUp batch waits for the queued message_end",
+			fuCalls[0] === "followUp" && fuPump.getStats().inFlightMessageIds[0] === fuMessage.envelope.id,
+			`mode=${fuCalls[0]} inFlight=${fuPump.getStats().inFlightMessageIds.length}`);
+		const fuTimedOut = fuPump.checkAgentStartTimeout(Date.now() + 2_000) ?? false;
+		check("followUp watchdog fires when the queued message_end never arrives",
+			fuTimedOut === true && fuPump.getStats().inFlightMessageIds.length === 0
+				&& bus.getDelivery(fuMessage.envelope.id, "desktop-fu-wd")?.status === "delivered",
+			`timedOut=${fuTimedOut} inFlight=${fuPump.getStats().inFlightMessageIds.length}`);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

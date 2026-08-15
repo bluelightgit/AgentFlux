@@ -1,13 +1,14 @@
 /** File-backed Message/Delivery V2 with per-recipient acknowledgement. */
 import {
 	closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync,
-	renameSync, statSync, unlinkSync, writeFileSync,
+	statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { SharedBoard } from "./shared-board";
 import { assertSafeOpaqueId, assertSafePathSegment } from "./safe-path";
 import { writeJsonFileAtomic } from "./json-store";
+import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
 
 export type MessageChannel =
 	| { type: "direct"; id: string }
@@ -435,14 +436,16 @@ export class MessageBus {
 				if (error?.code !== "EEXIST") throw error;
 				let stale = false;
 				try {
-					stale = Date.now() - statSync(lockPath).mtimeMs > 30_000;
+					if (Date.now() - statSync(lockPath).mtimeMs > 30_000) {
+						// 时间超时且持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
+						let owner = "";
+						try { owner = readFileSync(lockPath, "utf-8"); } catch {}
+						const pid = parseOwnerPid(owner);
+						stale = pid !== undefined && !isProcessAlive(pid);
+					}
 				} catch {}
 				if (stale) {
-					const stalePath = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
-					try {
-						renameSync(lockPath, stalePath);
-						unlinkSync(stalePath);
-					} catch {}
+					stealStaleLock(lockPath);
 				}
 				Atomics.wait(waiter, 0, 0, 10);
 			} finally {

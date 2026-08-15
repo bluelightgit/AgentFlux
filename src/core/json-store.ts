@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
+import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
 
 export type JsonStoreValidator<T> = (value: unknown) => value is T;
 
@@ -89,10 +90,16 @@ function acquireStoreLock(path: string, options: JsonStoreOptions): () => void {
 			}
 			if (error?.code !== "EEXIST") throw error;
 			let stale = false;
-			try { stale = Date.now() - statSync(lockPath).mtimeMs > staleLockMs; } catch {}
-			if (stale) {
-				try { unlinkSync(lockPath); } catch {}
-			}
+			try {
+				if (Date.now() - statSync(lockPath).mtimeMs > staleLockMs) {
+					// 时间超时且持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
+					let owner = "";
+					try { owner = readFileSync(lockPath, "utf-8"); } catch {}
+					const pid = parseOwnerPid(owner);
+					stale = pid !== undefined && !isProcessAlive(pid);
+				}
+			} catch {}
+			if (stale) stealStaleLock(lockPath);
 			Atomics.wait(waiter, 0, 0, 10);
 		}
 	}

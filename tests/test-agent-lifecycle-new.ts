@@ -37,9 +37,35 @@ async function main(): Promise<void> {
 			currentTask: "crashed process",
 			kind: "ephemeral",
 		});
-		markAgentRunRunning(join(root, ".agentflux"), "stale-test-run", process.pid, 1);
+		markAgentRunRunning(join(root, ".agentflux"), "stale-test-run", 99999999, 1);
 		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
 		check(getAgentRun(join(root, ".agentflux"), "stale-test-run")?.status === "failed", "Run Registry 将心跳过期的孤儿运行收敛为失败");
+		// 心跳过期但进程仍存活（长操作/心跳写失败）→ 不误标 failed
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "alive-heartbeat-run",
+			sessionId: "test",
+			agent: "alive-worker",
+			role: "implementer",
+			currentTask: "long operation with stale heartbeat",
+			kind: "ephemeral",
+		});
+		markAgentRunRunning(join(root, ".agentflux"), "alive-heartbeat-run", process.pid, 1);
+		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		check(getAgentRun(join(root, ".agentflux"), "alive-heartbeat-run")?.status === "running",
+			"心跳超时但进程存活时保留运行状态（进程存活保护）");
+		// 心跳过期且进程已消失 → 收敛为失败
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "dead-heartbeat-run",
+			sessionId: "test",
+			agent: "dead-worker",
+			role: "implementer",
+			currentTask: "crashed process",
+			kind: "ephemeral",
+		});
+		markAgentRunRunning(join(root, ".agentflux"), "dead-heartbeat-run", 99999999, 1);
+		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		check(getAgentRun(join(root, ".agentflux"), "dead-heartbeat-run")?.status === "failed",
+			"心跳超时且进程已消失时收敛为失败");
 		const turnLimited = await runAgent({
 			cwd: root, agent: { ...template, name: "turn-limited" }, task: "bounded",
 			sessionId: "test", prefixLayout: true, maxTurns: 1, invocationOverride,
