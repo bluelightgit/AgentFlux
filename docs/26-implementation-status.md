@@ -8,7 +8,7 @@
 
 ## 本轮结论
 
-2026-08-15 起执行 docs/32 重设计（阶段一至五已完成并提交）：不再有工作方式模式（WorkStyle 体系、flux_team、agent_decides、模式门禁与固定工作方式模板已删除）。执行在 Main Agent 中直接进行或按需派发子代理；workflow 与 community 是可选执行方法。旧 M1–M6、自动路由、experience/sidecar 和重复 Team/Pipeline executor 已从生产 Core 删除，不提供兼容 adapter。
+2026-08-15 起执行 docs/33 重设计（阶段一至五已完成并提交）：不再有工作方式模式（WorkStyle 体系、flux_team、agent_decides、模式门禁与固定工作方式模板已删除）。执行在 Main Agent 中直接进行或按需派发子代理；workflow 与 community 是可选执行方法。旧 M1–M6、自动路由、experience/sidecar 和重复 Team/Pipeline executor 已从生产 Core 删除，不提供兼容 adapter。
 
 | 能力 | 状态 | 当前契约与证据 |
 |---|---|---|
