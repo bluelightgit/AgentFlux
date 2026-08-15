@@ -31,6 +31,15 @@ export interface TaskExecutionRecord {
 	status: TaskStatus;
 	budget?: TaskExecutionPlan["budget"];
 	costUsd: number;
+	/** Main 会话侧逐轮累计 usage（turn_end 从 pi message_end 读取） */
+	usage?: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		costUsd: number;
+		model?: string;
+	};
 	outcome?: {
 		status: "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
 		error?: string;
@@ -205,6 +214,7 @@ export function updateTaskStatus(
 	details: {
 		executionId?: string;
 		costUsd?: number;
+		usage?: TaskExecutionRecord["usage"];
 		outcome?: TaskExecutionRecord["outcome"];
 	} = {},
 ): TaskRecord | undefined {
@@ -227,6 +237,7 @@ export function updateTaskStatus(
 		execution.status = status;
 		execution.updatedAt = now;
 		if (details.costUsd !== undefined) execution.costUsd = details.costUsd;
+		if (details.usage) execution.usage = details.usage;
 		if (details.outcome) execution.outcome = details.outcome;
 		if (TERMINAL_STATUSES.has(status)) execution.finishedAt = now;
 		return task;

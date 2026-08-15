@@ -6,6 +6,8 @@ import type { TaskOperation } from "../core/task-execution";
 export type TelemetryOutcomeStatus = "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
 export interface TelemetryOutcome { status: TelemetryOutcomeStatus; success?: boolean; exitCode?: number; gatePassed?: boolean; retryCount?: number; error?: string; }
 export interface TelemetryEvidence { type: "test" | "build" | "lint" | "typecheck" | "review" | "quality_gate" | "user" | "artifact" | "other"; name?: string; passed?: boolean; value?: string | number | boolean; detail?: string; source?: string; path?: string; }
+/** Main 会话逐轮 usage 累计（turn_end 从 pi message_end 事件读取） */
+export interface MainUsage { input: number; output: number; cacheRead: number; cacheWrite: number; costUsd: number; model?: string; }
 export interface BaseEvent { ts: number; sessionId: string; type: string; taskId?: string; runId?: string; startedAt?: number; finishedAt?: number; latencyMs?: number; costUsd?: number; outcome?: TelemetryOutcome; evidence?: TelemetryEvidence[]; }
 
 export interface TaskExecutionEvent extends BaseEvent {
@@ -17,6 +19,8 @@ export interface TaskExecutionEvent extends BaseEvent {
 	parentTaskId?: string;
 	executionId?: string;
 	parentExecutionId?: string;
+	/** Main 会话侧逐轮累计 usage（子 Agent usage 记录在 SubagentRunEvent/checkpoint） */
+	usage?: MainUsage;
 }
 
 export interface AgentLifecycleEvent extends BaseEvent {

@@ -23,7 +23,7 @@ import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./exten
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showMessageTuiMenu, showTaskTuiMenu, showWorkflowTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { installSlashArgumentAutocompleteBridge } from "./extension/tui-autocomplete-bridge";
-import { TelemetryWriter } from "./telemetry/events";
+import { TelemetryWriter, type MainUsage } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
 import { createWorkflowDefinition, deleteWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
 
@@ -130,6 +130,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 	type ExecutionOutcome = { action: "completed" | "failed" | "cancelled"; status: "success" | "failure" | "cancelled" | "timeout"; error?: string; costUsd?: number };
 	let executionOutcome: ExecutionOutcome | null = null;
 	let pendingTaskEnvelope: AgentFluxTaskEnvelope | null = null;
+	// Main 会话逐轮 usage 累计：turn_end 从 pi message_end 读取，agent_settled 落盘
+	let mainTurnUsage: MainUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+	const resetMainUsage = (): MainUsage => { const usage = mainTurnUsage; mainTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }; return usage; };
 	const activeRuns = new Map<string, AbortController>();
 	const persistentControllers = new Map<string, AbortController>();
 	const workflowInvocations = new Set<string>();
@@ -158,7 +161,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		return plan;
 	}
 
-	function finishCurrentPlan(outcome: ExecutionOutcome): void {
+	function finishCurrentPlan(outcome: ExecutionOutcome, usage?: MainUsage): void {
 		if (!telemetry || !runtime) return;
 		const plan = currentPlan ?? implicitPlan ?? (implicitTask
 			? createTaskExecutionPlan({ task: implicitTask.task, taskId: implicitTask.taskId, selectedBy: "main_agent", budget: runtime.config.budget })
@@ -177,6 +180,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			parentExecutionId: plan.parentExecutionId,
 			runId: plan.executionId,
 			costUsd: outcome.costUsd,
+			usage,
 			outcome: { status: outcome.status, success: outcome.action === "completed", error: outcome.error },
 		});
 		const registryStatus: TaskStatus = outcome.action === "completed"
@@ -189,6 +193,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		updateTaskStatus(runtime.fluxDir, plan.taskId, registryStatus, {
 			executionId: plan.executionId,
 			costUsd: outcome.costUsd,
+			usage,
 			outcome: { status: outcome.status, error: outcome.error },
 		});
 		currentPlan = null;
@@ -412,7 +417,19 @@ export default function agentFlux(pi: ExtensionAPI) {
 		}
 		return { systemPrompt: `${event.systemPrompt}\n\n${operatingProtocol}` };
 	});
-	pi.on("turn_end", async () => { turnIndex += 1; });
+	pi.on("turn_end", async (event: any) => {
+		turnIndex += 1;
+		const message = event?.message;
+		const u = message?.usage;
+		if (u && typeof u.input === "number") {
+			mainTurnUsage.input += u.input ?? 0;
+			mainTurnUsage.output += u.output ?? 0;
+			mainTurnUsage.cacheRead += u.cacheRead ?? 0;
+			mainTurnUsage.cacheWrite += u.cacheWrite ?? 0;
+			mainTurnUsage.costUsd += u.cost?.total ?? 0;
+			if (message.model) mainTurnUsage.model = message.model;
+		}
+	});
 	pi.on("agent_end", async (event: any) => {
 		const lastAssistant = [...(event?.messages ?? [])].reverse().find((message: any) => message?.role === "assistant");
 		lastAgentRunFailed = lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted";
@@ -421,7 +438,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		const terminal = executionOutcome ?? (lastAgentRunFailed
 			? { action: "failed" as const, status: "failure" as const }
 			: { action: "completed" as const, status: "success" as const });
-		finishCurrentPlan(terminal);
+		finishCurrentPlan(terminal, resetMainUsage());
 	});
 	pi.on("session_shutdown", async () => {
 		for (const controller of activeRuns.values()) controller.abort();
@@ -434,7 +451,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				action: "cancelled",
 				status: "cancelled",
 				error: "Session closed before task settled",
-			});
+			}, resetMainUsage());
 		}
 	});
 
@@ -795,6 +812,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
 			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
+			if (command.kind === "usage") {
+				const usage = mainTurnUsage;
+				const total = usage.input + usage.cacheRead;
+				const hit = total > 0 ? Math.round((usage.cacheRead / total) * 100) : 0;
+				return notify(ctx, `main usage this session: in ${usage.input} · out ${usage.output} · cache read ${usage.cacheRead} (hit ${hit}%) · $${usage.costUsd.toFixed(4)}${usage.model ? ` · ${usage.model}` : ""}`, "info", 1);
+			}
 			if (command.kind === "space") return notify(ctx, formatSpaceOverview(runtime.cwd), "info", 24);
 			if (command.kind === "task") {
 				const [action = "list", selector, ...taskParts] = command.args;

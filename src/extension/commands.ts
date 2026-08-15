@@ -10,6 +10,7 @@ export type FluxCommand =
 	| { kind: "gc"; dryRun: boolean }
 	| { kind: "status" }
 	| { kind: "space" }
+	| { kind: "usage" }
 	| { kind: "compact" };
 
 export interface FluxCompletionItem { value: string; label: string; description: string; }
@@ -23,6 +24,7 @@ const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
 	{ value: "message", label: "message", description: "向运行中的 Agent 发送 Message V2" },
 	{ value: "status", label: "status", description: "查看任务、Agent 与 Issue 状态" },
 	{ value: "space", label: "space", description: "查看 workflow/community 空间与执行时间线" },
+	{ value: "usage", label: "usage", description: "查看 Main 会话逐轮 token/缓存命中/成本" },
 	{ value: "cancel", label: "cancel", description: "取消运行中的任务" },
 	{ value: "gc", label: "gc", description: "回收终态 Agent、消息和孤儿 session" },
 	{ value: "compact", label: "compact", description: "查看上下文压缩建议" },
@@ -98,6 +100,7 @@ export function parseFluxCommand(input: string): FluxCommand {
 	}
 	if (parts[0] === "status") return { kind: "status" };
 	if (parts[0] === "space") return { kind: "space" };
+	if (parts[0] === "usage") return { kind: "usage" };
 	if (parts[0] === "compact") return { kind: "compact" };
 	throw new Error(`Unknown /flux command: ${parts[0]}`);
 }
@@ -115,5 +118,6 @@ export const FLUX_HELP = [
 	"  /flux gc [dry-run]",
 	"  /flux status",
 	"  /flux space",
+	"  /flux usage",
 	"  /flux compact",
 ].join("\n");
