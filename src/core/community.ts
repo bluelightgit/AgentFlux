@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { registerActiveContext, releaseActiveContext } from "./active-context";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readJsonStore, updateJsonStore, writeJsonFileAtomic } from "./json-store";
@@ -144,7 +145,15 @@ export function createIssue(cwd: string, input: { title: string; description: st
 	return update(cwd, store => { store.issues.push(issue); appendEvent(issue, "created", issue.createdBy, input.title.trim()); return issue; });
 }
 export function commentOnIssue(cwd: string, id: string, author: string, body: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); issue.comments.push({ id: `comment-${randomUUID()}`, author, body: body.trim(), createdAt: new Date().toISOString() }); issue.updatedAt = new Date().toISOString(); appendEvent(issue, "commented", author, body.trim().slice(0, 120)); return issue; }); }
-export function claimIssue(cwd: string, id: string, agent: string, scope: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" && claim.scope === scope)) throw new Error(`Scope already claimed: ${scope}`); const claim = { id: `claim-${randomUUID()}`, agent, scope, status: "active" as const, createdAt: new Date().toISOString() }; issue.claims.push(claim); issue.status = "executing"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "claimed", agent, `${claim.id} → ${scope}`); return issue; }); }
+export function claimIssue(cwd: string, id: string, agent: string, scope: string): CommunityIssue {
+	registerActiveContext(cwd, { name: `issue:${id}`, context: "community", scope: id, task: `claim ${agent} → ${scope}` });
+	try {
+		return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" && claim.scope === scope)) throw new Error(`Scope already claimed: ${scope}`); const claim = { id: `claim-${randomUUID()}`, agent, scope, status: "active" as const, createdAt: new Date().toISOString() }; issue.claims.push(claim); issue.status = "executing"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "claimed", agent, `${claim.id} → ${scope}`); return issue; });
+	} catch (error) {
+		releaseActiveContext(cwd, `issue:${id}`);
+		throw error;
+	}
+}
 export function submitClaim(cwd: string, id: string, claimId: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); if (claim.status !== "active") throw new Error(`Claim is not active: ${claimId}`); claim.status = "submitted"; issue.status = "reviewing"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "submitted", claim.agent, claimId); return issue; }); }
 export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "pass" | "rework", reviewer: string, feedback = ""): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); if (claim.status !== "submitted") throw new Error(`Claim is not in review: ${claimId} (status=${claim.status})`); if (verdict === "pass") {
 		claim.status = "reviewed";
@@ -155,7 +164,7 @@ export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "
 		appendEvent(issue, "reworked", reviewer, `${claimId} ${feedback ? `· ${feedback.slice(0, 120)}` : ""}`.trim());
 	}
 	issue.updatedAt = new Date().toISOString(); return issue; }); }
-export function resolveIssue(cwd: string, id: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); if (issue.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); issue.status = "resolved"; issue.updatedAt = new Date().toISOString(); appendEvent(issue, "resolved", "main", id); return issue; }); }
+export function resolveIssue(cwd: string, id: string): CommunityIssue { const issue = update(cwd, store => { const item = store.issues.find(item => item.id === id); if (!item) throw new Error(`Issue not found: ${id}`); assertMutable(item); if (item.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); item.status = "resolved"; item.updatedAt = new Date().toISOString(); appendEvent(item, "resolved", "main", id); return item; }); releaseActiveContext(cwd, `issue:${id}`); return issue; }
 export function formatIssue(issue: CommunityIssue): string { return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `claims ${issue.claims.length} · comments ${issue.comments.length}`, ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}`), ...(nextActions(issue).map(action => `next: ${action}`))].filter(Boolean).join("\n"); }
 export function formatIssueTimeline(issue: CommunityIssue): string {
 	const events = issue.timeline ?? [];

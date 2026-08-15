@@ -33,6 +33,10 @@ check("parses empty string as help", () => {
 	assert.strictEqual(cmd.kind, "help");
 });
 
+check("parses /flux space", () => {
+	const parsed = parseFluxCommand("/flux space");
+	assert(parsed.kind === "space", "space 命令解析为 space kind");
+});
 check("parses whitespace-only as help", () => {
 	const cmd = parseFluxCommand("   ");
 	assert.strictEqual(cmd.kind, "help");

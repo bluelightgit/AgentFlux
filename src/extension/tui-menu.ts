@@ -228,10 +228,11 @@ export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const selected = await select(ctx, "AgentFlux Workbench", [
 		"New task · describe outcome", "Tasks · reuse, resume or continue", "Workflows · saved fixed DAGs", "Agents · inspect, create or talk", "Community · Issues and Claims",
-		"Messages · groups and Main inbox", "Fork · branch from session context", "Runtime · status or cancel", "Context · compaction advice",
+		"Spaces · workflow/community and timeline", "Messages · groups and Main inbox", "Fork · branch from session context", "Runtime · status or cancel", "Context · compaction advice",
 		"Maintenance · lifecycle GC", "Help · command reference",
 	]);
 	if (!selected) return null;
+	if (selected.startsWith("Spaces")) return "space";
 	if (selected.startsWith("New task")) {
 		const task = await input(ctx, "new task", "Describe the outcome and acceptance criteria");
 		return task ? `task new ${task}` : null;

@@ -7,11 +7,12 @@ import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate
 import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
-import { createIssue, claimIssue, commentOnIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim } from "./core/community";
+import { createIssue, claimIssue, commentOnIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim, type CommunityIssue } from "./core/community";
 import { loadConfig, loadModelsConfig, resolveSharedSkills, validateConfig } from "./core/config";
 import { MessageBus, type DeliveredMessageV2 } from "./core/message-bus";
 import { SharedBoard } from "./core/shared-board";
 import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
+import { formatActiveContext, pruneStaleActiveContext, readActiveContext, registerActiveContext, releaseActiveContext } from "./core/active-context";
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
 import { resolvePathInsideExistingRoot } from "./core/safe-path";
@@ -205,6 +206,33 @@ export default function agentFlux(pi: ExtensionAPI) {
 		}
 		return implicitPlan;
 	}
+
+	/** 以 workflow 空间身份执行 DAG：互斥注册 + finally 释放。 */
+	async function runWorkflowWithContext<T>(cwd: string, plan: TaskExecutionPlan, run: () => Promise<T>): Promise<T> {
+		const entry = registerActiveContext(cwd, { name: `workflow:${plan.taskId ?? plan.executionId}`, context: "workflow", scope: plan.executionId, task: plan.task });
+		try {
+			return await run();
+		} finally {
+			releaseActiveContext(cwd, entry.name);
+		}
+	}
+
+	/** 空间总览：活跃上下文 + workflow/community 列表 + 最近 agent 活动时间线。 */
+	function formatSpaceOverview(cwd: string): string {
+		pruneStaleActiveContext(cwd);
+		const lines: string[] = [`active context: ${formatActiveContext(readActiveContext(cwd))}`];
+		const definitions = runtime ? listWorkflowDefinitions(runtime.fluxDir) : [];
+		lines.push(`workflows ${definitions.length > 0 ? definitions.map(def => `${def.name} v${def.version}`).join(", ") : "(none)"}`);
+		const issues = listIssues(cwd);
+		lines.push(`community issues ${issues.length > 0 ? issues.map(issue => `${issue.id} · ${issue.status} · ${issue.title.slice(0, 40)}`).join("\n  ") : "(none)"}`);
+		const events = readFileSync(join(cwd, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => { try { return JSON.parse(line); } catch { return null; } }).filter((event: any) => event?.type === "agent.lifecycle" && (event.action === "started" || event.action === "completed" || event.action === "failed" || event.action === "cancelled"));
+		const timeline = events.slice(-10).map((event: any) => `  ${new Date(event.timestamp ?? event.createdAt).toLocaleTimeString()} [${event.action}] ${event.agent}${event.currentTask ? ` · ${String(event.currentTask).slice(0, 50)}` : ""}`).join("\n");
+		lines.push(`recent agent activity:\n${timeline || "  (none)"}`);
+		return lines.join("\n");
+	}
+
+	/** community 空间启动：claim 内部完成互斥检查与注册（多 issue 并行允许）。 */
+	const registerCommunityClaim = claimIssue;
 
 	const persistentContext = (maxCostUsd = runtime?.config.budget.max_cost_per_task): AgentRunContext => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
@@ -469,6 +497,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 			task: Type.Optional(Type.String()),
 			last: Type.Optional(Type.Number()),
 			keepLatestK: Type.Optional(Type.Number()),
+			context: Type.Optional(Type.Union([Type.Literal("main"), Type.Literal("community")])),
+			issueId: Type.Optional(Type.String()),
 		}),
 		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
@@ -599,6 +629,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const resource = getTask(runtime.fluxDir, plan.taskId)?.resource;
 				return { content: [{ type: "text", text: `${formatTaskExecutionPlan(plan)}${resource ? `\n  saved ${resource.type} ${resource.id}` : ""}\n\n${formatDAGResult(result)}` }], details: { ...result, resource } };
 			} catch (error: any) {
+				workflowInvocations.delete(plan.taskId);
 				executionOutcome = signal?.aborted
 					? { action: "cancelled", status: "cancelled", error: "Workflow cancelled" }
 					: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
@@ -751,6 +782,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
 			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
+			if (command.kind === "space") return notify(ctx, formatSpaceOverview(runtime.cwd), "info", 24);
 			if (command.kind === "task") {
 				const [action = "list", selector, ...taskParts] = command.args;
 				if (action === "list") return notify(ctx, formatTasks(listTasks(runtime.fluxDir, sessionId).slice(0, 10)), "info", 12);
@@ -904,10 +936,10 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "create") return notify(ctx, formatIssue(createIssue(runtime.cwd, { title: [id, ...rest].filter(Boolean).join(" "), description: "" })), "info", 12);
 				if (action === "show" && id) { const issue = getIssue(runtime.cwd, id); if (!issue) throw new Error(`Issue not found: ${id}`); return notify(ctx, formatIssue(issue), "info", 12); }
 				if (action === "comment" && id) return notify(ctx, formatIssue(commentOnIssue(runtime.cwd, id, "main", rest.join(" "))), "info", 12);
-				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(claimIssue(runtime.cwd, id, rest[0], rest.slice(1).join(" "))), "info", 12);
+				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" "))), "info", 12);
+				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)), "info", 12);
 				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0])), "info", 12);
 				if (action === "review" && id && rest[0]) return notify(ctx, formatIssue(reviewClaim(runtime.cwd, id, rest[0], rest[1] === "rework" ? "rework" : "pass", "main", rest.slice(2).join(" "))), "info", 12);
-				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id)), "info", 12);
 				throw new Error("Invalid /flux issue command");
 			}
 

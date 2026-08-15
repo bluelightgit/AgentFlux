@@ -9,6 +9,7 @@ export type FluxCommand =
 	| { kind: "cancel"; taskId?: string }
 	| { kind: "gc"; dryRun: boolean }
 	| { kind: "status" }
+	| { kind: "space" }
 	| { kind: "compact" };
 
 export interface FluxCompletionItem { value: string; label: string; description: string; }
@@ -21,6 +22,7 @@ const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
 	{ value: "issue", label: "issue", description: "管理 Community Issues 与 Claims" },
 	{ value: "message", label: "message", description: "向运行中的 Agent 发送 Message V2" },
 	{ value: "status", label: "status", description: "查看任务、Agent 与 Issue 状态" },
+	{ value: "space", label: "space", description: "查看 workflow/community 空间与执行时间线" },
 	{ value: "cancel", label: "cancel", description: "取消运行中的任务" },
 	{ value: "gc", label: "gc", description: "回收终态 Agent、消息和孤儿 session" },
 	{ value: "compact", label: "compact", description: "查看上下文压缩建议" },
@@ -77,7 +79,7 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 }
 
 export function parseFluxCommand(input: string): FluxCommand {
-	const parts = input.trim().split(/\s+/).filter(Boolean);
+	const parts = input.trim().replace(/^\/flux(?:\s+|$)/, "").split(/\s+/).filter(Boolean);
 	if (parts.length === 0 || parts[0] === "help") return { kind: "help" };
 	if (parts[0] === "agent") return { kind: "agent", args: parts.slice(1) };
 	if (parts[0] === "task") return { kind: "task", args: parts.slice(1) };
@@ -91,6 +93,7 @@ export function parseFluxCommand(input: string): FluxCommand {
 		return { kind: "gc", dryRun: parts[1] === "dry-run" };
 	}
 	if (parts[0] === "status") return { kind: "status" };
+	if (parts[0] === "space") return { kind: "space" };
 	if (parts[0] === "compact") return { kind: "compact" };
 	throw new Error(`Unknown /flux command: ${parts[0]}`);
 }
@@ -107,5 +110,6 @@ export const FLUX_HELP = [
 	"  /flux cancel [taskId]",
 	"  /flux gc [dry-run]",
 	"  /flux status",
+	"  /flux space",
 	"  /flux compact",
 ].join("\n");

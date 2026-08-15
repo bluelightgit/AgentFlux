@@ -97,6 +97,10 @@ async function main(): Promise<void> {
 		menuSelections = ["New task · describe outcome"]; menuInputs = ["menu task"];
 		await flux.handler("", ctx);
 		check(pi.sent.at(-1) === "menu task", "直接输入 /flux 可从 Workbench 菜单创建任务");
+		menuSelections = ["Spaces · workflow/community and timeline"];
+		await flux.handler("", ctx);
+		check(notices.some(text => text.includes("active context")), "Workbench 菜单 Spaces 项输出空间总览（活跃上下文+workflow+issues+时间线）");
+		check(notices.some(text => text.includes("recent agent activity")), "space 总览包含最近 Agent 活动时间线");
 		await flux.handler("agent create reviewer-main reviewer", ctx);
 		await flux.handler("agent list", ctx);
 		check(notices.some(text => text.includes("reviewer-main")), "TUI 创建并列出 Persistent Agent");
