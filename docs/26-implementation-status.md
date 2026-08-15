@@ -23,7 +23,7 @@
 | Agent 消息 | wired / offline + live verified | Message V2 支持 direct/group、priority、dedupe、delivery/ACK、cursor、lease redelivery、expiry/backpressure。Main 工具与 TUI 均可查看 Main inbox、Poll 与显式 ACK。 |
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默。任务信封在 input hook 被消费，不进入 session/provider；system prompt 只使用稳定通用协议，不包含 taskId、任务正文或动态预算。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`（dry-run 只读）；运行中 task 阻止正式 GC；终态 Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档；Agent 自动 GC 保留最新 k 个（默认 10）。归档容量上限后置。 |
-| 进程安全 | wired / offline + live verified | 临时目录隔离、provider 失败归一等失败分类，文件锁冲突、Windows 进程树终止、active registry 条目收敛。锁过期判定带持有者进程存活保护（fs-lock.ts，长写不误偷）、孤儿回收带 pid 存活保护、RpcInboxPump 注入批次 watchdog。不做承诺 OS 沙箱。 |
+| 进程安全 | wired / offline + live verified | 临时目录隔离、provider 失败归一等失败分类，文件锁冲突、Windows 进程树终止、active registry 条目收敛。锁过期判定带持有者进程存活保护（fs-lock.ts，长写不误偷）、孤儿回收带 pid 存活保护、RpcInboxPump 注入批次 watchdog。shared-board 遗留 M 模式层已清理（含 ESM require 炸弹）；V1 消息/群组读取损坏容忍（GC 不被单文件损坏阻塞）；DAG checkpoint 损坏 fail-closed 且节点集合顺序无关；质量门子进程树清理。不做承诺 OS 沙箱。 |
 | TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单：任务、Workflows、Agents、Community、Spaces（空间与时间线）、Messages、Fork、Runtime、Maintenance；打字中会提示 slash 参数候选；尾随空格（空参数）不弹出候选列表（pi 0.84.1 双实例限制，getArgumentCompletions 空参数返回 null）。Enter 仍可提交裸命令进入菜单。`/flux agent` 统一展示 Main、subagent 与执行 Agents。 |
 
 ## 本轮测试
