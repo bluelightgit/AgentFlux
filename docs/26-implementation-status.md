@@ -8,48 +8,36 @@
 
 ## 本轮结论
 
-旧 M1–M6、自动路由、experience/sidecar 和重复 Team/Pipeline executor 已从生产 Core 删除，不提供兼容 adapter。生产 API 与 TUI 只接受 Direct、Team、Workflow、Community。
-
-四者的产品语义已经统一为递进能力体系：Direct 是基础，Team 增加动态 Agent，Workflow 与 Community 平级建立在 Team 之上，分别增加固定 DAG 与任务驱动的 Issue/Claim。`agent_decides` 是 Main Agent 的选择入口，不是第五种工作方式。Core 门禁和 TUI 分层菜单已落地；PiDeck 刻意保留 Auto/Direct/Team/Workflow/Community 平级选择，只影响下一项新任务，不要求用户先理解内部继承关系。
+2026-08-15 起执行 docs/32 重设计（阶段一至五已完成并提交）：不再有工作方式模式（WorkStyle 体系、flux_team、agent_decides、模式门禁与固定工作方式模板已删除）。执行在 Main Agent 中直接进行或按需派发子代理；workflow 与 community 是可选执行方法。旧 M1–M6、自动路由、experience/sidecar 和重复 Team/Pipeline executor 已从生产 Core 删除，不提供兼容 adapter。
 
 | 能力 | 状态 | 当前契约与证据 |
 |---|---|---|
-| Direct | wired / offline + live verified | Main Agent 直接执行；DeepSeek V4 Pro smoke 通过。 |
-| Work-style gate | wired / offline verified | 统一矩阵覆盖 Agent、Team、Workflow、Community、Message 与 task 切换；Direct/Team/Workflow/Community 的允许与拒绝组合 fail-closed。固定 task 不能切换工作方式、重复启动 Workflow 或把自身写成 parent。 |
-| Team | wired / offline + live verified | Main Agent 可并行运行最多 5 个 Ephemeral/Persistent Agent 并整合；结构化 Host 调度可精确固定 Agent 数量、目标 workspace、lockFiles、model/provider/thinking、turn/input token 上限与文件完成凭证，不经 Main 二次改写。测试可启用 `low_cost_test` 档，强制 Flash、thinking off、最多 6 轮/12000 input token 且不重试；child started telemetry 在运行期携带 taskId/role/currentTask/model。 |
-| Workflow | wired / offline + live verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本和 Task Registry 关联；DeepSeek V4 Pro planner + 角色 Agent 得到 `DAG Execution: PASSED`。 |
+| 无模式执行 | wired / offline + live verified | 普通对话直接执行（隐式计划）；operatingProtocol 无模式文本；工具 schema 不随运行状态增删。 |
+| 空间互斥 | wired / offline + live verified | active-context.json 权威互斥；flux_agent run（main/community）、executeDAG（workflow）、claimIssue（community）统一注册；任何非目标空间活跃 Agent 拒绝新空间启动，空间内并行允许；崩溃残留由 pid 存活探测 + 1h TTL 清理；/flux space 展示活跃上下文、workflow/community 列表与最近 Agent 活动时间线。 |
+| Workflow | wired / offline + live verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本、delete 和 Task Registry 关联。 |
 | Task history | wired / offline verified | Pi 原生 UUIDv7 作为 sessionId；`.agentflux/runtime/tasks.json` 保存 Task/Execution、operation 与完整父子谱系。Main/TUI 可精确读取历史；continue/reuse/retry/Workflow resume 均创建新的 Task/Execution，父历史保持只读。 |
-| Community | wired / offline + live verified / 部分 | Issue、comment、claim、submit、review（pass/rework）、resolve 已接线；resolve 需全部 claim 收敛（reviewed）；Issue Room 时间线（9 类事件）与 next-actions 确定性推导；active claim 阻止关闭。自治参与者循环与 Proposal/Decision 独立实体后置。 |
-| Ephemeral Agent | wired / offline + live verified | 单次任务结束即进入 done/failed/cancelled；运行中的 child 具有 runId，可通过跨进程 control request 独立停止；Team 中失败/取消的 child 可单体重试，不重跑整个 Team。 |
-| Persistent Agent | wired / offline verified | 模板注册、稳定身份/session、重复调用、idle 恢复、archive 与 GC 已接线。尚未做长期 cache 收益 soak。 |
-| pi session fork | wired / offline verified / limited | `/flux fork` 使用 pi `ctx.fork` 创建真实单分支，并保留原生会话树。一次从 snapshot 并行派生 N 个独立进程尚未实现，不能用 fresh Agent 冒充 fork。 |
-| Agent policy | wired / offline verified | 模板→注册实例→单次运行只能收窄；tools/skills/communication/workspace、revision、effective snapshot、telemetry 与 cache generation 26/26。MCP 非空 allowlist 因 pi 缺少门禁 hook 而 fail-closed。 |
-| Agent 消息 | wired / offline + live verified | Message V2 支持 direct/group、priority、dedupe、delivery/ACK、cursor、lease redelivery、expiry/backpressure。Main 工具与 TUI 均可查看 Main inbox、Poll 与显式 ACK。Dynamic Team child 在结束前主动 poll operator/peer inbox；Persistent runtime 通过生产 RPC inbox pump 在运行中接收 steer/follow-up，并在成功响应后 ACK。 |
-| 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默。任务信封在 input hook 被消费，不进入 session/provider；system prompt 只使用稳定通用协议与四个固定工作方式模板，不包含 taskId、任务正文或动态预算。 |
-| 回收 | wired / offline verified | `/flux gc [dry-run]`；运行中 task 阻止正式 GC；终态 Persistent/shared Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档。归档容量上限后置。 |
-| 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理 18/18。它是宿主门禁，不是 OS 沙箱。 |
-| TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单；Work、Agents、Issues、Fork、Runtime、Maintenance 的子操作均可继续选择。打字中（如 `/flux work d`）会提示 slash 参数候选；尾随空格（空参数）不弹出候选列表，避免建议文本长时间占据输入框区域（2026-08-08 调整：pi 0.84.1 下扩展 bundle 的 pi-tui Editor 与主进程渲染类为双实例，bridge patch 不生效，改为由 getArgumentCompletions 空参数返回 null 关闭列表）。Enter 仍可提交裸命令进入菜单。真实 PTY 已验证。`/flux agent` 统一展示 Main、Persistent 和 execution Agents。 |
-| Desktop | 已放弃（2026-08-12 决策） | PiDeck/Electron 载体、host/contracts API 层与 desktop/ 目录已从仓库移除，不再提供或维护 Desktop 交付物；相关历史验证记录见下方时间线存档。 |
-
-### 工作方式切换与缓存事实
-
-- 工作方式按 task 固定，不是会话级永久状态。TUI 新任务重新选择；steer/follow-up 不切换正在运行的 task。空闲后的下一条消息是新 task；继承历史语义需要 reuse/resume/continue。
-- `agent_decides` 由 Main Agent 阅读稳定协议后自行判断。不调用调度工具即记录为 Direct；调用 Team/Workflow/Community 工具时记录实际选择。没有额外分类器。
-- 固定工作方式会改变 system prompt 的常量末尾模板，因此同方式跨任务完全稳定，跨方式只保证公共前缀稳定，不能保证完整命中。
-- Main 工具 schema 在各方式下保持相同。能力隔离已采用执行入口门禁，而非动态增删工具，以避免工具 schema 频繁破坏缓存。
+| Community | wired / offline + live verified / 部分 | Issue、comment、claim、submit、review（pass/rework）、resolve、delete 已接线；resolve 需全部 claim 收敛（reviewed）；Issue Room 时间线（9 类事件）与 next-actions 确定性推导；active claim 阻止关闭；claim 注册/释放 community 空间。自治参与者循环与 Proposal/Decision 独立实体后置。 |
+| 统一 Agent | wired / offline + live verified | 单一 Agent 实体取代 ephemeral/persistent 双轨：唯一 id + 可重名 name（重名自动 xxx(1) 后缀）、三种创建路径（默认 assistant 模板 / 角色模板 / 会话树分叉继承源会话记忆）、三层作用域（global/project/session，会话结束清理 session 作用域）、run=指令+超时+last(k)（AgentRunResult.assistantMessages）、stop/retry/delete/gc（保留最新 k 个，默认 10）；busy 拒绝，对话排队由 Message V2 承载。 |
+| pi session fork | wired / offline verified / limited | `/flux fork` 使用 pi `ctx.fork` 创建真实单分支，并保留原生会话树；Agent fork 继承源会话文件。一次从 snapshot 并行派生 N 个独立进程尚未实现，不能用 fresh Agent 冒充 fork。 |
+| Agent policy | wired / offline verified | 模板→注册实例→单次运行只能收窄；tools/skills/communication/workspace、revision、effective snapshot、telemetry 与 cache generation。MCP 非空 allowlist 因 pi 缺少门禁 hook 而 fail-closed。 |
+| Agent 消息 | wired / offline + live verified | Message V2 支持 direct/group、priority、dedupe、delivery/ACK、cursor、lease redelivery、expiry/backpressure。Main 工具与 TUI 均可查看 Main inbox、Poll 与显式 ACK。 |
+| 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默。任务信封在 input hook 被消费，不进入 session/provider；system prompt 只使用稳定通用协议，不包含 taskId、任务正文或动态预算。 |
+| 回收 | wired / offline verified | `/flux gc [dry-run]`（dry-run 只读）；运行中 task 阻止正式 GC；终态 Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档；Agent 自动 GC 保留最新 k 个（默认 10）。归档容量上限后置。 |
+| 进程安全 | wired / offline verified | 超时、取消、provider 失败归一化、文件锁冲突、Windows 进程树终止与 active registry 清理。它是宿主门禁，不是 OS 沙箱。 |
+| TUI | wired / offline + interactive verified | `/flux` 为完整分层 Workbench 菜单：任务、Workflows、Agents、Community、Spaces（空间与时间线）、Messages、Fork、Runtime、Maintenance；打字中会提示 slash 参数候选；尾随空格（空参数）不弹出候选列表（pi 0.84.1 双实例限制，getArgumentCompletions 空参数返回 null）。Enter 仍可提交裸命令进入菜单。`/flux agent` 统一展示 Main、subagent 与执行 Agents。 |
 
 ## 本轮测试
 
-`npm run verify` 包含类型检查以及以下确定性测试（22 个测试文件全部纳入 test:unit，2026-08-12 起）：
+`npm run verify` 包含类型检查以及以下确定性测试（23 个测试文件全部纳入 test:unit，2026-08-15 为 548 断言）：
 
-- 工作方式能力矩阵：15/15。
-- Task envelope（含畸形输入防御）：6/6。
+- 无模式执行协议、Task envelope（含畸形输入防御）：12 + 6/6。
 - Task Registry：11/11。
-- Workflow Registry：8/8。
-- Community 状态机（含终态保护）：34/34。
-- Main Agent 自然任务调度协议、工作方式矩阵、Workflow 版本链、消息群组、稳定提示词、历史任务与重试终态：41/41。
-- Agent lifecycle 与精确 Team 完成凭证：27/27。
-- TUI Core（含 footer 通知与信封防御）：40/40。
+- Workflow Registry（含 delete 全版本与运行中拒绝）：10/10。
+- Community 状态机（含终态保护与 deleteIssue）：41/41。
+- Main Agent 自然任务调度协议、Workflow 版本链、消息群组、稳定提示词、历史任务与重试终态：33/33。
+- 统一 Agent 生命周期（三创建路径、重名后缀、GC k 规则、session 清理）：42/42。
+- 空间互斥 active-context（跨空间拒绝/同空间并行/崩溃残留清理/claim-resolve 注册释放）：20/20。
+- TUI Core（含 footer 通知、信封防御与空间总览菜单）：44/44。
 - Lifecycle GC（含 dry-run 无副作用与会话段边界匹配）：11/11。
 - Capability policy：29/29。
 - Message V2 与 cache impact：32/32。
@@ -58,14 +46,14 @@
 - DAG contracts（含质量门 judge 决策与 dagLog sink）：24/24。
 - Persistent RPC inbox pump：15/15。
 - Pricing：26/26。
-- /flux 命令解析与补全（当前契约：message 子命令化、空参数静默）：41/41。
+- /flux 命令解析与补全（当前契约：message 子命令化、空参数静默、space 命令）：36/36。
 - Config 合并：24/24。
 - Prefix layout：11/11。
 - Workflow summary 渲染：24/24。
 - String utils：46/46。
 - Task execution 计划：16/16。
 
-当前 `npm run verify` 合计 364/364，通过后生产构建成功。
+当前 `npm run verify` 合计 548/548（2026-08-15），通过后生产构建成功。
 
 `npm run test:live` 在隔离 fixture 中依次验证。四个用户 prompt 只描述任务特征与目标，不包含 AgentFlux、工作方式名称、工具名或调用指令：
 
