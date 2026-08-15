@@ -37,6 +37,14 @@ export interface RoleDefinition {
 // ──────────────────────────────── 内置模板 ────────────────────────────────
 
 const BUILTIN_ROLES: Record<string, RoleDefinition> = {
+	assistant: {
+		name: "assistant",
+		description: "通用默认子代理（无角色模板时使用）",
+		tools: ["read", "grep", "find", "ls", "bash", "write", "edit"],
+		systemPrompt: "You are a general-purpose assistant Agent. Execute the given task faithfully, inspect the workspace as needed, and report concrete results.",
+		source: "builtin",
+		thinking: "off",
+	},
 	planner: {
 		name: "planner",
 		description: "分析需求, 拆解任务, 输出实现计划",

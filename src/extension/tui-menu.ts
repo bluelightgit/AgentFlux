@@ -86,13 +86,13 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	if (action?.startsWith("Talk")) {
 		const message = await input(ctx, `Talk to ${agent.name}`, "Describe the task, question or follow-up");
 		if (!message) return null;
-		return agent.communication === "current_chat" ? `work direct ${message}` : `agent run ${agent.name} ${message}`;
+		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;
 	}
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Details")) { ctx.ui.notify(agentDetails(agent), "info"); return null; }
 	if (action?.startsWith("Stop")) return `agent stop ${agent.name}`;
 	if (action?.startsWith("Retry")) return `agent retry ${agent.name}`;
-	if (action?.startsWith("Archive")) return `agent archive ${agent.name}`;
+	if (action?.startsWith("Delete")) return `agent delete ${agent.name}`;
 	return null;
 }
 

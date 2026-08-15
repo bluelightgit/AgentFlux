@@ -317,6 +317,7 @@ export interface AgentRunResult {
 		contextTokens: number;
 	};
 	model: string | null;
+	assistantMessages?: string[];
 	errorMessage?: string;
 	retryCount?: number;  // 自动重试次数 (0=首次成功)
 	fallbackModel?: string;  // 降级后的实际使用模型 (如果有)
@@ -926,6 +927,7 @@ export async function runAgent(opts: {
 
 		try {
 			const outputParts: string[] = [];
+			const assistantMessages: string[] = [];
 			let stderrBuf = "";
 			const exitCode = await new Promise<number>((resolveExit) => {
 				const invocation = opts.invocationOverride
@@ -1062,6 +1064,7 @@ export async function runAgent(opts: {
 
 			result.exitCode = exitCode;
 			result.output = outputParts.join("\n").slice(0, 50 * 1024);
+			result.assistantMessages = assistantMessages;
 			// pi may surface a provider failure in message_end but still let its CLI
 			// process exit 0. A result with errorMessage is never a successful run.
 			if (result.exitCode === 0 && result.errorMessage) result.exitCode = 1;
@@ -1264,22 +1267,33 @@ export async function runAgent(opts: {
 }
 
 /** 格式化 subagent 结果为工具返回 content */
-export function formatAgentRunResult(r: AgentRunResult): string {
+/** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
+/** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
+/** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
+export function formatAgentRunResult(r: AgentRunResult, last = 1): string {
 	const hitRate = r.usage.cacheRead / (r.usage.cacheRead + r.usage.input + 1e-9);
 	const retryInfo = r.retryCount && r.retryCount > 0 ? ` · retries=${r.retryCount}` : "";
 	const succeeded = r.exitCode === 0 && !r.errorMessage;
 	const modelInfo = r.fallbackFrom
 		? ` · fallback=${r.fallbackFrom}→${r.fallbackModel ?? r.model ?? "unknown"}`
 		: r.model ? ` · model=${r.model}` : "";
-	return [
+	const messages = r.assistantMessages ?? [];
+	const recent = messages.slice(-last);
+	const lastMessage = recent.length
+		? recent[recent.length - 1]
+		: r.output.trim() ? r.output : r.errorMessage ?? "(no message)";
+	const header = [
 		`[AgentFlux subagent: ${r.agent}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
 		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}`,
 		...(r.errorMessage ? [`error: ${r.errorMessage}`] : []),
 		...(!succeeded ? ["next: choose one bounded action — continue directly without this delegation, select a healthy provider, or stop and report; do not repeat the same failed delegation without a new plan"] : []),
-		...(r.capability && (r.capability.narrowed.length || r.capability.cacheBreakingChanges.length)
-			? [`capability: ${r.capability.narrowed.join(", ") || "template changed"}${r.capability.cacheBreakingChanges.length ? ` · cache-impact=${r.capability.cacheBreakingChanges.join("|")}` : ""}`]
-			: []),
-		``,
-		r.output || "(no output)",
 	].join("\n");
+	if (last > 1 && recent.length > 1) {
+		return [
+			header,
+			`last ${recent.length} message(s):`,
+			...recent.map((message, index) => `--- ${index + 1} ---\n${message.slice(0, 2000)}`),
+		].join("\n");
+	}
+	return `${header}\n\n${lastMessage.slice(0, 8000)}`;
 }

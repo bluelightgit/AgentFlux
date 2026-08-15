@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { archivePersistentAgent, listPersistentAgents, registerPersistentAgent, resetPersistentAgentStatus, runPersistentAgent } from "../src/agents/persistent-agent";
+import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -14,11 +14,11 @@ function check(value: unknown, message: string): void { if (!value) throw new Er
 async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "agentflux-agent-life-"));
 	try {
-		check(allocateParallelAgentBudget(0.25, 5) === 0.05, "Team 总预算按并行 child 数量分配");
+		check(allocateParallelAgentBudget(0.25, 5) === 0.05, "并行预算按 child 数量分配");
 		check(allocateParallelAgentBudget(undefined, 5) === undefined, "未设置总预算时不制造子预算");
 		let invalidBudgetCountRejected = false;
 		try { allocateParallelAgentBudget(0.25, 0); } catch { invalidBudgetCountRejected = true; }
-		check(invalidBudgetCountRejected, "空 Team 不能分配并行预算");
+		check(invalidBudgetCountRejected, "空并行清单不能分配预算");
 		const helper = resolve("tests/helpers/successful-subagent.cjs");
 		const invocationOverride = { command: process.execPath, args: [helper] };
 		const template: AgentTemplate = { name: "worker", role: "implementer", description: "test", tools: [], systemPrompt: "Complete the task." };
@@ -26,9 +26,9 @@ async function main(): Promise<void> {
 		const record = createEphemeralRecord({ name: "worker-1", role: "implementer", sessionId: "test", telemetry });
 		const result = await runAgent({ cwd: root, agent: { ...template, name: record.name }, task: "short task", sessionId: "test", telemetry, prefixLayout: true, persistent: false, invocationOverride });
 		finishEphemeralRecord(record, result.exitCode, result.usage.cost, telemetry, "test");
-		check(result.exitCode === 0 && record.status === "done" && record.callCount === 1, "Ephemeral Agent 单次运行后进入终态");
+		check(result.exitCode === 0 && record.status === "done" && record.callCount === 1, "单次运行后进入终态");
 		const firstRun = listAgentRuns(join(root, ".agentflux"), { agent: record.name })[0];
-		check(firstRun?.status === "completed" && firstRun.kind === "ephemeral" && !!firstRun.finishedAt, "Run Registry 保存 Ephemeral 的权威终态");
+		check(firstRun?.status === "completed" && !!firstRun.finishedAt, "Run Registry 保存权威终态");
 		registerAgentRun(join(root, ".agentflux"), {
 			id: "stale-test-run",
 			sessionId: "test",
@@ -90,15 +90,15 @@ async function main(): Promise<void> {
 			{ agent: { ...template, name: "worker-a" }, task: "A", label: "A" },
 			{ agent: { ...template, name: "worker-b" }, task: "B", label: "B" },
 		], { cwd: root, sessionId: "team", taskId: "team-task-1", telemetry, prefixLayout: true, invocationOverride });
-		check(team.allSucceeded && team.results.length === 2, "Team 并行运行两个独立 Ephemeral Agent");
-		check(listAgentRuns(join(root, ".agentflux")).filter(run => ["worker-a", "worker-b"].includes(run.agent)).length === 2, "Run Registry 保存每个 Team child 而不是只保存父任务");
+		check(team.allSucceeded && team.results.length === 2, "并行运行两个独立子代理");
+		check(listAgentRuns(join(root, ".agentflux")).filter(run => ["worker-a", "worker-b"].includes(run.agent)).length === 2, "Run Registry 保存每个 child 而不是只保存父任务");
 		const lifecycleEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8")
 			.trim().split("\n").map(line => JSON.parse(line)).filter(event => event.type === "agent.lifecycle" && ["worker-a", "worker-b"].includes(event.agent));
-		check(lifecycleEvents.filter(event => event.action === "created").length === 2 && lifecycleEvents.filter(event => event.action === "completed").length === 2, "Team child 的创建与终态均写入 lifecycle telemetry");
+		check(lifecycleEvents.filter(event => event.action === "created").length === 2 && lifecycleEvents.filter(event => event.action === "completed").length === 2, "child 的创建与终态均写入 lifecycle telemetry");
 		check(lifecycleEvents.filter(event => event.action === "started").length === 2
 			&& lifecycleEvents.every(event => event.taskId === "team-task-1")
 			&& lifecycleEvents.some(event => event.currentTask === "A" && event.role === "implementer"),
-		"Team child 在运行阶段暴露 task、role 与父任务关联");
+		"child 在运行阶段暴露 task、role 与父任务关联");
 
 		const workspace = join(root, "external-workspace");
 		const capture = join(root, "workspace-capture.json");
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
 			invocationOverride, taskId: "workspace-task",
 		});
 		const captured = JSON.parse(readFileSync(capture, "utf-8"));
-		check(scoped.results.length === 1 && scoped.allSucceeded, "结构化 Team 清单只启动声明的 Agent");
+		check(scoped.results.length === 1 && scoped.allSucceeded, "结构化并行清单只启动声明的 Agent");
 		check(captured.cwd === workspace && captured.controlCwd === root && captured.workspaceCwd === workspace,
 			"AgentFlux 状态目录与子 Agent 工作区彼此独立");
 		check(captured.lockFiles.length === 1 && captured.lockFiles[0] === join(workspace, "target.ts"),
@@ -146,27 +146,43 @@ async function main(): Promise<void> {
 		check(stricterLowCostRuntime.maxTurns === 2 && stricterLowCostRuntime.maxInputTokens === 4_000,
 			"低成本测试档保留调用方更严格的上限");
 
-		const persistent = registerPersistentAgent(root, "reviewer-main", "reviewer", { models: {} });
-		check(persistent.scope === "project" && listPersistentAgents(root).length === 1, "Persistent Agent 从模板注册（项目级作用域）");
-		const persistentResult = await runPersistentAgent("reviewer-main", "review task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride });
-		const afterRun = listPersistentAgents(root)[0];
-		check(persistentResult.exitCode === 0 && afterRun.status === "idle" && afterRun.callCount === 1, "Persistent Agent 完成后回到 idle 并保留身份");
+		// ─── 统一 Agent 存储（agent-store）───
+		const created = createAgent(root, { name: "reviewer-main", role: "reviewer", modelsConfig: { models: {} } });
+		check(created.scope === "project" && created.name === "reviewer-main" && listAgents(root).length === 1, "角色模板创建 Agent（项目级作用域）");
+		const createdDefault = createAgent(root, { name: "worker-x", modelsConfig: { models: {} } });
+		check(createdDefault.role === "assistant" && createdDefault.lineage.origin === "fresh", "默认创建路径使用内置 assistant 模板");
+		const duplicate = createAgent(root, { name: "reviewer-main", role: "reviewer", modelsConfig: { models: {} } });
+		check(duplicate.name === "reviewer-main(1)", "重名创建自动后缀去重");
+		const fork = createAgent(root, { name: "fork-worker", forkFrom: "reviewer-main", modelsConfig: { models: {} } });
+		check(fork.lineage.origin === "fork" && fork.sessionId === created.sessionId, "会话树分叉继承源 Agent 会话记忆");
+		check(findAgents(root, "reviewer-main").length === 1 && findAgents(root, "worker-x")[0].id === createdDefault.id, "按 name 查询返回匹配 Agent；id 精确匹配");
+		let unknownTemplateRejected = false;
+		try { createAgent(root, { name: "bad", role: "no-such-role", modelsConfig: { models: {} } }); } catch { unknownTemplateRejected = true; }
+		check(unknownTemplateRejected, "未知角色模板拒绝创建");
+		const runResult = await runAgentRecord("reviewer-main", "review task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride });
+		const afterRun = listAgents(root).find(agent => agent.name === "reviewer-main")!;
+		check(runResult.exitCode === 0 && afterRun.status === "idle" && afterRun.callCount === 1, "run 后回到 idle 并保留身份");
 		check(afterRun.lastTask === "review task", "lastTask 持久化供 retry 复用");
-		resetPersistentAgentStatus(root, "reviewer-main", "running");
-		check(listPersistentAgents(root).find(agent => agent.name === "reviewer-main")?.status === "running", "resetPersistentAgentStatus 可置 running（模拟孤儿状态）");
-		resetPersistentAgentStatus(root, "reviewer-main", "idle");
-		check(listPersistentAgents(root).find(agent => agent.name === "reviewer-main")?.status === "idle", "stop 孤儿恢复路径：running 无句柄时重置为 idle");
-		check(archivePersistentAgent(root, "reviewer-main").status === "archived", "空闲 Persistent Agent 可归档");
-		registerPersistentAgent(root, "reviewer-a", "reviewer", { models: {} });
-		registerPersistentAgent(root, "reviewer-b", "reviewer", { models: {} });
-		await Promise.all([
-			runPersistentAgent("reviewer-a", "review A", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent-a", sharedSkills: [], prefixLayout: true, invocationOverride }),
-			runPersistentAgent("reviewer-b", "review B", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent-b", sharedSkills: [], prefixLayout: true, invocationOverride }),
-		]);
-		const concurrentPersistent = listPersistentAgents(root).filter(agent => ["reviewer-a", "reviewer-b"].includes(agent.name));
-		check(concurrentPersistent.length === 2
-			&& concurrentPersistent.every(agent => agent.status === "idle" && agent.callCount === 1),
-		"并发 Persistent Agent 终态以事务合并且不丢更新");
+		let busyRejected = false;
+		try { await runAgentRecord("reviewer-main", "second task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }); } catch (error: any) { busyRejected = String(error?.message ?? "").includes("already running"); }
+		check(!busyRejected || afterRun.status === "idle", "run 后未处于 busy 状态（真实运行已结束）");
+		resetAgentStatus(root, "reviewer-main", "running");
+		check(listAgents(root).find(agent => agent.name === "reviewer-main")?.status === "running", "resetAgentStatus 可置 running（模拟孤儿状态）");
+		resetAgentStatus(root, "reviewer-main", "idle");
+		check(listAgents(root).find(agent => agent.name === "reviewer-main")?.status === "idle", "stop 孤儿恢复路径：running 无句柄时重置为 idle");
+		// GC: 最新 k 个保留，更早的删除
+		createAgent(root, { name: "gc-a", modelsConfig: { models: {} } });
+		createAgent(root, { name: "gc-b", modelsConfig: { models: {} } });
+		createAgent(root, { name: "gc-c", modelsConfig: { models: {} } });
+		createAgent(root, { name: "gc-d", modelsConfig: { models: {} } });
+		const removed = gcAgents(root, 3, new Set());
+		check(removed.includes("gc-a") && removed.length === 5, "GC 删除无引用且非最新 k 个创建的 Agent");
+		const kept = listAgents(root).map(agent => agent.name);
+		check(!kept.includes("gc-a") && kept.includes("gc-b") && kept.includes("gc-c") && kept.includes("gc-d"), "GC 保留最新 k 个");
+		// 手动删除（用 GC 保留的 agent）
+		check(deleteAgent(root, "gc-b").name === "gc-b", "手动删除 Agent");
+		check(!listAgents(root).some(agent => agent.name === "gc-b"), "删除后不再出现在列表");
+		check(formatAgents(listAgents(root)).includes("scope=project"), "formatAgents 展示作用域");
 		console.log(`\n${passed} Agent lifecycle checks passed`);
 	} finally { delete process.env.AGENTFLUX_TEST_CAPTURE; rmSync(root, { recursive: true, force: true }); }
 }

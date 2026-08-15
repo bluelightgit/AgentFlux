@@ -74,11 +74,11 @@ async function main(): Promise<void> {
 		await emit(pi, "before_agent_start", { prompt: failedPrompt, systemPrompt: "base", systemPromptOptions: {} }, ctx);
 		// 无模式门禁: 普通任务中 Agent 管理、Community、Message、Workflow 均可直接使用
 		const agentList = await pi.tools.get("flux_agent").execute("agent-list", { action: "list" });
-		check(agentList.content[0].text.includes("Persistent Agents") || agentList.content[0].text.includes("No"), "普通任务中可直接使用 Agent 管理");
+		check(agentList.content[0].text.includes("Agents") || agentList.content[0].text.includes("No"), "普通任务中可直接使用 Agent 管理");
 		await checkRejects(
-			() => pi.tools.get("flux_agent").execute("agent-archive", { action: "archive", name: "missing" }),
+			() => pi.tools.get("flux_agent").execute("agent-delete", { action: "delete", agent: "missing" }),
 			/not found/,
-			"不存在的 Agent 归档显式报错",
+			"不存在的 Agent 删除显式报错",
 		);
 		const createdIssue = await pi.tools.get("flux_issue").execute("issue-create", { action: "create", title: "普通任务创建 issue" });
 		check(createdIssue.details.ok === true, "普通任务中可直接创建 Community Issue");
@@ -101,7 +101,7 @@ async function main(): Promise<void> {
 		await emit(pi, "input", { text: failedAgentPrompt, images: undefined }, ctx);
 		await emit(pi, "before_agent_start", { prompt: "运行一个配置错误的 Agent", systemPrompt: "base", systemPromptOptions: {} }, ctx);
 		await checkRejects(
-			() => pi.tools.get("flux_agent").execute("failed-agent", { action: "run_ephemeral", name: "missing-agent", role: "missing-role", task: "must fail" }),
+			() => pi.tools.get("flux_agent").execute("failed-agent", { action: "create", name: "missing-agent", role: "missing-role" }),
 			/Unknown Agent template/,
 			"单 Agent 配置失败会显式返回错误",
 		);

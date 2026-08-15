@@ -3,9 +3,8 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { createEphemeralRecord, finishEphemeralRecord, startEphemeralRecord } from "./agents/agent-lifecycle";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { archivePersistentAgent, formatPersistentAgents, listPersistentAgents, registerPersistentAgent, resetPersistentAgentStatus, runPersistentAgent, type PersistentAgentContext } from "./agents/persistent-agent";
+import { createAgent, deleteAgent, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, resolveIssue, reviewClaim, submitClaim } from "./core/community";
@@ -207,23 +206,20 @@ export default function agentFlux(pi: ExtensionAPI) {
 		return implicitPlan;
 	}
 
-	const persistentContext = (maxCostUsd = runtime?.config.budget.max_cost_per_task): PersistentAgentContext => {
+	const persistentContext = (maxCostUsd = runtime?.config.budget.max_cost_per_task): AgentRunContext => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
 		return { cwd: runtime.cwd, modelsConfig: runtime.modelsConfig, telemetry: telemetry ?? undefined, pricing: runtime.pricing, sessionId, taskId: ensureImplicitPlan()?.taskId, executionId: ensureImplicitPlan()?.executionId, sharedSkills: runtime.sharedSkills, prefixLayout: runtime.config.cache.prefix_layout === "static_first", timeoutMs: runtime.config.budget.max_wall_clock_seconds * 1000, maxCostUsd };
 	};
 
 	const tuiMenuData = (ctx: any): FluxTuiMenuData => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
-		const persistent = listPersistentAgents(runtime.cwd);
-		const persistentNames = new Set(persistent.map(agent => agent.name));
+		const agents = listAgents(runtime.cwd);
 		const board = new SharedBoard(runtime.fluxDir);
-		const shared = board.listAgents().filter(agent => agent.name !== "main" && !persistentNames.has(agent.name));
 		const mainInbox = new MessageBus(runtime.fluxDir).peek("main");
 		return {
 			agents: [
 				{ name: "main", kind: "main", role: "lead", status: currentPlan || implicitTask ? "running" : "idle", model: ctx.model?.id, provider: ctx.model?.provider, sessionId, callCount: turnIndex, totalCostUsd: 0, capabilityGeneration: 1, lastTask: currentPlan?.task ?? implicitTask?.task, communication: "current_chat" },
-				...persistent.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const })),
-				...shared.map(agent => ({ name: agent.name, kind: "subagent" as const, role: agent.role, status: agent.status, model: agent.model, provider: agent.provider, sessionId: agent.sessionFile, callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, lastTask: agent.currentTask, communication: ["idle", "running", "blocked"].includes(agent.status) ? "message" as const : "none" as const })),
+				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const })),
 			],
 			roles: [...loadAllRoles(runtime.cwd, runtime.modelsConfig).keys()].sort(),
 			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })) })),
@@ -248,17 +244,6 @@ export default function agentFlux(pi: ExtensionAPI) {
 			})),
 		};
 	};
-
-	async function runEphemeral(role: string, name: string, task: string, signal?: AbortSignal, lockFiles?: string[], taskId?: string): Promise<AgentRunResult> {
-		if (!runtime) throw new Error("AgentFlux is not initialized");
-		const template = templateFromRole(runtime, role, name);
-		const runId = `subagent-${randomUUID()}`;
-		const record = createEphemeralRecord({ name, role, sessionId, taskId, runId, currentTask: task.slice(0, 200), model: template.model, telemetry: telemetry ?? undefined });
-		startEphemeralRecord(record, { sessionId, taskId, runId, currentTask: task, model: template.model, telemetry: telemetry ?? undefined });
-		const result = await runAgent({ cwd: runtime.cwd, agent: template, task, sessionId, telemetry: telemetry ?? undefined, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, persistent: false, timeoutMs: runtime.config.budget.max_wall_clock_seconds * 1000, maxRetries: 1, maxCostUsd: runtime.config.budget.max_cost_per_task, signal, lockFiles, taskId, executionId: ensureImplicitPlan()?.executionId, runId });
-		finishEphemeralRecord(record, result.exitCode, result.usage.cost, telemetry ?? undefined, sessionId, taskId, runId);
-		return result;
-	}
 
 	async function runWorkflow(
 		plan: TaskExecutionPlan,
@@ -473,65 +458,102 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_agent",
 		label: "Agent",
-		description: "Create, run, stop, retry, list or archive an Agent. Ephemeral Agents terminate after one task; persistent Agents keep a stable identity and session.",
-		parameters: Type.Object({ action: Type.Union([Type.Literal("run_ephemeral"), Type.Literal("create_persistent"), Type.Literal("run_persistent"), Type.Literal("retry"), Type.Literal("stop"), Type.Literal("list"), Type.Literal("archive")]), name: Type.Optional(Type.String()), role: Type.Optional(Type.String()), task: Type.Optional(Type.String()), lockFiles: Type.Optional(Type.Array(Type.String())) }),
-		async execute(_id, params, signal) {
+		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run returns the Agent's last message (last(k) for more). One project-level execution at a time: a running Agent blocks starting a Workflow or Community run.",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
+			name: Type.Optional(Type.String()),
+			agent: Type.Optional(Type.String()),
+			role: Type.Optional(Type.String()),
+			forkFrom: Type.Optional(Type.String()),
+			scope: Type.Optional(Type.Union([Type.Literal("global"), Type.Literal("project"), Type.Literal("session")])),
+			task: Type.Optional(Type.String()),
+			last: Type.Optional(Type.Number()),
+			keepLatestK: Type.Optional(Type.Number()),
+		}),
+		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
-			if (params.action === "list") return { content: [{ type: "text", text: formatPersistentAgents(listPersistentAgents(runtime.cwd)) }], details: { ok: true } };
-			if (!params.name) throw new Error(`${params.action} requires name`);
-			if (params.action === "create_persistent") { if (!params.role) throw new Error("create_persistent requires role"); const agent = registerPersistentAgent(runtime.cwd, params.name, params.role, runtime.modelsConfig); telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: "template", status: "idle", action: "created" }); return { content: [{ type: "text", text: `Created persistent Agent ${agent.name} (${agent.role})` }], details: { ok: true } }; }
-			if (params.action === "archive") { const agent = archivePersistentAgent(runtime.cwd, params.name); telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" }); return { content: [{ type: "text", text: `Archived ${agent.name}` }], details: { ok: true } }; }
+			const context = persistentContext();
+			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd)) }], details: { ok: true } };
+			if (params.action === "gc") {
+				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
+				return { content: [{ type: "text", text: removed.length ? `GC removed ${removed.length} Agent(s): ${removed.join(", ")}` : "GC: no Agents to remove." }], details: { ok: true, removed } };
+			}
+			if (params.action === "create") {
+				if (!params.name) throw new Error("create requires name");
+				let agent;
+				try {
+					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+				} catch (error: any) {
+					executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+					throw error;
+				}
+				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role, forkPoint: agent.lineage.forkPoint });
+				return { content: [{ type: "text", text: `Created Agent ${agent.name} (${agent.role}, ${agent.scope})${agent.lineage.origin === "fork" ? ` · fork of ${params.forkFrom}` : ""}` }], details: { ok: true, agent: { name: agent.name, role: agent.role, scope: agent.scope } } };
+			}
+			if (params.action === "delete") {
+				if (!params.agent) throw new Error("delete requires agent");
+				const agent = deleteAgent(runtime.cwd, params.agent);
+				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
+				return { content: [{ type: "text", text: `Deleted ${agent.name}` }], details: { ok: true } };
+			}
 			if (params.action === "stop") {
-				const record = listPersistentAgents(runtime.cwd).find(agent => agent.name === params.name);
-				if (!record || record.status === "archived") throw new Error(`Persistent Agent not found: ${params.name}`);
-				const controller = persistentControllers.get(params.name);
+				if (!params.agent) throw new Error("stop requires agent");
+				const matches = findAgents(runtime.cwd, params.agent);
+				if (matches.length === 0) throw new Error(`Agent not found: ${params.agent}`);
+				const record = matches[0];
+				const controller = persistentControllers.get(record.name);
 				if (controller) {
 					controller.abort();
-					return { content: [{ type: "text", text: `Stop requested for ${params.name}` }], details: { ok: true } };
+					return { content: [{ type: "text", text: `Stop requested for ${record.name}` }], details: { ok: true } };
 				}
 				if (record.status === "running") {
-					resetPersistentAgentStatus(runtime.cwd, params.name, "idle");
-					return { content: [{ type: "text", text: `${params.name} was marked running without a live run; status reset to idle.` }], details: { ok: true } };
+					resetAgentStatus(runtime.cwd, record.name, "idle");
+					return { content: [{ type: "text", text: `${record.name} was marked running without a live run; status reset to idle.` }], details: { ok: true } };
 				}
-				throw new Error(`Persistent Agent is not running: ${params.name}`);
+				throw new Error(`Agent is not running: ${record.name}`);
 			}
-			const isPersistentRun = params.action === "run_persistent" || params.action === "retry";
-			const record = isPersistentRun ? listPersistentAgents(runtime.cwd).find(agent => agent.name === params.name && agent.status !== "archived") : undefined;
-			if (isPersistentRun && !record) throw new Error(`Persistent Agent not found: ${params.name}`);
-			let task = params.task;
-			if (params.action === "retry") {
-				task = task ?? record?.lastTask ?? "";
-				if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${params.name})`);
+			if (params.action === "run" || params.action === "retry") {
+				if (!params.agent) throw new Error(`${params.action} requires agent`);
+				let matches = findAgents(runtime.cwd, params.agent);
+				if (params.action === "run" && matches.length === 0) {
+					const agent = createAgent(runtime.cwd, { name: params.agent, role: params.role, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
+					matches = findAgents(runtime.cwd, agent.name);
+				}
+				let task = params.task;
+				if (params.action === "retry") {
+					task = task ?? matches[0]?.lastTask ?? "";
+					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${matches[0]?.name ?? params.agent})`);
+				}
+				if (!task) throw new Error(`${params.action} requires task`);
+				const controller = new AbortController();
+				const forwardAbort = () => controller.abort();
+				persistentControllers.set(matches[0].name, controller);
+				signal?.addEventListener("abort", forwardAbort, { once: true });
+				let result: AgentRunResult;
+				try {
+					result = await runAgentRecord(matches[0].name, task, context, controller.signal);
+				} catch (error: any) {
+					executionOutcome = controller.signal.aborted
+						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
+						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+					throw error;
+				} finally {
+					signal?.removeEventListener("abort", forwardAbort);
+					persistentControllers.delete(matches[0].name);
+				}
+				if (result.exitCode !== 0 || result.errorMessage) {
+					executionOutcome = result.exitCode === 130 || controller.signal.aborted
+						? { action: "cancelled", status: "cancelled", error: result.errorMessage ?? "Agent cancelled", costUsd: result.usage.cost }
+						: result.exitCode === 124
+							? { action: "failed", status: "timeout", error: result.errorMessage ?? "Agent timed out", costUsd: result.usage.cost }
+							: { action: "failed", status: "failure", error: result.errorMessage ?? `Agent exited ${result.exitCode}`, costUsd: result.usage.cost };
+				} else {
+					executionOutcome = { action: "completed", status: "success", costUsd: result.usage.cost };
+				}
+				return { content: [{ type: "text", text: formatAgentRunResult(result, Math.max(1, params.last ?? 1)) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
 			}
-			if (!task) throw new Error(`${params.action} requires task`);
-			let result: AgentRunResult;
-			const controller = new AbortController();
-			const forwardAbort = () => controller.abort();
-			if (isPersistentRun) persistentControllers.set(params.name, controller);
-			signal?.addEventListener("abort", forwardAbort, { once: true });
-			try {
-				result = params.action === "run_ephemeral"
-					? await runEphemeral(params.role ?? params.name, params.name, task, controller.signal, params.lockFiles, ensureImplicitPlan()?.taskId)
-					: await runPersistentAgent(params.name, task, persistentContext(), controller.signal);
-			} catch (error: any) {
-				executionOutcome = controller.signal.aborted
-					? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
-					: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
-				throw error;
-			} finally {
-				signal?.removeEventListener("abort", forwardAbort);
-				if (isPersistentRun) persistentControllers.delete(params.name);
-			}
-			if (result.exitCode !== 0 || result.errorMessage) {
-				executionOutcome = result.exitCode === 130 || controller.signal.aborted
-					? { action: "cancelled", status: "cancelled", error: result.errorMessage ?? "Agent cancelled", costUsd: result.usage.cost }
-					: result.exitCode === 124
-						? { action: "failed", status: "timeout", error: result.errorMessage ?? "Agent timed out", costUsd: result.usage.cost }
-						: { action: "failed", status: "failure", error: result.errorMessage ?? `Agent exited ${result.exitCode}`, costUsd: result.usage.cost };
-			} else {
-				executionOutcome = { action: "completed", status: "success", costUsd: result.usage.cost };
-			}
-			return { content: [{ type: "text", text: formatAgentRunResult(result) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
+			throw new Error("Usage: flux_agent list|create|run|stop|retry|delete|gc");
 		},
 	});
 
@@ -728,7 +750,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
-			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatPersistentAgents(listPersistentAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
+			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
 			if (command.kind === "task") {
 				const [action = "list", selector, ...taskParts] = command.args;
 				if (action === "list") return notify(ctx, formatTasks(listTasks(runtime.fluxDir, sessionId).slice(0, 10)), "info", 12);
@@ -838,35 +860,43 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()] })), "info", 12);
 			if (command.kind === "cancel") { const ids = command.taskId ? [command.taskId] : [...activeRuns.keys()]; for (const id of ids) activeRuns.get(id)?.abort(); return notify(ctx, ids.length ? `Cancellation requested: ${ids.join(", ")}` : "No active runs."); }
 			if (command.kind === "agent") {
-				const [action, name, roleOrTask, ...rest] = command.args;
-				if (action === "list") return notify(ctx, formatPersistentAgents(listPersistentAgents(runtime.cwd)), "info", 12);
-				if (action === "create" && name && roleOrTask) {
-					const agent = registerPersistentAgent(runtime.cwd, name, roleOrTask, runtime.modelsConfig);
-					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: "template", status: "idle", action: "created" });
-					return notify(ctx, `Created ${agent.name}`);
+				const [action, subject, ...rest] = command.args;
+				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd)), "info", 12);
+				if (action === "create" && subject) {
+					const role = rest[0];
+					const agent = createAgent(runtime.cwd, { name: subject, role, scope: rest.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
+					return notify(ctx, `Created ${agent.name} (${agent.role}, ${agent.scope})`);
 				}
-				if (action === "archive" && name) {
-					const agent = archivePersistentAgent(runtime.cwd, name);
+				if (action === "run" && subject) {
+					const task = rest.join(" ").trim();
+					if (!task) throw new Error("Usage: /flux agent run <name> <task>");
+					return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext()), 1), "info", 12);
+				}
+				if (action === "retry" && subject) {
+					const record = findAgents(runtime.cwd, subject)[0];
+					const task = rest.join(" ").trim() || record?.lastTask;
+					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${subject})`);
+					return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext()), 1), "info", 12);
+				}
+				if (action === "stop" && subject) {
+					const record = findAgents(runtime.cwd, subject)[0];
+					if (!record) throw new Error(`Agent not found: ${subject}`);
+					const controller = persistentControllers.get(record.name);
+					if (controller) { controller.abort(); return notify(ctx, `Stop requested for ${record.name}`, "info"); }
+					if (record.status === "running") { resetAgentStatus(runtime.cwd, record.name, "idle"); return notify(ctx, `${record.name} was marked running without a live run; status reset to idle.`, "info"); }
+					throw new Error(`Agent is not running: ${record.name}`);
+				}
+				if (action === "delete" && subject) {
+					const agent = deleteAgent(runtime.cwd, subject);
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
-					return notify(ctx, `Archived ${agent.name}`);
+					return notify(ctx, `Deleted ${agent.name}`);
 				}
-				if (action === "run" && name && roleOrTask) return notify(ctx, formatAgentRunResult(await runPersistentAgent(name, [roleOrTask, ...rest].join(" "), persistentContext())), "info", 12);
-				if (action === "retry" && name) {
-					const record = listPersistentAgents(runtime.cwd).find(agent => agent.name === name && agent.status !== "archived");
-					if (!record) throw new Error(`Persistent Agent not found: ${name}`);
-					const task = [roleOrTask, ...rest].filter(Boolean).join(" ") || record.lastTask;
-					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${name})`);
-					return notify(ctx, formatAgentRunResult(await runPersistentAgent(name, task, persistentContext())), "info", 12);
+				if (action === "gc") {
+					const removed = gcAgents(runtime.cwd, Number(subject) || 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
+					return notify(ctx, removed.length ? `GC removed ${removed.length} Agent(s): ${removed.join(", ")}` : "GC: no Agents to remove.", "info");
 				}
-				if (action === "stop" && name) {
-					const record = listPersistentAgents(runtime.cwd).find(agent => agent.name === name);
-					if (!record || record.status === "archived") throw new Error(`Persistent Agent not found: ${name}`);
-					const controller = persistentControllers.get(name);
-					if (controller) { controller.abort(); return notify(ctx, `Stop requested for ${name}`, "info"); }
-					if (record.status === "running") { resetPersistentAgentStatus(runtime.cwd, name, "idle"); return notify(ctx, `${name} was marked running without a live run; status reset to idle.`, "info"); }
-					throw new Error(`Persistent Agent is not running: ${name}`);
-				}
-				throw new Error("Usage: /flux agent list|create <name> <role>|run <name> <task>|retry <name> [task]|stop <name>|archive <name>");
+				throw new Error("Usage: /flux agent list|create <name> [role]|run <name> <task>|retry <name> [task]|stop <name>|delete <name>|gc [k]");
 			}
 			if (command.kind === "issue") {
 				const [action, id, ...rest] = command.args;

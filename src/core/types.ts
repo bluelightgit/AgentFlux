@@ -24,6 +24,7 @@ export interface AgentRecord {
 	model?: string;
 	provider?: string;
 	sessionId?: string;
+	ownerSessionId?: string;
 	createdAt: string;
 	updatedAt: string;
 	lastTask?: string;
