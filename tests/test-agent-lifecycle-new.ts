@@ -147,7 +147,7 @@ async function main(): Promise<void> {
 			"低成本测试档保留调用方更严格的上限");
 
 		const persistent = registerPersistentAgent(root, "reviewer-main", "reviewer", { models: {} });
-		check(persistent.kind === "persistent" && listPersistentAgents(root).length === 1, "Persistent Agent 从模板注册");
+		check(persistent.scope === "project" && listPersistentAgents(root).length === 1, "Persistent Agent 从模板注册（项目级作用域）");
 		const persistentResult = await runPersistentAgent("reviewer-main", "review task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride });
 		const afterRun = listPersistentAgents(root)[0];
 		check(persistentResult.exitCode === 0 && afterRun.status === "idle" && afterRun.callCount === 1, "Persistent Agent 完成后回到 idle 并保留身份");

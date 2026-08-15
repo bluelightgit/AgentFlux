@@ -1,8 +1,7 @@
 import { DEFAULT_PRICING_CONFIG, type PricingConfig } from "./pricing";
 
-export type WorkStyle = "direct" | "team" | "workflow" | "community";
-export type WorkStyleSelection = WorkStyle | "agent_decides";
-export type AgentKind = "main" | "ephemeral" | "persistent";
+export type AgentScope = "global" | "project" | "session";
+export type AgentKind = "main" | "subagent";
 export type AgentOrigin = "fresh" | "template" | "fork";
 export type AgentStatus = "idle" | "running" | "blocked" | "done" | "failed" | "cancelled" | "archived";
 
@@ -18,7 +17,7 @@ export interface AgentLineage {
 export interface AgentRecord {
 	id: string;
 	name: string;
-	kind: AgentKind;
+	scope: AgentScope;
 	role: string;
 	status: AgentStatus;
 	lineage: AgentLineage;
@@ -81,7 +80,6 @@ export interface CommunicationRuntimeConfig {
 }
 
 export interface FluxConfig {
-	default_work_style: WorkStyleSelection;
 	cache: CacheConfig;
 	context: ContextConfig;
 	budget: BudgetConfig;
@@ -98,7 +96,6 @@ export interface QualityGateConfig {
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {
-	default_work_style: "agent_decides",
 	cache: { prefix_layout: "static_first", cache_breaker_actions: [], target_hit_rate: 0.85 },
 	context: { compaction_threshold: 0.70 },
 	budget: { max_cost_per_task: 2, max_iterations: 5, max_wall_clock_seconds: 600 },
@@ -124,7 +121,6 @@ export const DEFAULT_CONFIG: FluxConfig = {
 };
 
 export interface FluxRuntimeState {
-	workStyle: WorkStyle;
 	turnIndex: number;
 	branch: string | null;
 	cache: CacheStats;

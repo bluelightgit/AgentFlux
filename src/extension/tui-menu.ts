@@ -1,6 +1,6 @@
 export interface TuiAgentInfo {
 	name: string;
-	kind: "main" | "persistent" | "ephemeral";
+	kind: "main" | "subagent";
 	role: string;
 	status: string;
 	model?: string;
@@ -26,7 +26,7 @@ export interface FluxTuiMenuData {
 	issues: TuiIssueInfo[];
 	forkPoints: Array<{ entryId: string; preview: string }>;
 	activeTaskIds: string[];
-	tasks?: Array<{ id: string; task: string; workStyle: string; status: string; operation: string }>;
+	tasks?: Array<{ id: string; task: string; status: string; operation: string }>;
 	workflows?: Array<{ id: string; name: string; version: number; description: string; nodeCount: number }>;
 	groups?: Array<{ id: string; name: string; type: string; members: string[]; description?: string }>;
 	mainInbox?: Array<{ id: string; from: string; channel: string; content: string; priority: string; status: string }>;
@@ -75,9 +75,9 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	ctx.ui.notify(agentDetails(agent), "info");
 	const actions = ["Details · show information"];
 	if (agent.communication === "current_chat") actions.unshift("Talk · continue in current Main conversation");
-	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Persistent session");
+	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Agent session");
 	if (agent.communication === "message") actions.unshift("Message · send to active Agent");
-	if (agent.kind === "persistent" && agent.status !== "archived") {
+	if (agent.kind === "subagent" && agent.status !== "archived") {
 		if (agent.status === "running") actions.push("Stop · abort the running run");
 		else if (agent.lastTask) actions.push("Retry · re-run last task");
 		actions.push("Archive · retire this Agent");
@@ -182,39 +182,18 @@ export async function showForkTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<
 	return candidate ? `fork ${candidate.entryId}` : null;
 }
 
-export async function showWorkTuiMenu(ctx: any): Promise<string | null | undefined> {
-	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
-	const level = await select(ctx, "Work style", [
-		"Direct · Main Agent only",
-		"Multi-Agent · Team, Workflow or Community",
-	]);
-	if (!level) return null;
-	let workStyle = "direct";
-	if (level.startsWith("Multi-Agent")) {
-		const topology = await select(ctx, "Multi-Agent topology", [
-			"Team · dynamic delegation",
-			"Workflow · Team plus fixed dependency DAG",
-			"Community · Team plus Issue and Claim collaboration",
-		]);
-		if (!topology) return null;
-		workStyle = topology.split(" ·")[0].toLowerCase();
-	}
-	const task = await input(ctx, `${workStyle} task`, "Describe the outcome and acceptance criteria");
-	return task ? `work ${workStyle} ${task}` : null;
-}
-
 export async function showTaskTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const tasks = data.tasks ?? [];
 	if (tasks.length === 0) { ctx.ui.notify("No AgentFlux tasks.", "info"); return null; }
-	const labels = tasks.map(task => `${task.status} · ${task.workStyle} · ${task.task.slice(0, 72)}`);
+	const labels = tasks.map(task => `${task.status} · ${task.task.slice(0, 72)}`);
 	const selected = await select(ctx, "Task history", labels);
 	const task = tasks.find((candidate, index) => labels[index] === selected);
 	if (!task) return null;
-	const action = await select(ctx, task.task, ["Show", "Continue", "Reuse work style", "Resume interrupted execution"]);
+	const action = await select(ctx, task.task, ["Show", "Continue", "Reuse", "Resume interrupted execution"]);
 	if (action === "Show") return `task show ${task.id}`;
 	if (action === "Continue") return `task continue ${task.id}`;
-	if (action === "Reuse work style") return `task reuse ${task.id}`;
+	if (action === "Reuse") return `task reuse ${task.id}`;
 	if (action === "Resume interrupted execution") return `task resume ${task.id}`;
 	return null;
 }
@@ -248,13 +227,16 @@ export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Prom
 export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const selected = await select(ctx, "AgentFlux Workbench", [
-		"Work · start a task", "Tasks · reuse, resume or continue", "Workflows · saved fixed DAGs", "Agents · inspect, create or talk", "Community · Issues and Claims",
+		"New task · describe outcome", "Tasks · reuse, resume or continue", "Workflows · saved fixed DAGs", "Agents · inspect, create or talk", "Community · Issues and Claims",
 		"Messages · groups and Main inbox", "Fork · branch from session context", "Runtime · status or cancel", "Context · compaction advice",
 		"Maintenance · lifecycle GC", "Help · command reference",
 	]);
 	if (!selected) return null;
+	if (selected.startsWith("New task")) {
+		const task = await input(ctx, "new task", "Describe the outcome and acceptance criteria");
+		return task ? `task new ${task}` : null;
+	}
 	if (selected.startsWith("Workflows")) return showWorkflowTuiMenu(ctx, data);
-	if (selected.startsWith("Work")) return showWorkTuiMenu(ctx);
 	if (selected.startsWith("Tasks")) return showTaskTuiMenu(ctx, data);
 	if (selected.startsWith("Agents")) return showAgentTuiMenu(ctx, data);
 	if (selected.startsWith("Community")) return showIssueTuiMenu(ctx, data);

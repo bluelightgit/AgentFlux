@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "./json-store";
 import type { TaskOperation, TaskExecutionPlan } from "./task-execution";
-import type { WorkStyle } from "./types";
 import { assertSafeOpaqueId } from "./safe-path";
 
 export type TaskStatus = "created" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
@@ -11,7 +10,6 @@ export interface TaskRecord {
 	executionId: string;
 	sessionId: string;
 	task: string;
-	workStyle: WorkStyle;
 	selectedBy: "user" | "main_agent";
 	operation: TaskOperation;
 	parentTaskId?: string;
@@ -27,7 +25,6 @@ export interface TaskExecutionRecord {
 	id: string;
 	taskId: string;
 	sessionId: string;
-	workStyle: WorkStyle;
 	operation: TaskOperation;
 	parentTaskId?: string;
 	parentExecutionId?: string;
@@ -70,7 +67,6 @@ function normalizeStore(value: TaskStore | LegacyTaskStore): TaskStore {
 			id: task.executionId,
 			taskId: task.id,
 			sessionId: task.sessionId,
-			workStyle: task.workStyle,
 			operation: task.operation,
 			parentTaskId: task.parentTaskId,
 			parentExecutionId: task.parentExecutionId ?? task.parentTaskId,
@@ -126,8 +122,6 @@ export function getTaskExecution(fluxDir: string, executionId: string): TaskExec
 export function resolveTask(fluxDir: string, selector: string | undefined, sessionId: string): TaskRecord | undefined {
 	const tasks = listTasks(fluxDir, sessionId);
 	if (!selector || selector === "latest") return tasks[0];
-	const style = selector.match(/^latest_(direct|team|workflow|community)$/)?.[1] as WorkStyle | undefined;
-	if (style) return tasks.find(task => task.workStyle === style);
 	return tasks.find(task => task.id === selector);
 }
 
@@ -150,7 +144,6 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				throw new Error(`Task identity conflict: ${plan.taskId}`);
 			}
 			existing.task = plan.task;
-			existing.workStyle = plan.workStyle;
 			existing.selectedBy = plan.selectedBy;
 			existing.operation = plan.operation;
 			existing.parentTaskId = plan.parentTaskId;
@@ -163,7 +156,6 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				executionId: plan.executionId,
 				sessionId,
 				task: plan.task,
-				workStyle: plan.workStyle,
 				selectedBy: plan.selectedBy,
 				operation: plan.operation,
 				parentTaskId: plan.parentTaskId,
@@ -182,7 +174,6 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 			if (TERMINAL_STATUSES.has(execution.status) && execution.status !== status) {
 				throw new Error(`Historical execution is immutable: ${plan.executionId} is ${execution.status}`);
 			}
-			execution.workStyle = plan.workStyle;
 			execution.operation = plan.operation;
 			execution.parentTaskId = plan.parentTaskId;
 			execution.parentExecutionId = plan.parentExecutionId;
@@ -193,7 +184,6 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				id: plan.executionId,
 				taskId: plan.taskId,
 				sessionId,
-				workStyle: plan.workStyle,
 				operation: plan.operation,
 				parentTaskId: plan.parentTaskId,
 				parentExecutionId: plan.parentExecutionId,
@@ -260,6 +250,6 @@ export function updateTaskMetadata(fluxDir: string, taskId: string, metadata: Pi
 export function formatTasks(tasks: TaskRecord[]): string {
 	if (tasks.length === 0) return "No AgentFlux tasks.";
 	return ["AgentFlux tasks:", ...tasks.map(task =>
-		`  ${task.status.padEnd(9)} ${task.workStyle.padEnd(9)} ${task.id} · ${task.operation}${task.parentTaskId ? ` ← ${task.parentTaskId}` : ""}${task.resource ? ` · ${task.resource.type}:${task.resource.id}${task.resource.version ? `@${task.resource.version}` : ""}` : ""}\n    ${task.task.slice(0, 160)}${task.team?.length ? `\n    team ${task.team.map(member => member.name).join(", ")}` : ""}`,
+		`  ${task.status.padEnd(9)} ${task.id} · ${task.operation}${task.parentTaskId ? ` ← ${task.parentTaskId}` : ""}${task.resource ? ` · ${task.resource.type}:${task.resource.id}${task.resource.version ? `@${task.resource.version}` : ""}` : ""}\n    ${task.task.slice(0, 160)}${task.team?.length ? `\n    team ${task.team.map(member => member.name).join(", ")}` : ""}`,
 	)].join("\n");
 }

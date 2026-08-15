@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, type FluxConfig, type WorkStyle } from "./types";
+import { DEFAULT_CONFIG, type FluxConfig } from "./types";
 import { discoverPiModels, mergeModels, type ModelEntry } from "./model-capability";
 
 function merge<T>(base: T, value: Partial<T> | undefined): T {
@@ -41,12 +41,6 @@ export function resolveSharedSkills(_config: FluxConfig, modelsConfig: any): str
 	if (!Array.isArray(modelsConfig?.sharedSkills)) return [];
 	const skills: string[] = modelsConfig.sharedSkills.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0).map((item: string) => item.trim());
 	return [...new Set(skills)];
-}
-
-export function parseWorkStyle(value: string | undefined): WorkStyle | undefined {
-	const normalized = value?.trim().toLowerCase();
-	return normalized === "direct" || normalized === "team" || normalized === "workflow" || normalized === "community"
-		? normalized : undefined;
 }
 
 export function validateConfig(config: FluxConfig): string[] {

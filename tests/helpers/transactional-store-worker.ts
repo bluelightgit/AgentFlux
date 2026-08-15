@@ -15,7 +15,6 @@ if (mode === "task") {
 		registerTask(root, `session-${prefix}`, createTaskExecutionPlan({
 			taskId: `task-${prefix}-${index}`,
 			task: `task ${prefix} ${index}`,
-			workStyle: "team",
 			selectedBy: "user",
 			budget: DEFAULT_CONFIG.budget,
 		}));

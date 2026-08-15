@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentKind, AgentOrigin, AgentStatus, WorkStyle } from "../core/types";
+import type { AgentKind, AgentOrigin, AgentStatus } from "../core/types";
 import type { TaskOperation } from "../core/task-execution";
 
 export type TelemetryOutcomeStatus = "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
@@ -11,7 +11,6 @@ export interface BaseEvent { ts: number; sessionId: string; type: string; taskId
 export interface TaskExecutionEvent extends BaseEvent {
 	type: "task.execution";
 	action: "created" | "started" | "completed" | "failed" | "cancelled";
-	workStyle: WorkStyle;
 	selectedBy: "user" | "main_agent";
 	task: string;
 	operation?: TaskOperation;

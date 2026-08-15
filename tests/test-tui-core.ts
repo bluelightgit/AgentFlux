@@ -39,16 +39,16 @@ async function main(): Promise<void> {
 		try {
 			for (const hook of pi.hooks.get("session_start") ?? []) await hook({}, ctx);
 		} finally { console.error = originalConsoleError; }
-		check(fluxStderr.length === 0, "TUI 会话启动不向 stderr 输出诊断日志（不挡输入区）");		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_team") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue"), "TUI 注册任务历史与四条核心工具链");
+		check(fluxStderr.length === 0, "TUI 会话启动不向 stderr 输出诊断日志（不挡输入区）");		check(pi.tools.has("flux_task") && pi.tools.has("flux_agent") && pi.tools.has("flux_workflow") && pi.tools.has("flux_issue") && pi.tools.has("flux_message"), "TUI 注册任务历史与核心工具链（flux_team 已移除）");
 		let envelopeResult: unknown = undefined;
 		for (const h of pi.hooks.get("input") ?? []) {
 			envelopeResult = (await h({ text: `agentflux-task-v1:not-valid-base64url!\ntask` })) ?? envelopeResult;
 		}
 		check(envelopeResult === undefined, "畸形任务信封降级为普通消息（input hook 不抛错）");
 		check(
-			pi.tools.get("flux_team")?.description.includes("registered template id")
+			!pi.tools.has("flux_team")
 				&& pi.tools.get("flux_workflow")?.description.includes("never a DAG or object"),
-			"Team/Workflow 工具说明约束 role 模板 ID 与 Workflow selector，减少模型参数误用",
+			"flux_team 已移除；Workflow 工具说明约束 selector 参数，减少模型参数误用",
 		);
 		check(isSlashArgumentBoundary("/flux work ", " ") && !isSlashArgumentBoundary("plain text ", " "), "空格可触发 slash command 参数补全而不影响普通输入");
 		check(shouldContinueSlashCompletion("/flux work", "\t") && !shouldContinueSlashCompletion("/flux work ", "\t"), "Tab 补全 slash 字段后继续显示下级选单");
@@ -58,13 +58,13 @@ async function main(): Promise<void> {
 		check(bridgePatched, "bridge 已安装到真实 pi-tui Editor 原型");
 		const proto = Editor.prototype as any;
 		const fakeEditor: any = {
-			state: { lines: ["/flux work "], cursorLine: 0, cursorCol: 11 },
+			state: { lines: ["/flux task "], cursorLine: 0, cursorCol: 11 },
 			autocompleteState: "regular",
-			autocompleteList: { render: () => ["→ direct", "  team", "  workflow", "  community"] },
+			autocompleteList: { render: () => ["→ list", "  show", "  reuse"] },
 			paddingX: 1,
 			lastWidth: 0,
 			borderColor: (s: string) => s,
-			layoutText: () => [{ text: "/flux work ", hasCursor: true, cursorPos: 11 }],
+			layoutText: () => [{ text: "/flux task ", hasCursor: true, cursorPos: 11 }],
 			scrollOffset: 0,
 			segment: (s: string) => [{ segment: s }],
 			focused: false,
@@ -76,10 +76,10 @@ async function main(): Promise<void> {
 			clearAutocompleteUi: () => undefined,
 		};
 		const rendered = (proto.render ?? (() => [])).call(fakeEditor, 120);
-		check(rendered[0].includes("direct"), "候选列表渲染在输入行上方（第一行即候选，而非底部）");
+		check(rendered[0].includes("list"), "候选列表渲染在输入行上方（第一行即候选，而非底部）");
 		const apply = proto.applyAutocompleteSuggestions;
 		if (typeof apply === "function") {
-			apply.call(fakeEditor, { items: [{ value: "direct" }] }, "regular");
+			apply.call(fakeEditor, { items: [{ value: "list" }] }, "regular");
 			check(fakeEditor[Symbol.for("agentflux.autocomplete-auto-close-timer")] !== undefined, "候选打开后注册自动关闭定时器");
 			const cancel = proto.cancelAutocomplete;
 			if (typeof cancel === "function") cancel.call(fakeEditor);
@@ -87,21 +87,16 @@ async function main(): Promise<void> {
 		}
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
-		check(rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "task") && rootCompletions.some((item: any) => item.value === "workflow") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全");
-		check(await flux.getArgumentCompletions("agent") === null && await flux.getArgumentCompletions("work") === null, "补全为完整字段后退出候选态，Enter 可提交并打开菜单");
+		check(!rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "task") && rootCompletions.some((item: any) => item.value === "workflow") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全（work 模式选择已移除）");
+		check(await flux.getArgumentCompletions("agent") === null && await flux.getArgumentCompletions("task") === null, "补全为完整字段后退出候选态，Enter 可提交并打开菜单");
 		// 空参数（尾随空格）不提供候选：候选列表由 pi 主进程控制，自动弹出会长时间占据输入框区域
 		check(await flux.getArgumentCompletions("work ") === null && await flux.getArgumentCompletions("task ") === null, "空参数退出候选态，避免建议文本长时间显示在输入框区域");
-		const workCompletions = await flux.getArgumentCompletions("work d");
-		check(workCompletions?.map((item: any) => item.value).includes("work direct"), "输入中（非空参数）仍显示 work 子命令候选");
+		const workflowCompletions = await flux.getArgumentCompletions("workflow l");
+		check(workflowCompletions?.map((item: any) => item.value).includes("workflow list"), "输入中（非空参数）仍显示 workflow 子命令候选");
 		check((await flux.getArgumentCompletions("agent list"))?.length === 0, "完整子命令退出候选态，Enter 可直接执行");
-		menuSelections = ["Multi-Agent · Team, Workflow or Community", "Team · dynamic delegation"]; menuInputs = ["coordinate review"];
-		await flux.handler("work", ctx);
-		check(pi.sent.at(-1) === "coordinate review", "补全后的 /flux work 打开工作方式菜单");
-		menuSelections = ["Work · start a task", "Direct · Main Agent only"]; menuInputs = ["menu task"];
+		menuSelections = ["New task · describe outcome"]; menuInputs = ["menu task"];
 		await flux.handler("", ctx);
 		check(pi.sent.at(-1) === "menu task", "直接输入 /flux 可从 Workbench 菜单创建任务");
-		await flux.handler("work direct implement core", ctx);
-		check(pi.sent.at(-1) === "implement core" && notices.some(text => text.includes("work style direct")), "TUI Direct 将任务交给 Main Agent（对话底部浅灰小字）");
 		await flux.handler("agent create reviewer-main reviewer", ctx);
 		await flux.handler("agent list", ctx);
 		check(notices.some(text => text.includes("reviewer-main")), "TUI 创建并列出 Persistent Agent");
@@ -123,17 +118,17 @@ async function main(): Promise<void> {
 		const afterStop = JSON.parse(readFileSync(registryFile, "utf-8"));
 		check(afterStop.agents.find((agent: any) => agent.name === "reviewer-main")?.status === "idle"
 			&& notices.some(text => text.includes("reset to idle")), "孤儿 running 通过 stop 恢复控制权并重置为 idle");
-		menuSelections = ["reviewer-main · persistent · reviewer · idle", "Details · show information"];
+		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Details · show information"];
 		await flux.handler("agent", ctx);
 		check(notices.some(text => text.includes("Agent reviewer-main") && text.includes("capability")), "不带参数的 /flux agent 显示 Agent 列表与详细信息");
-		menuSelections = ["reviewer-main · persistent · reviewer · idle", "Talk · continue Persistent session"]; menuInputs = ["review this change"];
-		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "persistent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
+		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Talk · continue Agent session"]; menuInputs = ["review this change"];
+		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "subagent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(talkCommand === "agent run reviewer-main review this change", "选择 Agent 后可直接输入消息并生成对话命令");
-		menuSelections = ["worker-live · ephemeral · tester · running", "Message · send to active Agent"]; menuInputs = ["please report status"];
-		const messageCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "worker-live", kind: "ephemeral", role: "tester", status: "running", callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, communication: "message" }], roles: [], issues: [], forkPoints: [], activeTaskIds: [] });
-		check(messageCommand === "message send worker-live please report status", "运行中的 Ephemeral Agent 可从列表发送 Message V2");
-		const menuData = { agents: [], roles: ["reviewer"], issues: [], forkPoints: [{ entryId: "entry-1", preview: "seed context" }], activeTaskIds: ["task-running"], tasks: [{ id: "history-task", task: "previous review", workStyle: "team", status: "completed", operation: "new" }], workflows: [{ id: "workflow-one", name: "release-review", version: 2, description: "release", nodeCount: 3 }] };
-		menuSelections = ["Tasks · reuse, resume or continue", "completed · team · previous review", "Continue"];
+		menuSelections = ["worker-live · subagent · tester · running", "Message · send to active Agent"]; menuInputs = ["please report status"];
+		const messageCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "worker-live", kind: "subagent", role: "tester", status: "running", callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, communication: "message" }], roles: [], issues: [], forkPoints: [], activeTaskIds: [] });
+		check(messageCommand === "message send worker-live please report status", "运行中的子代理可从列表发送 Message V2");
+		const menuData = { agents: [], roles: ["reviewer"], issues: [], forkPoints: [{ entryId: "entry-1", preview: "seed context" }], activeTaskIds: ["task-running"], tasks: [{ id: "history-task", task: "previous review", status: "completed", operation: "new" }], workflows: [{ id: "workflow-one", name: "release-review", version: 2, description: "release", nodeCount: 3 }] };
+		menuSelections = ["Tasks · reuse, resume or continue", "completed · previous review", "Continue"];
 		check(await showFluxTuiMenu(ctx, menuData) === "task continue history-task", "Workbench Tasks 子菜单可继续历史任务");
 		menuSelections = ["Workflows · saved fixed DAGs", "release-review · v2 · 3 nodes", "Show DAG"];
 		check(await showFluxTuiMenu(ctx, menuData) === "workflow show workflow-one", "Workbench Workflows 子菜单可查看固定 DAG");
@@ -158,8 +153,8 @@ async function main(): Promise<void> {
 		check(await showFluxTuiMenu(ctx, menuData) === "cancel task-running", "Workbench Runtime 子菜单可选择运行任务");
 		menuSelections = ["Maintenance · lifecycle GC", "Dry run · preview only"];
 		check(await showFluxTuiMenu(ctx, menuData) === "gc dry-run", "Workbench Maintenance 子菜单可选择 GC 操作");
-		await flux.handler("work community coordinate fix", ctx);
-		check(pi.sent.at(-1)?.includes("Community issue") && notices.some(text => text.includes("Created issue-")), "TUI Community 创建 Issue 并交给 Main moderator（对话底部浅灰小字）");
+		await flux.handler("issue create coordinate fix", ctx);
+		check(notices.some(text => text.includes("coordinate fix")), "TUI 直接创建 Community Issue（无模式选择）");
 		await flux.handler("task list", ctx);
 		check(notices.some(text => text.includes("AgentFlux tasks")), "TUI 可列出当前 Pi 会话的 Task Registry");
 		await flux.handler("fork last", ctx);

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BudgetConfig, WorkStyle } from "./types";
+import type { BudgetConfig } from "./types";
 import { assertSafeOpaqueId } from "./safe-path";
 
 export type TaskOperation = "new" | "reuse" | "resume" | "continue" | "retry";
@@ -8,7 +8,6 @@ export interface TaskExecutionPlan {
 	taskId: string;
 	executionId: string;
 	task: string;
-	workStyle: WorkStyle;
 	selectedBy: "user" | "main_agent";
 	operation: TaskOperation;
 	parentTaskId?: string;
@@ -22,7 +21,6 @@ export interface TaskExecutionPlan {
 
 export function createTaskExecutionPlan(input: {
 	task: string;
-	workStyle: WorkStyle;
 	selectedBy: "user" | "main_agent";
 	budget: BudgetConfig;
 	taskId?: string;
@@ -46,7 +44,6 @@ export function createTaskExecutionPlan(input: {
 		taskId,
 		executionId,
 		task,
-		workStyle: input.workStyle,
 		selectedBy: input.selectedBy,
 		operation: input.operation ?? "new",
 		parentTaskId,
@@ -63,7 +60,7 @@ export function formatTaskExecutionPlan(plan: TaskExecutionPlan): string {
 	return [
 		`Task ${plan.taskId}`,
 		`  execution ${plan.executionId} · operation ${plan.operation}${plan.parentExecutionId ? ` · parent execution ${plan.parentExecutionId}` : ""}`,
-		`  work style ${plan.workStyle} · selected by ${plan.selectedBy}`,
+		`  selected by ${plan.selectedBy}`,
 		`  budget $${plan.budget.maxCostUsd.toFixed(4)} · ${Math.round(plan.budget.maxWallClockMs / 1000)}s · ${plan.budget.maxIterations} iterations`,
 	].join("\n");
 }

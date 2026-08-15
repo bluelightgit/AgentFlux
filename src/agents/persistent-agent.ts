@@ -58,7 +58,7 @@ export function registerPersistentAgent(cwd: string, name: string, role: string,
 	const record: AgentRecord = {
 		id: `agent-${randomUUID()}`,
 		name,
-		kind: "persistent",
+		scope: "project",
 		role,
 		status: "idle",
 		lineage: { origin: "template", templateId: role, templateRevision: 1 },
@@ -120,7 +120,7 @@ export async function runPersistentAgent(name: string, task: string, context: Pe
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
-	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: record.id, agent: record.name, kind: "persistent", origin: record.lineage.origin, status: "running", action: "started" });
+	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: record.id, agent: record.name, kind: "subagent", origin: record.lineage.origin, status: "running", action: "started" });
 	let result: AgentRunResult;
 	try {
 		result = await runAgent({
@@ -149,7 +149,7 @@ export async function runPersistentAgent(name: string, task: string, context: Pe
 				current.updatedAt = new Date().toISOString();
 			}
 		});
-		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: record.id, agent: record.name, kind: "persistent", origin: record.lineage.origin, status: "failed", action: "failed" });
+		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: record.id, agent: record.name, kind: "subagent", origin: record.lineage.origin, status: "failed", action: "failed" });
 		throw error;
 	}
 	const completed = updateRegistry(context.cwd, agents => {
@@ -161,7 +161,7 @@ export async function runPersistentAgent(name: string, task: string, context: Pe
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
-	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "persistent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed" });
+	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "subagent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed" });
 	return result;
 }
 

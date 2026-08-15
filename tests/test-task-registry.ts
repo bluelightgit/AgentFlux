@@ -12,7 +12,7 @@ function check(message: string, fn: () => void): void { fn(); passed++; console.
 
 const root = mkdtempSync(join(tmpdir(), "agentflux-task-registry-"));
 try {
-	const first = createTaskExecutionPlan({ taskId: "task-one", task: "review module", workStyle: "team", selectedBy: "user", budget: DEFAULT_CONFIG.budget });
+	const first = createTaskExecutionPlan({ taskId: "task-one", task: "review module", selectedBy: "user", budget: DEFAULT_CONFIG.budget });
 	registerTask(root, "pi-session-1", first);
 	updateTaskMetadata(root, first.taskId, { team: [{ name: "reviewer", role: "reviewer" }, { name: "tester", persistent: true }] });
 	updateTaskMetadata(root, first.taskId, { resource: { type: "workflow", id: "workflow-one", version: 2 } });
@@ -21,7 +21,7 @@ try {
 		costUsd: 0.25,
 		outcome: { status: "success" },
 	});
-	const continuation = createTaskExecutionPlan({ taskId: "task-two", task: "apply review feedback", workStyle: "team", selectedBy: "main_agent", budget: DEFAULT_CONFIG.budget, operation: "continue", parentTaskId: first.taskId });
+	const continuation = createTaskExecutionPlan({ taskId: "task-two", task: "apply review feedback", selectedBy: "main_agent", budget: DEFAULT_CONFIG.budget, operation: "continue", parentTaskId: first.taskId });
 	registerTask(root, "pi-session-1", continuation);
 
 	check("Task Registry persists operation and parent lineage", () => {
@@ -52,7 +52,7 @@ try {
 	check("Task Registry preserves reusable Team structure", () => assert.deepEqual(getTask(root, "task-one")?.team?.map(item => item.name), ["reviewer", "tester"]));
 	check("Task Registry preserves the exact Workflow version", () => assert.equal(getTask(root, first.taskId)?.resource?.version, 2));
 	check("Task selectors remain scoped to the Pi session", () => {
-		assert.equal(resolveTask(root, "latest_team", "pi-session-1")?.id, "task-two");
+		assert.equal(resolveTask(root, "task-two", "pi-session-1")?.id, "task-two");
 		assert.equal(resolveTask(root, "latest", "another-session"), undefined);
 	});
 	check("Task history orders the newest task first", () => assert.deepEqual(listTasks(root, "pi-session-1").map(task => task.id), ["task-two", "task-one"]));

@@ -1,9 +1,5 @@
-import { parseWorkStyle } from "../core/config";
-import type { WorkStyle } from "../core/types";
-
 export type FluxCommand =
 	| { kind: "help" }
-	| { kind: "work"; style: WorkStyle; task: string }
 	| { kind: "task"; args: string[] }
 	| { kind: "workflow"; args: string[] }
 	| { kind: "agent"; args: string[] }
@@ -18,8 +14,7 @@ export type FluxCommand =
 export interface FluxCompletionItem { value: string; label: string; description: string; }
 
 const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
-	{ value: "work", label: "work", description: "启动 Direct / Team / Workflow / Community 任务" },
-	{ value: "task", label: "task", description: "查看、复用、恢复或继续历史任务" },
+		{ value: "task", label: "task", description: "查看、复用、恢复或继续历史任务" },
 	{ value: "workflow", label: "workflow", description: "查看、复用或修改固定 DAG 定义" },
 	{ value: "agent", label: "agent", description: "管理 Persistent Agents" },
 	{ value: "fork", label: "fork", description: "从当前会话上下文创建分支" },
@@ -50,12 +45,6 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 		const found = TOP_LEVEL_COMPLETIONS.filter(item => item.value.startsWith(prefix));
 		return found.length ? found : null;
 	}
-	if (prefix.startsWith("work ")) return completions(prefix, [
-		["work direct", "基础能力：Main Agent 直接执行"],
-		["work team", "Direct + 动态创建或调用多个 Agent"],
-		["work workflow", "Team + 固定依赖 DAG"],
-		["work community", "Team + Issue/Claim 任务驱动协作"],
-	]);
 	if (prefix.startsWith("task ")) return completions(prefix, [
 		["task list", "列出当前会话任务"], ["task show", "查看一个任务"],
 		["task reuse", "复用最近任务的工作方式"], ["task resume", "恢复未完成任务"],
@@ -90,13 +79,6 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 export function parseFluxCommand(input: string): FluxCommand {
 	const parts = input.trim().split(/\s+/).filter(Boolean);
 	if (parts.length === 0 || parts[0] === "help") return { kind: "help" };
-	if (parts[0] === "work") {
-		const style = parseWorkStyle(parts[1]);
-		if (!style) throw new Error("Usage: /flux work <direct|team|workflow|community> <task>");
-		const task = parts.slice(2).join(" ").trim();
-		if (!task) throw new Error("Task cannot be empty");
-		return { kind: "work", style, task };
-	}
 	if (parts[0] === "agent") return { kind: "agent", args: parts.slice(1) };
 	if (parts[0] === "task") return { kind: "task", args: parts.slice(1) };
 	if (parts[0] === "workflow") return { kind: "workflow", args: parts.slice(1) };
@@ -115,7 +97,6 @@ export function parseFluxCommand(input: string): FluxCommand {
 
 export const FLUX_HELP = [
 	"AgentFlux",
-	"  /flux work <direct|team|workflow|community> <task>",
 	"  /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]",
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>",
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",

@@ -38,51 +38,6 @@ check("parses whitespace-only as help", () => {
 	assert.strictEqual(cmd.kind, "help");
 });
 
-check("parses 'work direct <task>'", () => {
-	const cmd = parseFluxCommand("work direct implement login");
-	assert.strictEqual(cmd.kind, "work");
-	if (cmd.kind === "work") {
-		assert.strictEqual(cmd.style, "direct");
-		assert.strictEqual(cmd.task, "implement login");
-	}
-});
-
-check("parses 'work team <task>'", () => {
-	const cmd = parseFluxCommand("work team design system");
-	assert.strictEqual(cmd.kind, "work");
-	if (cmd.kind === "work") {
-		assert.strictEqual(cmd.style, "team");
-		assert.strictEqual(cmd.task, "design system");
-	}
-});
-
-check("parses 'work workflow <task>'", () => {
-	const cmd = parseFluxCommand("work workflow deploy pipeline");
-	assert.strictEqual(cmd.kind, "work");
-	if (cmd.kind === "work") {
-		assert.strictEqual(cmd.style, "workflow");
-		assert.strictEqual(cmd.task, "deploy pipeline");
-	}
-});
-
-check("parses 'work community <task>'", () => {
-	const cmd = parseFluxCommand("work community fix coordination");
-	assert.strictEqual(cmd.kind, "work");
-	if (cmd.kind === "work") {
-		assert.strictEqual(cmd.style, "community");
-		assert.strictEqual(cmd.task, "fix coordination");
-	}
-});
-
-check("rejects invalid work style", () => {
-	assert.throws(() => parseFluxCommand("work M2 legacy"), /Usage/);
-	assert.throws(() => parseFluxCommand("work invalid task"), /Usage/);
-});
-
-check("rejects work command without task", () => {
-	assert.throws(() => parseFluxCommand("work direct"), /cannot be empty/);
-});
-
 check("parses 'task list'", () => {
 	const cmd = parseFluxCommand("task list");
 	assert.strictEqual(cmd.kind, "task");
@@ -282,12 +237,13 @@ console.log("\n--- getFluxArgumentCompletions ---");
 check("returns top-level completions for empty prefix", () => {
 	const result = getFluxArgumentCompletions("");
 	assert.ok(result !== null);
-	assert.ok(result!.some(item => item.value === "work"));
+	assert.ok(result!.some(item => item.value === "task"));
 	assert.ok(result!.some(item => item.value === "help"));
+	assert.ok(!result!.some(item => item.value === "work"));
 });
 
 check("returns null for exact top-level match", () => {
-	const result = getFluxArgumentCompletions("work");
+	const result = getFluxArgumentCompletions("task");
 	assert.strictEqual(result, null);
 });
 
@@ -295,12 +251,11 @@ check("returns filtered top-level completions", () => {
 	const result = getFluxArgumentCompletions("w");
 	assert.ok(result !== null);
 	assert.ok(result!.every(item => item.value.startsWith("w")));
-	assert.ok(result!.some(item => item.value === "work"));
+	assert.ok(result!.some(item => item.value === "workflow"));
 });
 
 check("returns null for empty argument field (trailing space, 静默设计)", () => {
 	// 2026-08-08 设计：空参数不弹候选列表，避免列表占据输入框区域。
-	assert.strictEqual(getFluxArgumentCompletions("work "), null);
 	assert.strictEqual(getFluxArgumentCompletions("task "), null);
 	assert.strictEqual(getFluxArgumentCompletions("agent "), null);
 	assert.strictEqual(getFluxArgumentCompletions("issue "), null);
@@ -312,9 +267,9 @@ check("returns partial subcommand completions while typing", () => {
 	const task = getFluxArgumentCompletions("task li");
 	assert.ok(task !== null);
 	assert.ok(task!.some(item => item.value === "task list"));
-	const work = getFluxArgumentCompletions("work di");
-	assert.ok(work !== null);
-	assert.ok(work!.some(item => item.value === "work direct"));
+	const workflow = getFluxArgumentCompletions("workflow l");
+	assert.ok(workflow !== null);
+	assert.ok(workflow!.some(item => item.value === "workflow list"));
 	const issue = getFluxArgumentCompletions("issue cr");
 	assert.ok(issue !== null);
 	assert.ok(issue!.some(item => item.value === "issue create"));

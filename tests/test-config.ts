@@ -5,7 +5,6 @@
 import { strict as assert } from "node:assert";
 import {
 	validateConfig,
-	parseWorkStyle,
 	resolveSharedSkills,
 } from "../src/core/config";
 import { DEFAULT_CONFIG, type FluxConfig } from "../src/core/types";
@@ -23,46 +22,6 @@ function check(description: string, fn: () => void): void {
 		console.log(`  ✗ ${description}: ${error.message}`);
 	}
 }
-
-// ─── parseWorkStyle ───────────────────────────────────────────────────
-
-console.log("\n--- parseWorkStyle ---");
-
-check("returns 'direct' for valid input", () => {
-	assert.strictEqual(parseWorkStyle("direct"), "direct");
-	assert.strictEqual(parseWorkStyle("DIRECT"), "direct");
-	assert.strictEqual(parseWorkStyle("  direct  "), "direct");
-});
-
-check("returns 'team' for valid input", () => {
-	assert.strictEqual(parseWorkStyle("team"), "team");
-	assert.strictEqual(parseWorkStyle("TEAM"), "team");
-});
-
-check("returns 'workflow' for valid input", () => {
-	assert.strictEqual(parseWorkStyle("workflow"), "workflow");
-	assert.strictEqual(parseWorkStyle("WORKFLOW"), "workflow");
-});
-
-check("returns 'community' for valid input", () => {
-	assert.strictEqual(parseWorkStyle("community"), "community");
-	assert.strictEqual(parseWorkStyle("COMMUNITY"), "community");
-});
-
-check("returns undefined for invalid input", () => {
-	assert.strictEqual(parseWorkStyle("unknown"), undefined);
-	assert.strictEqual(parseWorkStyle("M2"), undefined);
-	assert.strictEqual(parseWorkStyle(""), undefined);
-	assert.strictEqual(parseWorkStyle("  "), undefined);
-});
-
-check("returns undefined for undefined input", () => {
-	assert.strictEqual(parseWorkStyle(undefined), undefined);
-});
-
-check("returns undefined for null-like values", () => {
-	assert.strictEqual(parseWorkStyle(null as unknown as string), undefined);
-});
 
 // ─── validateConfig ───────────────────────────────────────────────────
 

@@ -21,7 +21,7 @@ import { SharedBoard } from "./core/shared-board";
 
 export default function (pi: ExtensionAPI) {
 	let state: FluxRuntimeState = {
-		workStyle: "team", branch: null, turnIndex: 0,
+		branch: null, turnIndex: 0,
 		cache: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0,
 			contextTokens: 0, contextWindow: 0, contextPercent: null, cacheHitRate: 0 },
 	};
