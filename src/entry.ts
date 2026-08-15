@@ -921,7 +921,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "run" && subject) {
 					const task = rest.join(" ").trim();
 					if (!task) throw new Error("Usage: /flux agent run <name> <task>");
-					return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext()), 1), "info", 12);
+					const existing = findAgents(runtime.cwd, subject);
+					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, modelsConfig: runtime.modelsConfig });
+					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext()), 1), "info", 12);
 				}
 				if (action === "retry" && subject) {
 					const record = findAgents(runtime.cwd, subject)[0];
@@ -957,7 +959,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "propose" && id && rest[0]) return notify(ctx, formatIssue(proposeIssue(runtime.cwd, id, { title: rest[0], body: rest.slice(1).join(" ") })), "info", 12);
 				if (action === "support" && id && rest[0]) return notify(ctx, formatIssue(supportProposal(runtime.cwd, id, rest[0], "main")), "info", 12);
 				if (action === "oppose" && id && rest[0]) return notify(ctx, formatIssue(opposeProposal(runtime.cwd, id, rest[0], "main")), "info", 12);
-				if (action === "claim" && id && rest.length >= 2) return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest[1], { plan: rest.slice(2).join(" ").replace(/^--plan\s+/, "") })), "info", 12);
+				if (action === "claim" && id && rest.length >= 2) {
+					const args = rest.slice(2).join(" ");
+					const propsMatch = args.match(/--props\s+([^\s]+)/);
+					const plan = args.replace(/--props\s+[^\s]+/g, "").replace(/^--plan\s+/, "").trim();
+					return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest[1], { proposalIds: propsMatch ? propsMatch[1].split(",").map(item => item.trim()).filter(Boolean) : undefined, plan })), "info", 12);
+				}
 				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id, rest.join(" "))), "info", 12);
 				if (action === "delete" && id) return notify(ctx, `Deleted issue ${deleteIssue(runtime.cwd, id).id}`);
 				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" ").replace(/^--plan\s+/, ""))), "info", 12);

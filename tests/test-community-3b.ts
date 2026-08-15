@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	claimIssue,
+	deleteIssue,
 	commentOnIssue,
 	createIssue,
 	formatIssue,
@@ -282,6 +283,38 @@ try {
 	// ─── 门禁参数配置 ──────────────────────────────────────────────
 
 	console.log("\n--- setCommunityLimits ---");
+
+	check("stalled issue can still be resolved by a human (manual bailout)", () => {
+		const issue = createIssue(root, { title: "T", description: "d" });
+		claimIssue(root, issue.id, "a", "s");
+		let claim = getIssue(root, issue.id)!.claims[0];
+		// 3 次空反馈退回 → streak 3 停摆，claim 卡在 active
+		for (let i = 0; i < 3; i++) {
+			submitClaim(root, issue.id, claim.id);
+			reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "");
+		}
+		assert.strictEqual(getIssue(root, issue.id)!.stallStreak, 3);
+		assert.throws(() => submitClaim(root, issue.id, claim.id), /无进展/);
+		// 停摆状态下人工 resolve 放行（兜底：跳过 active claim 校验）
+		const resolved = resolveIssue(root, issue.id, "人工评估后直接解决");
+		assert.strictEqual(resolved.status, "resolved");
+		assert.strictEqual(resolved.resolvedReason, "人工评估后直接解决");
+	});
+
+	check("stalled issue can be deleted as a manual bailout", () => {
+		const issue = createIssue(root, { title: "T", description: "d" });
+		claimIssue(root, issue.id, "a", "s");
+		let claim = getIssue(root, issue.id)!.claims[0];
+		for (let i = 0; i < 3; i++) {
+			submitClaim(root, issue.id, claim.id);
+			reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "");
+		}
+		assert.strictEqual(getIssue(root, issue.id)!.stallStreak, 3);
+		// 停摆状态下人工删除放行（兜底）
+		const removed = deleteIssue(root, issue.id);
+		assert.strictEqual(removed.id, issue.id);
+		assert.strictEqual(getIssue(root, issue.id), undefined);
+	});
 
 	check("setCommunityLimits validates its inputs", () => {
 		assert.throws(() => setCommunityLimits({ stallThreshold: 0 }), /positive integer/);

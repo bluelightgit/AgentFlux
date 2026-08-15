@@ -108,7 +108,7 @@ export const FLUX_HELP = [
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
 	"  /flux agent list|create <name> <role>|run <name> <task>|archive <name>",
 	"  /flux fork [last|index|entryId]",
-	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
+	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>] [--props <id1,id2>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",
 	"  /flux message group list|create <name> <member,...>|send <groupId> <text>",
 	"  /flux cancel [taskId]",

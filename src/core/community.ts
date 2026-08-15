@@ -266,10 +266,11 @@ export function deleteIssue(cwd: string, id: string): CommunityIssue {
 		const index = store.issues.findIndex(item => item.id === id);
 		if (index < 0) throw new Error(`Issue not found: ${id}`);
 		const issue = store.issues[index];
-		if (issue.claims.some(claim => claim.status === "active" || claim.status === "submitted")) {
+		if (issue.claims.some(claim => claim.status === "active" || claim.status === "submitted")
+			&& (issue.stallStreak ?? 0) < stallThreshold) {
 			throw new Error(`Issue has active or submitted claims: ${id}`);
 		}
-		if (issue.status !== "resolved" && issue.status !== "open") {
+		if ((issue.stallStreak ?? 0) < stallThreshold && issue.status !== "resolved" && issue.status !== "open") {
 			throw new Error(`Only resolved or open issues can be deleted (${issue.status}): ${id}`);
 		}
 		store.issues.splice(index, 1);
@@ -277,7 +278,7 @@ export function deleteIssue(cwd: string, id: string): CommunityIssue {
 	});
 }
 
-export function resolveIssue(cwd: string, id: string, reason?: string): CommunityIssue { const issue = update(cwd, store => { const item = store.issues.find(item => item.id === id); if (!item) throw new Error(`Issue not found: ${id}`); assertMutable(item); if (item.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); item.status = "resolved"; if (reason?.trim()) item.resolvedReason = reason.trim(); item.updatedAt = new Date().toISOString(); appendEvent(item, "resolved", "main", reason?.trim() ? `${id} · ${reason.trim().slice(0, 200)}` : id); return item; }); releaseActiveContext(cwd, `issue:${id}`); return issue; }
+export function resolveIssue(cwd: string, id: string, reason?: string): CommunityIssue { const issue = update(cwd, store => { const item = store.issues.find(item => item.id === id); if (!item) throw new Error(`Issue not found: ${id}`); assertMutable(item); if ((item.stallStreak ?? 0) < stallThreshold && item.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); item.status = "resolved"; if (reason?.trim()) item.resolvedReason = reason.trim(); item.updatedAt = new Date().toISOString(); appendEvent(item, "resolved", "main", reason?.trim() ? `${id} · ${reason.trim().slice(0, 200)}` : id); return item; }); releaseActiveContext(cwd, `issue:${id}`); return issue; }
 export function formatIssue(issue: CommunityIssue): string { const stall = (issue.stallStreak ?? 0) >= stallThreshold;
 	return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `rounds ${issue.rounds ?? 0} · cost $${(issue.costUsd ?? 0).toFixed(4)} · claims ${issue.claims.length} · comments ${issue.comments.length} · proposals ${(issue.proposals ?? []).length}`, ...(issue.proposals ?? []).map(proposal => `  ${proposal.id} · ${proposal.title} · by ${proposal.createdBy} · support ${proposal.supporters.length} oppose ${proposal.opposers.length}`), ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}${claim.proposalIds?.length ? ` · proposals: ${claim.proposalIds.join(",")}` : ""}${claim.plan ? ` · plan: ${claim.plan.slice(0, 80)}` : ""}`), stall ? `⚠ 停止条件已触发：连续 ${issue.stallStreak} 次退回无新反馈（阈值 ${stallThreshold}）；请人工介入评估或 resolve` : "", issue.resolvedReason ? `resolved reason: ${issue.resolvedReason}` : "", ...(nextActions(issue).map(action => `next: ${action}`))].filter(Boolean).join("\n"); }
 export function formatIssueTimeline(issue: CommunityIssue): string {
