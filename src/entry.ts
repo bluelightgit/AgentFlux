@@ -226,7 +226,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		const issues = listIssues(cwd);
 		lines.push(`community issues ${issues.length > 0 ? issues.map(issue => `${issue.id} · ${issue.status} · ${issue.title.slice(0, 40)}`).join("\n  ") : "(none)"}`);
 		const events = readFileSync(join(cwd, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => { try { return JSON.parse(line); } catch { return null; } }).filter((event: any) => event?.type === "agent.lifecycle" && (event.action === "started" || event.action === "completed" || event.action === "failed" || event.action === "cancelled"));
-		const timeline = events.slice(-10).map((event: any) => `  ${new Date(event.timestamp ?? event.createdAt).toLocaleTimeString()} [${event.action}] ${event.agent}${event.currentTask ? ` · ${String(event.currentTask).slice(0, 50)}` : ""}`).join("\n");
+		const timeline = events.slice(-10).map((event: any) => `  ${new Date(event.ts ?? event.timestamp ?? event.createdAt).toLocaleTimeString()} [${event.action}] ${event.agent}${event.currentTask ? ` · ${String(event.currentTask).slice(0, 50)}` : ""}`).join("\n");
 		lines.push(`recent agent activity:\n${timeline || "  (none)"}`);
 		return lines.join("\n");
 	}
