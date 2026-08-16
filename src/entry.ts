@@ -750,7 +750,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			telemetry!.writeTaskExecution({ sessionId, taskId: plan.taskId, executionId: plan.executionId, runId: plan.executionId, action, selectedBy: plan.selectedBy, task: plan.task, operation: plan.operation, parentTaskId: plan.parentTaskId, parentExecutionId: plan.parentExecutionId, outcome: { status, success: action === "completed" } });
 			updateTaskStatus(runtime!.fluxDir, plan.taskId, action === "completed" ? "completed" : action === "cancelled" ? "cancelled" : status === "timeout" ? "timed_out" : "failed", { executionId: plan.executionId, costUsd: result.totalCost, outcome: { status } });
 		};
-		if (ctx.mode === "print") {
+		if (!ctx.hasUI) {
 			try {
 				const result = await runWorkflow(plan, controller.signal, request);
 				finish(result);
@@ -827,7 +827,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					currentPlan = plan;
 					const previousTurn = turnIndex;
 					pi.sendUserMessage(task);
-					if (ctx.mode === "print") {
+					if (!ctx.hasUI) {
 						const deadline = Date.now() + 5_000;
 						while (ctx.isIdle?.() && turnIndex === previousTurn && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
 						if (!ctx.isIdle?.()) await ctx.waitForIdle?.();
@@ -849,7 +849,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				notify(ctx, `${action} prepared.`);
 				const previousTurn = turnIndex;
 				pi.sendUserMessage(task);
-				if (ctx.mode === "print") {
+				if (!ctx.hasUI) {
 					const deadline = Date.now() + 5_000;
 					while (ctx.isIdle?.() && turnIndex === previousTurn && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
 					if (!ctx.isIdle?.()) await ctx.waitForIdle?.();
@@ -914,7 +914,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const [groupAction, groupSubject, ...groupRest] = [subject, ...rest];
 					if (groupAction === "list") return notify(ctx, formatMessageGroups(board.listGroups()), "info", 12);
 					if (groupAction === "create") {
-						const members = groupRest.join("").split(",").map(item => item.trim()).filter(Boolean);
+						const members = groupRest.join(",").split(",").map(item => item.trim()).filter(Boolean);
 						if (!groupSubject || members.length === 0) throw new Error("Usage: /flux message group create <name> <member,...>");
 						const group = board.createGroup(groupSubject, [...new Set(["main", ...members])], "team", "main");
 						return notify(ctx, `Created group ${group.name}: ${group.id}\n${group.members.join(", ")}`);
