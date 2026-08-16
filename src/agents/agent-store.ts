@@ -79,7 +79,23 @@ function uniqueName(cwd: string, scope: AgentScope, name: string): string {
  * - 角色模板：role 必须是全局或项目级已注册模板
  * - 会话树分叉：forkFrom 为已有 Agent（id/name，继承其会话记忆）或会话文件路径
  */
-export function createAgent(cwd: string, input: { name: string; role?: string; forkFrom?: string; scope?: AgentScope; ownerSessionId?: string; modelsConfig: any }): AgentRecord {
+/** 单次运行可覆盖的模型与思考等级（覆盖模板默认，不修改模板本身）。 */
+export interface AgentRunOverrides {
+	model?: string;
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** 模型覆盖必须存在于模型表（fail-closed，防止无效模型白跑成本）。 */
+function assertModelOverride(modelsConfig: any, model: string | undefined): void {
+	if (model === undefined) return;
+	if (!modelsConfig?.models?.[model]) {
+		throw new Error(`Unknown model: ${model}. Available models: ${Object.keys(modelsConfig?.models ?? {}).join(", ") || "none"}.`);
+	}
+}
+
+export function createAgent(cwd: string, input: { name: string; role?: string; forkFrom?: string; scope?: AgentScope; ownerSessionId?: string; modelsConfig: any; model?: string; thinking?: AgentRunOverrides["thinking"] }): AgentRecord {
 	const safeName = assertSafePathSegment(input.name, "Agent name");
 	const scope: AgentScope = input.scope ?? "project";
 	const roles = loadAllRoles(cwd, input.modelsConfig);
@@ -87,6 +103,10 @@ export function createAgent(cwd: string, input: { name: string; role?: string; f
 		throw new Error(`Unknown Agent template: ${input.role}. Use a registered template id (${[...roles.keys()].join(", ") || "none available"}); role is not a free-form description.`);
 	}
 	const role = input.role ?? "assistant";
+	assertModelOverride(input.modelsConfig, input.model);
+	if (input.thinking !== undefined && !THINKING_LEVELS.includes(input.thinking)) {
+		throw new Error(`Unknown thinking level: ${input.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
+	}
 	const template = roles.get(role);
 	const now = new Date().toISOString();
 	let sessionId: string | undefined;
@@ -112,8 +132,9 @@ export function createAgent(cwd: string, input: { name: string; role?: string; f
 			templateRevision: 1,
 			forkPoint,
 		},
-		model: template?.model,
-		provider: template?.model ? input.modelsConfig?.models?.[template.model]?.provider : undefined,
+		model: input.model ?? template?.model,
+		provider: (() => { const m = input.model ?? template?.model; return m ? input.modelsConfig?.models?.[m]?.provider : undefined; })(),
+		thinking: input.thinking ?? template?.thinking,
 		sessionId: sessionId ?? `agent-${uniqueName(cwd, scope, safeName)}`,
 		createdAt: now,
 		updatedAt: now,
@@ -170,18 +191,19 @@ export function gcAgents(cwd: string, keepLatestK = 10, activeRefs: ReadonlySet<
 function toTemplate(record: AgentRecord, cwd: string, modelsConfig: any, sharedSkills: string[]): AgentTemplate {
 	const role = loadAllRoles(cwd, modelsConfig).get(record.role);
 	if (!role) throw new Error(`Unknown Agent template: ${record.role}`);
+	const model = record.model ?? role.model;
 	return {
 		name: record.name,
 		role: record.role,
 		description: role.description ?? record.role,
-		model: role.model,
-		provider: role.model ? modelsConfig?.models?.[role.model]?.provider : undefined,
+		model,
+		provider: model ? modelsConfig?.models?.[model]?.provider : undefined,
 		tools: role.tools,
 		skills: [...new Set([...sharedSkills, ...(role.skills ?? [])])],
 		mcpServers: role.mcpServers,
 		workspace: role.workspace,
 		systemPrompt: role.systemPrompt ?? `You are the ${record.role} specialist.`,
-		thinking: role.thinking,
+		thinking: record.thinking ?? role.thinking,
 		communication: role.communication,
 	};
 }
@@ -200,7 +222,11 @@ function findSingle(cwd: string, selector: string): AgentRecord {
  * 返回其最后一条消息；assistantMessages 供 last(k) 展示更多执行消息。
  * busy 时拒绝（对话排队由 Message V2 pending 投递承载）。
  */
-export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string): Promise<AgentRunResult> {
+export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides): Promise<AgentRunResult> {
+	assertModelOverride(context.modelsConfig, overrides?.model);
+	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
+		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
+	}
 	if (!task.trim()) throw new Error("run requires task");
 	const record = findSingle(context.cwd, selector);
 	const path = registryPath(context.cwd, record.scope);
@@ -216,9 +242,15 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: "running", action: "started", role: running.role, forkPoint: running.lineage.forkPoint, model: running.model });
 	let result: AgentRunResult;
 	try {
+		const template = toTemplate(running, context.cwd, context.modelsConfig, context.sharedSkills ?? []);
+		if (overrides?.model) {
+			template.model = overrides.model;
+			template.provider = context.modelsConfig?.models?.[overrides.model]?.provider;
+		}
+		if (overrides?.thinking !== undefined) template.thinking = overrides.thinking;
 		result = await runAgent({
 			cwd: context.cwd,
-			agent: toTemplate(running, context.cwd, context.modelsConfig, context.sharedSkills ?? []),
+			agent: template,
 			task,
 			sessionId: context.sessionId,
 			taskId: context.taskId,

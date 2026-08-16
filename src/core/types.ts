@@ -23,6 +23,7 @@ export interface AgentRecord {
 	lineage: AgentLineage;
 	model?: string;
 	provider?: string;
+	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";  // 创建时覆盖角色模板的思考等级
 	sessionId?: string;
 	ownerSessionId?: string;
 	createdAt: string;

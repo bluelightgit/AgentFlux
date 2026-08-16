@@ -84,6 +84,24 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	return null;
 }
 
+/** 解析 --model <m> / --thinking <t> 覆盖参数，其余参数保持位置语义。 */
+export function parseAgentFlags(rest: string[]): { flags: Record<string, string>; positional: string[] } {
+	const flags: Record<string, string> = {};
+	const positional: string[] = [];
+	for (let index = 0; index < rest.length; index++) {
+		const item = rest[index];
+		if (item === "--model" || item === "--thinking") {
+			const value = rest[index + 1];
+			if (!value || value.startsWith("--")) throw new Error(`${item} requires a value`);
+			flags[item.slice(2)] = value;
+			index++;
+		} else {
+			positional.push(item);
+		}
+	}
+	return { flags, positional };
+}
+
 export function parseFluxCommand(input: string): FluxCommand {
 	const parts = input.trim().replace(/^\/flux(?:\s+|$)/, "").split(/\s+/).filter(Boolean);
 	if (parts.length === 0 || parts[0] === "help") return { kind: "help" };

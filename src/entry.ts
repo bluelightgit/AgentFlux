@@ -19,7 +19,7 @@ import { resolvePathInsideExistingRoot } from "./core/safe-path";
 import { parseAgentFluxTaskEnvelope, type AgentFluxTaskEnvelope } from "./core/task-envelope";
 import { formatTasks, getTask, listTasks, registerTask, resolveTask, updateTaskMetadata, updateTaskStatus, type TaskStatus } from "./core/task-registry";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
-import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
+import { FLUX_HELP, getFluxArgumentCompletions, parseAgentFlags, parseFluxCommand } from "./extension/commands";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showMessageTuiMenu, showTaskTuiMenu, showWorkflowTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { TelemetryWriter, type MainUsage } from "./telemetry/events";
@@ -143,6 +143,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 		"- When the user asks to reuse, resume, or continue prior work, call flux_task with that matching action before doing the work; use list/inspect only when the user is asking about history.",
 		"- When the user asks to change a saved Workflow definition, call flux_workflow with action=modify and its saved selector; do not use action=run and do not create DAG nodes that edit AgentFlux registry files.",
 		"- Only one project-level execution may be active at a time: a Workflow run or a Community activity cannot overlap another. Internal session, task, run, and Agent identifiers are managed by AgentFlux; do not request or invent them.",
+		"- Execution guidance: run simple or short tasks directly in the main Agent; delegate isolated, independent sub-tasks to subagents (flux_agent); use flux_workflow for multi-step tasks with dependencies, parallelism, or repeatable structure; use flux_issue for collaborative tasks that need proposals, reviews, and decisions. Prefer the lightest approach that fits the task.",
+		"- Model guidance: subagents inherit the role template's model and thinking level; override per run with flux_agent model/thinking when the task warrants it (cheap fast models with low thinking for mechanical, well-scoped work; capable models with higher thinking for deep reasoning). Workflow roles are assigned by capability-and-price affinity ranking; an explicit override always wins over ranking.",
 	].join("\n");
 
 	function startPlan(plan: TaskExecutionPlan, writeCreated = true): TaskExecutionPlan {
@@ -511,6 +513,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 			name: Type.Optional(Type.String()),
 			agent: Type.Optional(Type.String()),
 			role: Type.Optional(Type.String()),
+			model: Type.Optional(Type.String()),
+			thinking: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")])),
 			forkFrom: Type.Optional(Type.String()),
 			scope: Type.Optional(Type.Union([Type.Literal("global"), Type.Literal("project"), Type.Literal("session")])),
 			task: Type.Optional(Type.String()),
@@ -531,7 +535,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!params.name) throw new Error("create requires name");
 				let agent;
 				try {
-					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, model: params.model, thinking: params.thinking, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 				} catch (error: any) {
 					executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
 					throw error;
@@ -565,7 +569,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!params.agent) throw new Error(`${params.action} requires agent`);
 				let matches = findAgents(runtime.cwd, params.agent);
 				if (params.action === "run" && matches.length === 0) {
-					const agent = createAgent(runtime.cwd, { name: params.agent, role: params.role, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					const agent = createAgent(runtime.cwd, { name: params.agent, role: params.role, model: params.model, thinking: params.thinking, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 					telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
 					matches = findAgents(runtime.cwd, agent.name);
 				}
@@ -581,7 +585,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				signal?.addEventListener("abort", forwardAbort, { once: true });
 				let result: AgentRunResult;
 				try {
-					result = await runAgentRecord(matches[0].name, task, context, controller.signal);
+					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking });
 				} catch (error: any) {
 					executionOutcome = controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
@@ -932,19 +936,21 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (command.kind === "cancel") { const ids = command.taskId ? [command.taskId] : [...activeRuns.keys()]; for (const id of ids) activeRuns.get(id)?.abort(); return notify(ctx, ids.length ? `Cancellation requested: ${ids.join(", ")}` : "No active runs."); }
 			if (command.kind === "agent") {
 				const [action, subject, ...rest] = command.args;
+				// 解析 --model <m> 与 --thinking <t> 覆盖参数（与 issue claim --props 同风格）
+				const { flags, positional } = parseAgentFlags(rest);
 				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd)), "info", 12);
 				if (action === "create" && subject) {
-					const role = rest[0];
-					const agent = createAgent(runtime.cwd, { name: subject, role, scope: rest.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					const role = positional[0];
+					const agent = createAgent(runtime.cwd, { name: subject, role, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
-					return notify(ctx, `Created ${agent.name} (${agent.role}, ${agent.scope})`);
+					return notify(ctx, `Created ${agent.name} (${agent.role}, ${agent.scope})${flags.model ? ` · model ${flags.model}` : ""}${flags.thinking ? ` · thinking ${flags.thinking}` : ""}`);
 				}
 				if (action === "run" && subject) {
-					const task = rest.join(" ").trim();
-					if (!task) throw new Error("Usage: /flux agent run <name> <task>");
+					const task = positional.join(" ").trim();
+					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>]");
 					const existing = findAgents(runtime.cwd, subject);
-					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, modelsConfig: runtime.modelsConfig });
-					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext()), 1), "info", 12);
+					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
+					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), undefined, undefined, { model: flags.model, thinking: flags.thinking as any }), 1), "info", 12);
 				}
 				if (action === "retry" && subject) {
 					const record = findAgents(runtime.cwd, subject)[0];

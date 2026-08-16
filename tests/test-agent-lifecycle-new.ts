@@ -185,6 +185,7 @@ async function main(): Promise<void> {
 		let unknownTemplateRejected = false;
 		try { createAgent(root, { name: "bad", role: "no-such-role", modelsConfig: { models: {} } }); } catch { unknownTemplateRejected = true; }
 		check(unknownTemplateRejected, "未知角色模板拒绝创建");
+
 		const runResult = await runAgentRecord("reviewer-main", "review task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride });
 		const afterRun = listAgents(root).find(agent => agent.name === "reviewer-main")!;
 		check(runResult.exitCode === 0 && afterRun.status === "idle" && afterRun.callCount === 1, "run 后回到 idle 并保留身份");
@@ -217,6 +218,27 @@ async function main(): Promise<void> {
 		check(cleaned.includes("session-scope") && !cleaned.includes("session-other"), "会话结束清理本会话的 session Agent（保留其他会话）");
 		const afterCleanup = listAgents(root);
 		check(!afterCleanup.some(agent => agent.name === "session-scope") && afterCleanup.some(agent => agent.name === "session-other"), "清理后本会话 Agent 消失，其他会话保留");
+		// ─── 模型/思考等级覆盖 ───
+		const modelsConfig = {
+			models: {
+				"flash-model": { provider: "octopus-completions", contextWindow: 128000, pricing: { input: 0.1, output: 0.2 } },
+				"pro-model": { provider: "octopus-anthropic", contextWindow: 128000, pricing: { input: 1, output: 2 } },
+			},
+		};
+		const overridden = createAgent(root, { name: "doc-writer", role: "implementer", model: "flash-model", thinking: "off", modelsConfig });
+		check(overridden.model === "flash-model" && overridden.thinking === "off" && overridden.provider === "octopus-completions", "create 时 model/thinking 覆盖角色模板并持久化");
+		let unknownModelRejected = false;
+		try { createAgent(root, { name: "bad-model", model: "no-such-model", modelsConfig }); } catch (error: any) { unknownModelRejected = /Unknown model/.test(String(error?.message ?? "")); }
+		check(unknownModelRejected, "未知模型覆盖拒绝创建（fail-closed）");
+		let badThinkingRejected = false;
+		try { createAgent(root, { name: "bad-thinking", thinking: "ultra" as any, modelsConfig }); } catch (error: any) { badThinkingRejected = /Unknown thinking level/.test(String(error?.message ?? "")); }
+		check(badThinkingRejected, "非法思考等级覆盖拒绝创建");
+		const coveredRun = await runAgentRecord("doc-writer", "write doc", { cwd: root, modelsConfig, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }, undefined, undefined, { model: "pro-model", thinking: "high" });
+		const afterCoveredRun = listAgents(root).find(agent => agent.name === "doc-writer")!;
+		check(coveredRun.exitCode === 0 && afterCoveredRun.model === "flash-model", "run 时 model/thinking 覆盖仅作用于单次运行，不修改记录");
+		let badRunOverrideRejected = false;
+		try { await runAgentRecord("doc-writer", "write doc", { cwd: root, modelsConfig, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }, undefined, undefined, { model: "nope" }); } catch (error: any) { badRunOverrideRejected = /Unknown model/.test(String(error?.message ?? "")); }
+		check(badRunOverrideRejected, "run 时未知模型覆盖拒绝（fail-closed）");
 		console.log(`\n${passed} Agent lifecycle checks passed`);
 	} finally { delete process.env.AGENTFLUX_TEST_CAPTURE; rmSync(root, { recursive: true, force: true }); }
 }

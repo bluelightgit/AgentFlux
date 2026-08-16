@@ -3,7 +3,7 @@
  * Covers: parseFluxCommand, getFluxArgumentCompletions, FLUX_HELP
  */
 import { strict as assert } from "node:assert";
-import { parseFluxCommand, getFluxArgumentCompletions, type FluxCommand } from "../src/extension/commands";
+import { parseFluxCommand, getFluxArgumentCompletions, parseAgentFlags, type FluxCommand } from "../src/extension/commands";
 
 let passed = 0;
 let failed = 0;
@@ -96,6 +96,21 @@ check("parses 'agent archive <name>'", () => {
 	if (cmd.kind === "agent") {
 		assert.deepStrictEqual(cmd.args, ["archive", "old-agent"]);
 	}
+});
+
+check("parseAgentFlags 提取 --model/--thinking 并保留位置参数", () => {
+	const { flags, positional } = parseAgentFlags(["implementer", "--model", "flash-model", "--thinking", "high", "project"]);
+	assert.deepStrictEqual(flags, { model: "flash-model", thinking: "high" });
+	assert.deepStrictEqual(positional, ["implementer", "project"]);
+});
+check("parseAgentFlags 缺值报错", () => {
+	assert.throws(() => parseAgentFlags(["--model"]), /requires a value/);
+	assert.throws(() => parseAgentFlags(["--thinking", "--model"]), /requires a value/);
+});
+check("parseAgentFlags 无标记时原样返回", () => {
+	const { flags, positional } = parseAgentFlags(["worker", "写文档"]);
+	assert.deepStrictEqual(flags, {});
+	assert.deepStrictEqual(positional, ["worker", "写文档"]);
 });
 
 check("parses 'fork last'", () => {
