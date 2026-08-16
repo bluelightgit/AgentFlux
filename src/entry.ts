@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
@@ -276,7 +276,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		return {
 			agents: [
 				{ name: "main", kind: "main", role: "lead", status: currentPlan || implicitTask ? "running" : "idle", model: ctx.model?.id, provider: ctx.model?.provider, sessionId, callCount: turnIndex, totalCostUsd: 0, capabilityGeneration: 1, lastTask: currentPlan?.task ?? implicitTask?.task, communication: "current_chat" },
-				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const, sessionCommand: formatAgentSessionCommand(cwd, agent), lastMessage: agent.lastResult?.summary })),
+				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const, sessionCommand: formatAgentSessionCommand(cwd, agent), lastMessage: readAgentLastMessage(cwd, agent) })),
 			],
 			roles: [...loadAllRoles(runtime.cwd, runtime.modelsConfig).keys()].sort(),
 			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })), proposals: (issue.proposals ?? []).map(proposal => ({ id: proposal.id, title: proposal.title })) })),

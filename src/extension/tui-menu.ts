@@ -92,7 +92,7 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	if (action?.startsWith("Talk")) {
 		const last = agent.lastMessage?.trim().replace(/\s+/g, " ").slice(0, 200);
 		ctx.ui.notify(last ? `${agent.name} 最近一次回复：${last}` : `${agent.name} 还没有 run 过，暂无历史回复。`, "info");
-		const message = await input(ctx, `Talk to ${agent.name}`, "Describe the task, question or follow-up");
+		const message = await input(ctx, `Talk to ${agent.name}`, last ? `最近回复：${last.slice(0, 60)}` : "Describe the task, question or follow-up");
 		if (!message) return null;
 		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;
 	}

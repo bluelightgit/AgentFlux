@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "../core/json-store";
@@ -403,6 +403,28 @@ export function resolveAgentSessionFile(cwd: string, record: AgentRecord): strin
 			.sort((a, b) => b.mtime - a.mtime)[0]?.name;
 		return name ? join(sessionsDir, name) : undefined;
 	} catch { return undefined; }
+}
+
+/** 读取子代理会话文件中最后一条 assistant 文本消息（“最后说的话”，Talk 展示用）。
+ * 会话文件事件类型为 message（非 message_end），逐行倒序扫描取最后一条含 text 的 assistant 消息。 */
+export function readAgentLastMessage(cwd: string, record: AgentRecord): string | undefined {
+	const sessionFile = resolveAgentSessionFile(cwd, record);
+	if (!sessionFile) return undefined;
+	try {
+		const lines = readFileSync(sessionFile, "utf8").split("\n");
+		for (let i = lines.length - 1; i >= 0; i--) {
+			try {
+				const event = JSON.parse(lines[i]);
+				if (event?.type === "message" && event.message?.role === "assistant") {
+					const texts = (event.message.content ?? [])
+						.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim())
+						.map((block: any) => block.text.trim());
+					if (texts.length) return texts.join(" ");
+				}
+			} catch { /* 跳过坏行 */ }
+		}
+	} catch { return undefined; }
+	return undefined;
 }
 
 /** 进入子代理直接对话窗口的启动命令（单行）：npx pi --session "<会话文件>"。无会话文件时返回 undefined。 */
