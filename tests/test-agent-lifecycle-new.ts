@@ -190,6 +190,11 @@ async function main(): Promise<void> {
 		const afterRun = listAgents(root).find(agent => agent.name === "reviewer-main")!;
 		check(runResult.exitCode === 0 && afterRun.status === "idle" && afterRun.callCount === 1, "run 后回到 idle 并保留身份");
 		check(afterRun.lastTask === "review task", "lastTask 持久化供 retry 复用");
+		check(afterRun.lastResult?.success === true && afterRun.lastResult.turns >= 0 && typeof afterRun.lastResult.costUsd === "number" && afterRun.lastResult.summary.length > 0, "完成 run 写入 lastResult 摘要（后台查询用）");
+		check(formatAgents(listAgents(root)).includes("last=SUCCESS"), "formatAgents 展示最近一次运行结果");
+		const statusEvents: string[] = [];
+		await runAgentRecord("reviewer-main", "second task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }, undefined, undefined, undefined, status => statusEvents.push(status));
+		check(statusEvents[0] === "running" && statusEvents[statusEvents.length - 1] === "idle", "onStatusChange 回调按 running → 终态 上报（footer 状态行刷新）");
 		let busyRejected = false;
 		try { await runAgentRecord("reviewer-main", "second task", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }); } catch (error: any) { busyRejected = String(error?.message ?? "").includes("already running"); }
 		check(!busyRejected || afterRun.status === "idle", "run 后未处于 busy 状态（真实运行已结束）");

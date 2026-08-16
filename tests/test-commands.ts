@@ -117,6 +117,11 @@ check("parseAgentFlags 支持 --background 无值标志", () => {
 	assert.deepStrictEqual(flags, { background: "true", thinking: "high" });
 	assert.deepStrictEqual(positional, ["worker", "写文档"]);
 });
+check("parseAgentFlags 支持 --sync 显式同步标志（默认后台）", () => {
+	const { flags, positional } = parseAgentFlags(["worker", "写文档", "--sync"]);
+	assert.deepStrictEqual(flags, { sync: "true" });
+	assert.deepStrictEqual(positional, ["worker", "写文档"]);
+});
 
 check("parses 'fork last'", () => {
 	const cmd = parseFluxCommand("fork last");

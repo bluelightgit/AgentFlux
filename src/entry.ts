@@ -521,7 +521,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_agent",
 		label: "Agent",
-		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run returns the Agent's last message (last(k) for more). One project-level execution at a time: a running Agent blocks starting a Workflow or Community run.",
+		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run is background by default (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more).",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
 			background: Type.Optional(Type.Boolean()),
@@ -600,10 +600,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const forwardAbort = () => controller.abort();
 				persistentControllers.set(matches[0].name, controller);
 				signal?.addEventListener("abort", forwardAbort, { once: true });
-				if (params.background) {
+				const background = params.background !== false && uiCtx?.hasUI !== false; // TUI 默认后台（结果异步通知）；headless 默认同步（会话立即结束，后台无意义）；background:false 显式同步 / background:true 显式后台
+				if (background) {
 					// 后台模式：不等待子代理完成，立即返回；结果在完成时 notify + footer 状态行
 					const name = matches[0].name;
-					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking })
+					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine())
 						.then(result => {
 							const ok = result.exitCode === 0 && !result.errorMessage;
 							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -617,11 +618,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 							updateSubagentStatusLine();
 						});
 					updateSubagentStatusLine();
-					return { content: [{ type: "text", text: `后台已启动子代理 ${name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。运行中可用 /flux agent stop ${name} 停止，/flux status 查看状态；完成后会通知。` }], details: { ok: true, background: true } };
+					return { content: [{ type: "text", text: `后台已启动子代理 ${name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。运行中可用 /flux agent stop ${name} 停止；完成后会通知，可用 flux_agent list 查看最近结果。` }], details: { ok: true, background: true } };
 				}
 				let result: AgentRunResult;
 				try {
-					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking });
+					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine());
 				} catch (error: any) {
 					executionOutcome = controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
@@ -989,10 +990,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>] [--background]");
 					const existing = findAgents(runtime.cwd, subject);
 					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
-					if (flags.background) {
+					const background = flags.sync !== "true" && ctx.hasUI; // TUI 默认后台；headless 同步（会话立即结束，后台无意义）；--sync 强制同步；--background 强制后台
+					if (background) {
 						const controller = new AbortController();
 						persistentControllers.set(agent.name, controller);
-						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any })
+						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine())
 							.then(result => {
 								const ok = result.exitCode === 0 && !result.errorMessage;
 								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -1000,10 +1002,10 @@ export default function agentFlux(pi: ExtensionAPI) {
 							.catch((error: any) => notify(ctx, `[subagent ${agent.name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1))
 							.finally(() => { persistentControllers.delete(agent.name); updateSubagentStatusLine(); });
 						updateSubagentStatusLine();
-						return notify(ctx, `后台已启动子代理 ${agent.name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。/flux agent stop ${agent.name} 可停止。`, "info", 1);
+						return notify(ctx, `后台已启动子代理 ${agent.name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。/flux agent stop ${agent.name} 可停止，/flux agent list 查看最近结果。`, "info", 1);
 					}
 					updateSubagentStatusLine();
-					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), undefined, undefined, { model: flags.model, thinking: flags.thinking as any }), 1), "info", 12);
+					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), undefined, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine()), 1), "info", 12);
 				}
 				if (action === "retry" && subject) {
 					const record = findAgents(runtime.cwd, subject)[0];

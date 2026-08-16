@@ -84,7 +84,7 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	return null;
 }
 
-/** 解析 --model <m> / --thinking <t> / --background 覆盖参数，其余参数保持位置语义。 */
+/** 解析 --model <m> / --thinking <t> / --background / --sync 覆盖参数，其余参数保持位置语义。 */
 export function parseAgentFlags(rest: string[]): { flags: Record<string, string>; positional: string[] } {
 	const flags: Record<string, string> = {};
 	const positional: string[] = [];
@@ -95,8 +95,8 @@ export function parseAgentFlags(rest: string[]): { flags: Record<string, string>
 			if (!value || value.startsWith("--")) throw new Error(`${item} requires a value`);
 			flags[item.slice(2)] = value;
 			index++;
-		} else if (item === "--background") {
-			flags.background = "true";
+		} else if (item === "--background" || item === "--sync") {
+			flags[item.slice(2)] = "true";
 		} else {
 			positional.push(item);
 		}
@@ -129,7 +129,7 @@ export const FLUX_HELP = [
 	"AgentFlux",
 	"  /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]",
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
-	"  /flux agent list|create <name> <role>|run <name> <task> [--model <m>] [--thinking <t>] [--background]|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
+	"  /flux agent list|create <name> <role>|run <name> <task> [--model <m>] [--thinking <t>] [--sync]|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
 	"  /flux fork [last|index|entryId]",
 	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>] [--props <id1,id2>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",

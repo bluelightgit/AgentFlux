@@ -62,6 +62,7 @@ function normalizeAgentRecord(record: any): AgentRecord {
 		callCount: record.callCount ?? 0,
 		totalCostUsd: record.totalCostUsd ?? 0,
 		capabilityGeneration: record.capabilityGeneration ?? 1,
+		lastResult: record.lastResult,
 	};
 }
 const createRegistry = (): AgentRegistry => ({ agents: [] });
@@ -107,6 +108,17 @@ function uniqueName(cwd: string, scope: AgentScope, name: string): string {
 export interface AgentRunOverrides {
 	model?: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+/** 最近一次运行结果摘要（后台运行时供 list/show 查询）。 */
+export interface AgentRunSummary {
+	exitCode: number;
+	success: boolean;
+	summary: string;
+	turns: number;
+	costUsd: number;
+	model?: string;
+	at: string;
 }
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -246,7 +258,7 @@ function findSingle(cwd: string, selector: string): AgentRecord {
  * 返回其最后一条消息；assistantMessages 供 last(k) 展示更多执行消息。
  * busy 时拒绝（对话排队由 Message V2 pending 投递承载）。
  */
-export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides): Promise<AgentRunResult> {
+export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void): Promise<AgentRunResult> {
 	assertModelOverride(context.modelsConfig, overrides?.model);
 	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
 		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
@@ -263,6 +275,7 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
+	onStatusChange?.("running", running);
 	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: "running", action: "started", role: running.role, forkPoint: running.lineage.forkPoint, model: running.model });
 	let result: AgentRunResult;
 	try {
@@ -291,14 +304,21 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			invocationOverride: context.invocationOverride,
 		});
 	} catch (error) {
-		updateRegistry(path, agents => {
+		const failed = updateRegistry(path, agents => {
 			const current = agents.find(agent => agent.id === running.id);
-			if (current) {
-				current.status = signal?.aborted ? "cancelled" : "failed";
-				current.updatedAt = new Date().toISOString();
-			}
+			if (!current) throw new Error(`Agent disappeared while running: ${running.name}`);
+			current.status = signal?.aborted ? "cancelled" : "failed";
+			current.lastResult = {
+				exitCode: signal?.aborted ? 130 : 1,
+				success: false,
+				summary: String(error instanceof Error ? error.message : error).slice(0, 300),
+				turns: 0, costUsd: 0, at: new Date().toISOString(),
+			};
+			current.updatedAt = new Date().toISOString();
+			return structuredClone(current);
 		});
 		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed" });
+		onStatusChange?.(signal?.aborted ? "cancelled" : "failed", failed);
 		throw error;
 	}
 	const completed = updateRegistry(path, agents => {
@@ -307,10 +327,20 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 		current.status = result.exitCode === 0 && !result.errorMessage ? "idle" : result.exitCode === 130 ? "cancelled" : "failed";
 		current.callCount += 1;
 		current.totalCostUsd += result.usage.cost;
+		current.lastResult = {
+			exitCode: result.exitCode,
+			success: result.exitCode === 0 && !result.errorMessage,
+			summary: result.errorMessage?.slice(0, 300) ?? result.output.trim().slice(0, 300) ?? "",
+			turns: result.usage.turns,
+			costUsd: result.usage.cost,
+			model: result.model ?? undefined,
+			at: new Date().toISOString(),
+		};
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
 	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "subagent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed" });
+	onStatusChange?.(completed.status, completed);
 	return result;
 }
 
@@ -343,7 +373,7 @@ export function resetAgentStatus(cwd: string, selector: string, status: Exclude<
 
 export function formatAgents(agents: AgentRecord[]): string {
 	if (agents.length === 0) return "No Agents.";
-	return ["Agents:", ...agents.map(agent => `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}`)].join("\n");
+	return ["Agents:", ...agents.map(agent => `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(4)}·${agent.lastResult.summary.slice(0, 60)}` : ""}`)].join("\n");
 }
 
 /** TUI 底部状态行：运行中的优先，其次按创建时间新旧（最新在前），单行超长省略。 */

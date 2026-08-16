@@ -32,6 +32,7 @@ export interface AgentRecord {
 	callCount: number;
 	totalCostUsd: number;
 	capabilityGeneration: number;
+	lastResult?: { exitCode: number; success: boolean; summary: string; turns: number; costUsd: number; model?: string; at: string };  // 最近一次运行结果摘要（后台运行时供 list 查询）
 }
 
 export interface CacheStats {
