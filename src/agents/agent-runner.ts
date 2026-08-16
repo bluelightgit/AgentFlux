@@ -372,7 +372,7 @@ export function loadAgentTemplate(cwd: string, name: string): AgentTemplate | nu
 			provider: "octopus-completions",
 			thinking: "xhigh",
 			tools: ["read", "grep", "find", "ls", "bash"],
-			systemPrompt: "You are a senior code reviewer. Analyze code for quality, security, maintainability. Bash is read-only only (git diff/log/show). Output: ## Files Reviewed / ## Critical / ## Warnings / ## Suggestions / ## Summary. Be specific with file paths and line numbers.",
+			systemPrompt: "你是一名资深代码评审者。从代码质量、安全性、可维护性角度分析。Bash 仅允许只读命令（git diff/log/show）。输出：## 已审查文件 / ## 严重问题 / ## 警告 / ## 建议 / ## 总结。指明具体文件路径与行号。",
 		};
 	}
 	return null;

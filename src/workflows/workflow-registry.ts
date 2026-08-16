@@ -22,6 +22,9 @@ interface WorkflowStore {
 function storePath(fluxDir: string): string {
 	return join(fluxDir, "runtime", "workflows.json");
 }
+/** 每个 workflow 保留的最近版本数上限（超出移除最旧版本，最新永远保留）。 */
+const MAX_VERSIONS_PER_WORKFLOW = 10;
+
 const createStore = (): WorkflowStore => ({ version: 1, definitions: [] });
 const isStore = (value: unknown): value is WorkflowStore =>
 	!!value && typeof value === "object"
@@ -132,6 +135,14 @@ export function reviseWorkflowDefinition(
 			updatedAt: new Date().toISOString(),
 		};
 		store.definitions.push(definition);
+		// 版本保留上限：只保留最近 MAX_VERSIONS_PER_WORKFLOW 个版本，最旧版本直接移除
+		// （与 Agent GC keepLatestK 同一语义；最新版本永远保留）
+		const history = store.definitions.filter(item => item.id === previous.id)
+			.sort((a, b) => b.version - a.version);
+		for (const stale of history.slice(MAX_VERSIONS_PER_WORKFLOW)) {
+			const index = store.definitions.indexOf(stale);
+			if (index !== -1) store.definitions.splice(index, 1);
+		}
 		return definition;
 	});
 }

@@ -78,7 +78,17 @@ try {
 			.filter(item => item.id === created.id)
 			.map(item => item.version)
 			.sort((a, b) => a - b);
-		assert.deepEqual(versions, Array.from({ length: 14 }, (_, index) => index + 1));
+		// 14 次修订只保留最近 10 个版本（版本上限），最新永远保留且单调唯一
+		assert.equal(versions.length, 10);
+		assert.deepEqual(versions, Array.from({ length: 10 }, (_, index) => index + 5));
+	});
+	check("Version cap keeps the newest revisions only", () => {
+		const kept = listWorkflowDefinitions(root, true)
+			.filter(item => item.id === created.id)
+			.map(item => item.version)
+			.sort((a, b) => a - b);
+		assert.equal(kept.at(-1), 14, "latest version always retained");
+		assert.equal(kept[0], 5, "oldest versions beyond the cap are dropped");
 	});
 	check("Workflow delete removes all versions", () => {
 		deleteWorkflowDefinition(root, created.id);

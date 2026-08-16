@@ -22,7 +22,6 @@ import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } 
 import { FLUX_HELP, getFluxArgumentCompletions, parseFluxCommand } from "./extension/commands";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showMessageTuiMenu, showTaskTuiMenu, showWorkflowTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
-import { installSlashArgumentAutocompleteBridge } from "./extension/tui-autocomplete-bridge";
 import { TelemetryWriter, type MainUsage } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
 import { createWorkflowDefinition, deleteWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
@@ -118,7 +117,6 @@ function templateFromRole(runtime: RuntimeContext, roleName: string, name = role
 }
 
 export default function agentFlux(pi: ExtensionAPI) {
-	installSlashArgumentAutocompleteBridge();
 	let runtime: RuntimeContext | null = null;
 	let telemetry: TelemetryWriter | null = null;
 	let sessionId = "main";

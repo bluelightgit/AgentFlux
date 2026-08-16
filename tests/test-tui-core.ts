@@ -52,39 +52,10 @@ async function main(): Promise<void> {
 		);
 		check(isSlashArgumentBoundary("/flux work ", " ") && !isSlashArgumentBoundary("plain text ", " "), "空格可触发 slash command 参数补全而不影响普通输入");
 		check(shouldContinueSlashCompletion("/flux work", "\t") && !shouldContinueSlashCompletion("/flux work ", "\t"), "Tab 补全 slash 字段后继续显示下级选单");
-		// bridge 安装后：候选列表渲染被移到输入行上方，且打开后自动关闭定时器存在
-		const bridgeMark = Symbol.for("agentflux.slash-argument-autocomplete");
-		const bridgePatched = (Editor.prototype as any)[bridgeMark] === true;
-		check(bridgePatched, "bridge 已安装到真实 pi-tui Editor 原型");
+		// 原型补丁已清理（双实例无效，2026-08-16）：候选列表行为由主进程控制，
+		// 空参数时 getArgumentCompletions 返回 null 以关闭列表
 		const proto = Editor.prototype as any;
-		const fakeEditor: any = {
-			state: { lines: ["/flux task "], cursorLine: 0, cursorCol: 11 },
-			autocompleteState: "regular",
-			autocompleteList: { render: () => ["→ list", "  show", "  reuse"] },
-			paddingX: 1,
-			lastWidth: 0,
-			borderColor: (s: string) => s,
-			layoutText: () => [{ text: "/flux task ", hasCursor: true, cursorPos: 11 }],
-			scrollOffset: 0,
-			segment: (s: string) => [{ segment: s }],
-			focused: false,
-			tui: { terminal: { rows: 32 }, requestRender: () => undefined },
-			visibleWidth: (s: string) => s.length,
-			getBestAutocompleteMatchIndex: () => -1,
-			createAutocompleteList: () => ({ setSelectedIndex: () => undefined }),
-			cancelAutocompleteRequest: () => undefined,
-			clearAutocompleteUi: () => undefined,
-		};
-		const rendered = (proto.render ?? (() => [])).call(fakeEditor, 120);
-		check(rendered[0].includes("list"), "候选列表渲染在输入行上方（第一行即候选，而非底部）");
-		const apply = proto.applyAutocompleteSuggestions;
-		if (typeof apply === "function") {
-			apply.call(fakeEditor, { items: [{ value: "list" }] }, "regular");
-			check(fakeEditor[Symbol.for("agentflux.autocomplete-auto-close-timer")] !== undefined, "候选打开后注册自动关闭定时器");
-			const cancel = proto.cancelAutocomplete;
-			if (typeof cancel === "function") cancel.call(fakeEditor);
-			check(fakeEditor[Symbol.for("agentflux.autocomplete-auto-close-timer")] === undefined, "取消候选时清除自动关闭定时器");
-		}
+		check(proto[Symbol.for("agentflux.slash-argument-autocomplete")] !== true, "无效的 Editor 原型补丁已移除（不再修改 pi-tui 类）");
 		const flux = pi.commands.get("flux");
 		const rootCompletions = await flux.getArgumentCompletions("");
 		check(!rootCompletions.some((item: any) => item.value === "work") && rootCompletions.some((item: any) => item.value === "task") && rootCompletions.some((item: any) => item.value === "workflow") && rootCompletions.some((item: any) => item.value === "agent"), "输入 /flux 空格显示顶层补全（work 模式选择已移除）");
