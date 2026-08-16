@@ -644,13 +644,11 @@ export class SharedBoard {
 		return `${agentName}:${PROCESS_OWNER_ID}`;
 	}
 
-	/** 从锁 ownerId（`<agent>:<pid>-<uuid>`）解析持有者 pid；解析不出返回 undefined。 */
+	/** 从锁 ownerId（`<agent>:<pid>-<uuid>`）解析持有者 pid；解析不出返回 undefined。
+	 * 只用冒号后的 `<pid>-` 段：agent 名可数字开头（如 123worker），逐段匹配会误判。 */
 	private lockOwnerPid(ownerId: string): number | undefined {
-		for (const part of ownerId.split(":")) {
-			const m = /^(\d+)/.exec(part);
-			if (m) return Number(m[1]);
-		}
-		return undefined;
+		const m = /:(\d+)-/.exec(ownerId);
+		return m ? Number(m[1]) : undefined;
 	}
 
 	/** 获取文件锁. 返回 true=成功, false=已被其他 agent 锁定 */

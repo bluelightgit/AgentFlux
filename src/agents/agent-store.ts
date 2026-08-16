@@ -62,7 +62,8 @@ function normalizeAgentRecord(record: any): AgentRecord {
 		callCount: record.callCount ?? 0,
 		totalCostUsd: record.totalCostUsd ?? 0,
 		capabilityGeneration: record.capabilityGeneration ?? 1,
-		lastResult: record.lastResult,
+		// lastResult 仅透传结构完整的记录，损坏/旧格式丢弃以免展示 last=undefined
+		lastResult: typeof record.lastResult?.exitCode === "number" && typeof record.lastResult?.success === "boolean" ? record.lastResult : undefined,
 	};
 }
 const createRegistry = (): AgentRegistry => ({ agents: [] });
@@ -304,19 +305,25 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			invocationOverride: context.invocationOverride,
 		});
 	} catch (error) {
-		const failed = updateRegistry(path, agents => {
-			const current = agents.find(agent => agent.id === running.id);
-			if (!current) throw new Error(`Agent disappeared while running: ${running.name}`);
-			current.status = signal?.aborted ? "cancelled" : "failed";
-			current.lastResult = {
-				exitCode: signal?.aborted ? 130 : 1,
-				success: false,
-				summary: String(error instanceof Error ? error.message : error).slice(0, 300),
-				turns: 0, costUsd: 0, at: new Date().toISOString(),
-			};
-			current.updatedAt = new Date().toISOString();
-			return structuredClone(current);
-		});
+		let failed: AgentRecord;
+		try {
+			failed = updateRegistry(path, agents => {
+				const current = agents.find(agent => agent.id === running.id);
+				if (!current) throw new Error(`Agent disappeared while running: ${running.name}`);
+				current.status = signal?.aborted ? "cancelled" : "failed";
+				current.lastResult = {
+					exitCode: signal?.aborted ? 130 : 1,
+					success: false,
+					summary: String(error instanceof Error ? error.message : error).slice(0, 300),
+					turns: 0, costUsd: 0, at: new Date().toISOString(),
+				};
+				current.updatedAt = new Date().toISOString();
+				return structuredClone(current);
+			});
+		} catch (inner) {
+			// 状态写回失败时保留原始 run 错误（原因为主），写回错误附加说明
+			throw new AggregateError([error, inner], `run failed and status write-back also failed: ${String(inner instanceof Error ? inner.message : inner)}`);
+		}
 		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed" });
 		onStatusChange?.(signal?.aborted ? "cancelled" : "failed", failed);
 		throw error;
@@ -373,7 +380,10 @@ export function resetAgentStatus(cwd: string, selector: string, status: Exclude<
 
 export function formatAgents(agents: AgentRecord[]): string {
 	if (agents.length === 0) return "No Agents.";
-	return ["Agents:", ...agents.map(agent => `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(4)}·${agent.lastResult.summary.slice(0, 60)}` : ""}`)].join("\n");
+	return ["Agents:", ...agents.map(agent => {
+		const summary = (agent.lastResult?.summary.trim().replace(/\s+/g, " ") || "(no output)").slice(0, 60);
+		return `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`;
+	})].join("\n");
 }
 
 /** TUI 底部状态行：运行中的优先，其次按创建时间新旧（最新在前），单行超长省略。 */

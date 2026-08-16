@@ -73,6 +73,8 @@ export function registerActiveContext(
 		startedAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 	};
+	// 注册前先清理崩溃残留（pid 已死条目），缩短 pid 复用误判窗口；prune 是纯 pid 判定，不影响长运行条目
+	pruneStaleActiveContext(cwd);
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
 		const live = state.entries.filter(entry => isActiveEntry(entry));
 		const conflict = live.find(agent => agent.context !== record.context);

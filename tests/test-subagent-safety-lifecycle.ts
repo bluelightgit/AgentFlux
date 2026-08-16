@@ -84,6 +84,12 @@ try {
 		board.acquireFileLock("other-run-3", target) === true, "dead owner allows steal");
 	board.releaseFileLock(target, "other-run-3");
 
+	// 数字开头 agent 名（如 123worker）的 ownerId 不应被误判为 pid（旧实现逐段 /^\d+/ 会把 123worker 读成 pid 123 → 误偷活锁）
+	lockObj.ownerId = `123worker:${process.pid}-dead-uuid`;
+	writeFileSync(lockPath, JSON.stringify(lockObj));
+	check("数字开头 agent 名 lockOwnerId 解析到真实 pid（存活进程锁不可偷）",
+		board.acquireFileLock("other-run-4", target) === false, "ownerId 123worker:<livepid>-... 解析出的是持有进程 pid 而非 123");
+
 	const pidFile = join(root, "process-tree.json");
 	const controller = new AbortController();
 	const running = runAgent({

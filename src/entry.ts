@@ -521,7 +521,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_agent",
 		label: "Agent",
-		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run is background by default (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more).",
+		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there).",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
 			background: Type.Optional(Type.Boolean()),
@@ -596,6 +596,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${matches[0]?.name ?? params.agent})`);
 				}
 				if (!task) throw new Error(`${params.action} requires task`);
+				if (persistentControllers.has(matches[0].name)) throw new Error(`Agent is already running: ${matches[0].name}`); // fail-fast：避免覆盖正在运行任务的 controller，使其失去 stop 能力
 				const controller = new AbortController();
 				const forwardAbort = () => controller.abort();
 				persistentControllers.set(matches[0].name, controller);
@@ -621,6 +622,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					return { content: [{ type: "text", text: `后台已启动子代理 ${name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。运行中可用 /flux agent stop ${name} 停止；完成后会通知，可用 flux_agent list 查看最近结果。` }], details: { ok: true, background: true } };
 				}
 				let result: AgentRunResult;
+				const headlessBgNote = params.background === true && !uiCtx?.hasUI ? "（headless 模式不支持后台，已同步执行）\n" : "";
 				try {
 					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine());
 				} catch (error: any) {
@@ -643,7 +645,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					executionOutcome = { action: "completed", status: "success", costUsd: result.usage.cost };
 				}
 				updateSubagentStatusLine();
-				return { content: [{ type: "text", text: formatAgentRunResult(result, Math.max(1, params.last ?? 1)) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
+				return { content: [{ type: "text", text: headlessBgNote + formatAgentRunResult(result, Math.max(1, params.last ?? 1)) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
 			}
 			throw new Error("Usage: flux_agent list|create|run|stop|retry|delete|gc");
 		},
@@ -987,10 +989,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 				}
 				if (action === "run" && subject) {
 					const task = positional.join(" ").trim();
-					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>] [--background]");
+					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>] [--sync]");
 					const existing = findAgents(runtime.cwd, subject);
 					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
+					if (persistentControllers.has(agent.name)) throw new Error(`Agent is already running: ${agent.name}`);
 					const background = flags.sync !== "true" && ctx.hasUI; // TUI 默认后台；headless 同步（会话立即结束，后台无意义）；--sync 强制同步；--background 强制后台
+					if (flags.background === "true" && !ctx.hasUI) notify(ctx, "headless 模式不支持后台，已同步执行", "info", 1);
 					if (background) {
 						const controller = new AbortController();
 						persistentControllers.set(agent.name, controller);
@@ -1005,13 +1009,29 @@ export default function agentFlux(pi: ExtensionAPI) {
 						return notify(ctx, `后台已启动子代理 ${agent.name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。/flux agent stop ${agent.name} 可停止，/flux agent list 查看最近结果。`, "info", 1);
 					}
 					updateSubagentStatusLine();
-					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), undefined, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine()), 1), "info", 12);
+					const syncController = new AbortController();
+					persistentControllers.set(agent.name, syncController);
+					try {
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), syncController.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine()), 1), "info", 12);
+					} finally {
+						persistentControllers.delete(agent.name);
+						updateSubagentStatusLine();
+					}
 				}
 				if (action === "retry" && subject) {
 					const record = findAgents(runtime.cwd, subject)[0];
+					const agentName = record?.name ?? subject;
 					const task = rest.join(" ").trim() || record?.lastTask;
 					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${subject})`);
-					return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext()), 1), "info", 12);
+					if (persistentControllers.has(agentName)) throw new Error(`Agent is already running: ${agentName}`);
+					const controller = new AbortController();
+					persistentControllers.set(agentName, controller);
+					try {
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext(), controller.signal, undefined, undefined, () => updateSubagentStatusLine()), 1), "info", 12);
+					} finally {
+						persistentControllers.delete(agentName);
+						updateSubagentStatusLine();
+					}
 				}
 				if (action === "stop" && subject) {
 					const record = findAgents(runtime.cwd, subject)[0];

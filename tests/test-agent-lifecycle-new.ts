@@ -215,6 +215,23 @@ async function main(): Promise<void> {
 		check(deleteAgent(root, "gc-b").name === "gc-b", "手动删除 Agent");
 		check(!listAgents(root).some(agent => agent.name === "gc-b"), "删除后不再出现在列表");
 		check(formatAgents(listAgents(root)).includes("scope=project"), "formatAgents 展示作用域");
+		// lastResult 展示细节：摘要换行折叠 + 空摘要兜底 + 精度统一 + 损坏记录丢弃（放在 GC 之后以免影响创建顺序）
+		const summaryAgent = createAgent(root, { name: "sum-check", modelsConfig: { models: {} } });
+		const storePath = join(root, ".agentflux", "runtime", "agents.json");
+		const store = JSON.parse(readFileSync(storePath, "utf-8"));
+		const rec = store.agents.find((agent: any) => agent.id === summaryAgent.id);
+		rec.lastResult = { exitCode: 0, success: true, summary: "line1\nline2\t\n", turns: 3, costUsd: 0.00012345, at: new Date().toISOString() };
+		writeFileSync(storePath, JSON.stringify(store, null, 2));
+		const formatted = formatAgents(listAgents(root));
+		check(formatted.includes("last=SUCCESS·t3·$0.000123·line1 line2") && formatted.split("\n").length === listAgents(root).length + 1, "lastResult 摘要换行折叠为单行且成本精度统一");
+		const badStore = JSON.parse(readFileSync(storePath, "utf-8"));
+		badStore.agents.find((agent: any) => agent.id === summaryAgent.id).lastResult = { bogus: true };
+		writeFileSync(storePath, JSON.stringify(badStore, null, 2));
+		check(listAgents(root).find(agent => agent.id === summaryAgent.id)!.lastResult === undefined, "结构不完整的 lastResult 读取时丢弃（不展示 last=undefined）");
+		const emptyStore = JSON.parse(readFileSync(storePath, "utf-8"));
+		emptyStore.agents.find((agent: any) => agent.id === summaryAgent.id).lastResult = { exitCode: 0, success: true, summary: "   ", turns: 1, costUsd: 0, at: new Date().toISOString() };
+		writeFileSync(storePath, JSON.stringify(emptyStore, null, 2));
+		check(formatAgents(listAgents(root)).includes("(no output)"), "空摘要兜底显示 (no output)");
 		// ─── TUI 底部状态行（运行中优先、按创建时间新旧、单行省略）───
 		const statusAgents = [
 			{ ...createdDefault, name: "old-idle", status: "idle", createdAt: "2026-08-01T00:00:00.000Z" },
