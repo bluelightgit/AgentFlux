@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "../core/json-store";
@@ -259,7 +260,7 @@ function findSingle(cwd: string, selector: string): AgentRecord {
  * 返回其最后一条消息；assistantMessages 供 last(k) 展示更多执行消息。
  * busy 时拒绝（对话排队由 Message V2 pending 投递承载）。
  */
-export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void): Promise<AgentRunResult> {
+export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void): Promise<AgentRunResult> {
 	assertModelOverride(context.modelsConfig, overrides?.model);
 	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
 		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
@@ -302,6 +303,7 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			timeoutMs: context.timeoutMs,
 			maxCostUsd: context.maxCostUsd,
 			signal,
+			onProgress: onProgress,
 			invocationOverride: context.invocationOverride,
 		});
 	} catch (error) {
@@ -384,6 +386,35 @@ export function formatAgents(agents: AgentRecord[]): string {
 		const summary = (agent.lastResult?.summary.trim().replace(/\s+/g, " ") || "(no output)").slice(0, 60);
 		return `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`;
 	})].join("\n");
+}
+
+/** 生成进入子代理直接对话窗口的启动命令（方案 A：pi --session 直接打开子代理会话文件）。
+ * 会话文件名形如 <时间戳>_<sessionId>-cap-<hash>.jsonl，需扫描目录按 sessionId 前缀匹配最新文件。 */
+export function formatAgentEnterCommand(cwd: string, record: AgentRecord): string {
+	const sessionsDir = join(cwd, ".agentflux", "runtime", "sessions");
+	let sessionFile: string | undefined;
+	if (record.sessionId) {
+		const pattern = `_${record.sessionId}-cap-`;
+		try {
+			sessionFile = readdirSync(sessionsDir)
+				.filter(name => name.endsWith(".jsonl") && name.includes(pattern))
+				.map(name => ({ name, mtime: statSync(join(sessionsDir, name)).mtimeMs }))
+				.sort((a, b) => b.mtime - a.mtime)[0]?.name;
+			sessionFile = sessionFile ? join(sessionsDir, sessionFile) : undefined;
+		} catch { sessionFile = undefined; }
+	}
+	if (!sessionFile) {
+		return `子代理 ${record.name} 尚无会话文件（从未 run 过）。请先执行 /flux agent run ${record.name} <任务> 创建会话，再进入直接对话。`;
+	}
+	return [
+		`子代理 ${record.name} 直接对话（会话：${record.sessionId}）`,
+		"",
+		"1) 打开对话窗口（新终端执行）：",
+		`   npx pi --session "${sessionFile}"`,
+		"2) 返回主 Agent：切回当前窗口即可（子代理窗口 Ctrl+D 退出）。",
+		"",
+		"说明：对话直接写入子代理会话记忆（下次 run 可见）；仅子代理正在运行时（状态 running）run 会被拒绝，进入对话不影响 run。",
+	].join("\n");
 }
 
 /** TUI 底部状态行：运行中的优先，其次按创建时间新旧（最新在前），单行超长省略。 */

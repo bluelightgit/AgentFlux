@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentEnterCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -27,6 +27,10 @@ async function main(): Promise<void> {
 		const result = await runAgent({ cwd: root, agent: { ...template, name: record.name }, task: "short task", sessionId: "test", telemetry, prefixLayout: true, persistent: false, invocationOverride });
 		finishEphemeralRecord(record, result.exitCode, result.usage.cost, telemetry, "test");
 		check(result.exitCode === 0 && record.status === "done" && record.callCount === 1, "单次运行后进入终态");
+		// 运行过程实时回调：mock CLI 的 message_end 文本块应实时上报
+		const progressEvents: Array<{ type: string; text: string }> = [];
+		await runAgent({ cwd: root, agent: { ...template, name: "progress-watch" }, task: "progress", sessionId: "test", prefixLayout: true, persistent: false, invocationOverride, onProgress: event => progressEvents.push(event) });
+		check(progressEvents.some(event => event.type === "message" && event.text.includes("message processed")), "onProgress 实时上报 assistant 消息块");
 		const firstRun = listAgentRuns(join(root, ".agentflux"), { agent: record.name })[0];
 		check(firstRun?.status === "completed" && !!firstRun.finishedAt, "Run Registry 保存权威终态");
 		registerAgentRun(join(root, ".agentflux"), {
@@ -232,6 +236,15 @@ async function main(): Promise<void> {
 		emptyStore.agents.find((agent: any) => agent.id === summaryAgent.id).lastResult = { exitCode: 0, success: true, summary: "   ", turns: 1, costUsd: 0, at: new Date().toISOString() };
 		writeFileSync(storePath, JSON.stringify(emptyStore, null, 2));
 		check(formatAgents(listAgents(root)).includes("(no output)"), "空摘要兜底显示 (no output)");
+		// 直接对话入口：enter 命令输出 pi --session 启动命令（会话文件按 sessionId-cap- 前缀匹配）
+		const enterAgent = createAgent(root, { name: "enter-me", modelsConfig: { models: {} } });
+		const sessionsDir = join(root, ".agentflux", "runtime", "sessions");
+		mkdirSync(sessionsDir, { recursive: true });
+		writeFileSync(join(sessionsDir, "2026-01-01T00-00-00-000Z_agent-enter-me-cap-abc123.jsonl"), "{\"type\":\"session\",\"version\":3}\n");
+		const enterCmd = formatAgentEnterCommand(root, enterAgent);
+		check(enterCmd.includes("npx pi --session") && enterCmd.includes("agent-enter-me-cap-abc123.jsonl") && enterCmd.includes("返回主 Agent"), "enter 输出可执行的 pi --session 启动命令");
+		const noSessionCmd = formatAgentEnterCommand(root, { ...enterAgent, name: "never-run", sessionId: "never-run" });
+		check(noSessionCmd.includes("尚无会话文件"), "无会话文件的子代理提示先 run 创建会话");
 		// ─── TUI 底部状态行（运行中优先、按创建时间新旧、单行省略）───
 		const statusAgents = [
 			{ ...createdDefault, name: "old-idle", status: "idle", createdAt: "2026-08-01T00:00:00.000Z" },

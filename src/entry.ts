@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentEnterCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
@@ -143,6 +143,18 @@ export default function agentFlux(pi: ExtensionAPI) {
 				uiCtx.ui.setStatus("agentflux-subagents", formatSubagentStatusLine(listAgents(runtime.cwd)));
 			}
 		} catch { /* footer 更新尽力而为 */ }
+	}
+	let progressTimer: any = null;
+	/** 子代理运行过程实时显示：TUI 用 working 行（覆盖输入区上方的“正在…”行），持续更新最新一步。 */
+	function showSubagentProgress(name: string, event: { type: "message" | "tool"; text: string }): void {
+		if (!uiCtx?.ui?.setWorkingMessage) return;
+		const prefix = event.type === "tool" ? "⚙" : "💬";
+		const text = `${prefix} [子代理 ${name}] ${event.text.replace(/\s+/g, " ").slice(0, 120)}`;
+		try {
+			uiCtx.ui.setWorkingMessage(text);
+			clearTimeout(progressTimer);
+			progressTimer = setTimeout(() => { try { uiCtx.ui.setWorkingMessage(undefined); } catch { /* 清理尽力而为 */ } }, 8000);
+		} catch { /* working 行更新尽力而为 */ }
 	}
 	const workflowInvocations = new Set<string>();
 
@@ -521,9 +533,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_agent",
 		label: "Agent",
-		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there).",
+		description: "Create (default / role template / session fork), run (talk to), stop, retry, enter (open a direct conversation window), list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there). enter prints the command to open a direct conversation with the Agent in a new pi window (--session on its session file); run is blocked only while the Agent's status is running.",
 		parameters: Type.Object({
-			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
+			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("enter"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
 			background: Type.Optional(Type.Boolean()),
 			name: Type.Optional(Type.String()),
 			agent: Type.Optional(Type.String()),
@@ -565,6 +577,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: `Deleted ${agent.name}` }], details: { ok: true } };
 			}
+			if (params.action === "enter") {
+				if (!params.agent) throw new Error("enter requires agent");
+				const matches = findAgents(runtime.cwd, params.agent);
+				if (matches.length === 0) throw new Error(`Agent not found: ${params.agent}`);
+				return { content: [{ type: "text", text: formatAgentEnterCommand(runtime.cwd, matches[0]) }], details: { ok: true } };
+			}
 			if (params.action === "stop") {
 				if (!params.agent) throw new Error("stop requires agent");
 				const matches = findAgents(runtime.cwd, params.agent);
@@ -605,7 +623,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (background) {
 					// 后台模式：不等待子代理完成，立即返回；结果在完成时 notify + footer 状态行
 					const name = matches[0].name;
-					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine())
+					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event))
 						.then(result => {
 							const ok = result.exitCode === 0 && !result.errorMessage;
 							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -624,7 +642,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				let result: AgentRunResult;
 				const headlessBgNote = params.background === true && !uiCtx?.hasUI ? "（headless 模式不支持后台，已同步执行）\n" : "";
 				try {
-					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine());
+					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine(), event => showSubagentProgress(matches[0].name, event));
 				} catch (error: any) {
 					executionOutcome = controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
@@ -980,6 +998,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 				// 解析 --model <m> 与 --thinking <t> 覆盖参数（与 issue claim --props 同风格）
 				const { flags, positional } = parseAgentFlags(rest);
 				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd)), "info", 12);
+				if (action === "enter" && subject) {
+					const matches = findAgents(runtime.cwd, subject);
+					if (matches.length === 0) throw new Error(`Agent not found: ${subject}`);
+					return notify(ctx, formatAgentEnterCommand(runtime.cwd, matches[0]), "info", 12);
+				}
 				if (action === "create" && subject) {
 					const role = positional[0];
 					const agent = createAgent(runtime.cwd, { name: subject, role, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
@@ -998,7 +1021,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					if (background) {
 						const controller = new AbortController();
 						persistentControllers.set(agent.name, controller);
-						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine())
+						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event))
 							.then(result => {
 								const ok = result.exitCode === 0 && !result.errorMessage;
 								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -1012,7 +1035,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const syncController = new AbortController();
 					persistentControllers.set(agent.name, syncController);
 					try {
-						return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), syncController.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine()), 1), "info", 12);
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), syncController.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event)), 1), "info", 12);
 					} finally {
 						persistentControllers.delete(agent.name);
 						updateSubagentStatusLine();
@@ -1027,7 +1050,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const controller = new AbortController();
 					persistentControllers.set(agentName, controller);
 					try {
-						return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext(), controller.signal, undefined, undefined, () => updateSubagentStatusLine()), 1), "info", 12);
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext(), controller.signal, undefined, undefined, () => updateSubagentStatusLine(), event => showSubagentProgress(agentName, event)), 1), "info", 12);
 					} finally {
 						persistentControllers.delete(agentName);
 						updateSubagentStatusLine();

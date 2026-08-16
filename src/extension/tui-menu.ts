@@ -76,12 +76,12 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	ctx.ui.notify(agentDetails(agent), "info");
 	const actions = ["Details · show information"];
 	if (agent.communication === "current_chat") actions.unshift("Talk · continue in current Main conversation");
-	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Agent session");
+	if (agent.communication === "persistent_session") actions.unshift("Enter · open direct conversation window");
 	if (agent.communication === "message") actions.unshift("Message · send to active Agent");
 	if (agent.kind === "subagent" && agent.status !== "archived") {
 		if (agent.status === "running") actions.push("Stop · abort the running run");
 		else if (agent.lastTask) actions.push("Retry · re-run last task");
-		actions.push("Archive · retire this Agent");
+		actions.push("Delete · hard-delete this Agent");
 	}
 	const action = await select(ctx, agent.name, actions);
 	if (action?.startsWith("Talk")) {
@@ -89,6 +89,7 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 		if (!message) return null;
 		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;
 	}
+	if (action?.startsWith("Enter")) return `agent enter ${agent.name}`;
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Details")) { ctx.ui.notify(agentDetails(agent), "info"); return null; }
 	if (action?.startsWith("Stop")) return `agent stop ${agent.name}`;

@@ -674,6 +674,8 @@ export async function runAgent(opts: {
 	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
 	invocationOverride?: { command: string; args: string[] };
+	/** 运行过程实时回调（assistant 消息 / 工具调用 / 回合），供 UI 直播子代理运行过程。 */
+	onProgress?: (event: { type: "message" | "tool"; text: string }) => void;
 }): Promise<AgentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
 	const workspaceCwd = resolve(opts.workspaceCwd ?? cwd);
@@ -1038,6 +1040,7 @@ export async function runAgent(opts: {
 								for (const b of content) if (b?.type === "text" && b.text) {
 									outputParts.push(b.text);
 									assistantMessages.push(b.text);
+									opts.onProgress?.({ type: "message", text: b.text });
 								}
 							}
 							if (opts.maxTurns !== undefined && result.usage.turns >= opts.maxTurns) {
@@ -1048,6 +1051,11 @@ export async function runAgent(opts: {
 								requestTermination(74);
 							}
 						}
+					} else if (ev.type === "tool_execution_start" && opts.onProgress) {
+						const toolName = ev.toolName ?? ev.name ?? "tool";
+						const input = ev.args;
+						const inputText = input && typeof input === "object" ? JSON.stringify(input).slice(0, 200) : typeof input === "string" ? input.slice(0, 200) : "";
+						opts.onProgress({ type: "tool", text: `${toolName}${inputText ? ` ${inputText}` : ""}` });
 					}
 				};
 
