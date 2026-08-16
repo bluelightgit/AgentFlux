@@ -218,6 +218,23 @@ async function main(): Promise<void> {
 		check(cleaned.includes("session-scope") && !cleaned.includes("session-other"), "会话结束清理本会话的 session Agent（保留其他会话）");
 		const afterCleanup = listAgents(root);
 		check(!afterCleanup.some(agent => agent.name === "session-scope") && afterCleanup.some(agent => agent.name === "session-other"), "清理后本会话 Agent 消失，其他会话保留");
+
+		// ─── 旧格式记录兼容（2026-08-12 前无 scope/kind 字段）───
+		const legacyDir = join(root, ".agentflux", "runtime");
+		mkdirSync(legacyDir, { recursive: true });
+		writeFileSync(join(legacyDir, "agents.json"), JSON.stringify({
+			version: 2,
+			agents: [
+				{ id: "agent-legacy-1", name: "stat-agent", kind: "persistent", role: "implementer", status: "idle", model: "flash", callCount: 2, totalCostUsd: 0.0003, createdAt: "2026-08-12T00:00:00.000Z", updatedAt: "2026-08-12T00:00:00.000Z" },
+				{ name: "no-scope-no-status", role: "reviewer" },
+			],
+		}, null, 2));
+		const legacyList = listAgents(root);
+		const stat = legacyList.find(agent => agent.name === "stat-agent");
+		const bare = legacyList.find(agent => agent.name === "no-scope-no-status");
+		check(stat?.scope === "project" && stat?.callCount === 2 && stat?.totalCostUsd === 0.0003, "旧格式记录读取时补默认作用域并保留调用统计");
+		check(bare?.scope === "project" && bare?.status === "idle" && bare?.role === "reviewer" && bare?.id === "legacy-no-scope-no-status", "缺 scope/status/id 的记录归一化为默认值");
+		check(!formatAgents(legacyList).includes("undefined"), "formatAgents 对旧格式记录不崩溃且无 undefined 占位");
 		// ─── 模型/思考等级覆盖 ───
 		const modelsConfig = {
 			models: {

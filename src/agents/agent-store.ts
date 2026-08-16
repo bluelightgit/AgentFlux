@@ -40,6 +40,30 @@ function registryPath(cwd: string, scope: AgentScope): string {
 	if (scope === "global") return join(homedir(), ".agentflux", "agents.json");
 	return join(cwd, ".agentflux", "runtime", "agents.json");
 }
+
+/** 旧格式记录（2026-08-12 前，无 scope/thinking 等字段）读取时内存级归一化，不重写文件。 */
+function normalizeAgentRecord(record: any): AgentRecord {
+	const now = new Date().toISOString();
+	return {
+		id: record.id ?? `legacy-${record.name ?? "unknown"}`,
+		name: record.name ?? record.id ?? "unknown",
+		scope: record.scope ?? "project",
+		role: record.role ?? "assistant",
+		status: record.status ?? "idle",
+		lineage: record.lineage ?? { origin: "fresh", forkedFrom: undefined },
+		model: record.model,
+		provider: record.provider,
+		thinking: record.thinking,
+		sessionId: record.sessionId,
+		ownerSessionId: record.ownerSessionId,
+		createdAt: record.createdAt ?? now,
+		updatedAt: record.updatedAt ?? now,
+		lastTask: record.lastTask,
+		callCount: record.callCount ?? 0,
+		totalCostUsd: record.totalCostUsd ?? 0,
+		capabilityGeneration: record.capabilityGeneration ?? 1,
+	};
+}
 const createRegistry = (): AgentRegistry => ({ agents: [] });
 const isRegistry = (value: unknown): value is AgentRegistry =>
 	!!value && typeof value === "object" && Array.isArray((value as AgentRegistry).agents);
@@ -52,7 +76,7 @@ function updateRegistry<R>(path: string, update: (agents: AgentRecord[]) => R): 
 export function listAgents(cwd: string): AgentRecord[] {
 	const global = readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents;
 	const project = readJsonStore(registryPath(cwd, "project"), createRegistry, isRegistry).agents;
-	return [...global, ...project];
+	return [...global, ...project].map(normalizeAgentRecord);
 }
 
 /** 按 id（精确）或 name（可能多个）查找；archived/已删除不返回。 */
@@ -63,7 +87,7 @@ export function findAgents(cwd: string, selector: string): AgentRecord[] {
 function uniqueName(cwd: string, scope: AgentScope, name: string): string {
 	const existing = new Set(
 		(scope === "global"
-			? readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents
+			? readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents.map(normalizeAgentRecord)
 			: listAgents(cwd)
 		).map(agent => agent.name),
 	);
