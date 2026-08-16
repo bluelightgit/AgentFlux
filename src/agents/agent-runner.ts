@@ -1035,7 +1035,10 @@ export async function runAgent(opts: {
 							if (msg.errorMessage) result.errorMessage = msg.errorMessage;
 							const content = msg.content;
 							if (Array.isArray(content)) {
-								for (const b of content) if (b?.type === "text" && b.text) outputParts.push(b.text);
+								for (const b of content) if (b?.type === "text" && b.text) {
+									outputParts.push(b.text);
+									assistantMessages.push(b.text);
+								}
 							}
 							if (opts.maxTurns !== undefined && result.usage.turns >= opts.maxTurns) {
 								result.errorMessage = `turn limit reached: ${result.usage.turns} >= ${opts.maxTurns}`;

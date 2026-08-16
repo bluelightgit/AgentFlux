@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readActiveContext } from "../src/core/active-context";
 import {
 	claimIssue,
 	deleteIssue,
@@ -314,6 +315,10 @@ try {
 		const removed = deleteIssue(root, issue.id);
 		assert.strictEqual(removed.id, issue.id);
 		assert.strictEqual(getIssue(root, issue.id), undefined);
+		// 认领时注册的 community 空间条目随删除释放，避免幽灵占用
+		check("deleting a stalled issue releases its community space entry", () => {
+			assert.ok(!readActiveContext(root).entries.some(entry => entry.name === `issue:${issue.id}`));
+		});
 	});
 
 	check("setCommunityLimits validates its inputs", () => {

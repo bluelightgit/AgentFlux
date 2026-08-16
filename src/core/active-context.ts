@@ -40,21 +40,19 @@ export function activeContextPath(cwd: string): string {
 	return join(cwd, ".agentflux", "runtime", "active-context.json");
 }
 
+/** 条目是否仍视为活跃：pid 存活即活跃（长运行空间保留，崩溃条目立即失效）。 */
+function isActiveEntry(entry: ActiveContextEntry): boolean {
+	return isAlive(entry.pid);
+}
+
 /** 读取当前活跃空间状态（stale 条目即时清理但不写回）。 */
 export function readActiveContext(cwd: string): ActiveContextState {
 	const state = readJsonStore(activeContextPath(cwd), createState, isState);
-	const now = Date.now();
 	return {
 		context: state.context,
-		entries: state.entries.filter(entry =>
-			isAlive(entry.pid) && now - Date.parse(entry.updatedAt) < STALE_ENTRY_MS,
-		),
+		entries: state.entries.filter(entry => isActiveEntry(entry)),
 	};
 }
-
-
-/** stale 阈值：超过该时长且 pid 消失的条目视为崩溃残留。 */
-export const STALE_ENTRY_MS = 60 * 60 * 1000;
 
 function contextLabel(entries: ActiveContextEntry[]): string {
 	return entries.map(entry => `${entry.name} (${entry.context})`).join(", ");
@@ -76,7 +74,7 @@ export function registerActiveContext(
 		updatedAt: new Date().toISOString(),
 	};
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const live = state.entries.filter(agent => isAlive(agent.pid) && Date.now() - Date.parse(agent.updatedAt) < STALE_ENTRY_MS);
+		const live = state.entries.filter(entry => isActiveEntry(entry));
 		const conflict = live.find(agent => agent.context !== record.context);
 		if (conflict) {
 			throw new Error(
@@ -96,7 +94,7 @@ export function registerActiveContext(
 export function releaseActiveContext(cwd: string, selector: string): boolean {
 	let removed = false;
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const live = state.entries.filter(agent => isAlive(agent.pid) && Date.now() - Date.parse(agent.updatedAt) < STALE_ENTRY_MS);
+		const live = state.entries.filter(entry => isActiveEntry(entry));
 		const kept = live.filter(agent => agent.name !== selector && agent.scope !== selector);
 		removed = kept.length !== live.length;
 		state.entries = kept;
@@ -105,15 +103,14 @@ export function releaseActiveContext(cwd: string, selector: string): boolean {
 	return removed;
 }
 
-/** 清理崩溃残留（pid 消失或超时）并返回清理的条目名。 */
+/** 清理崩溃残留（持有 pid 已消失的条目）并返回清理的条目名。 */
 export function pruneStaleActiveContext(cwd: string): string[] {
 	const pruned: string[] = [];
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const now = Date.now();
-		const live = state.entries.filter(agent => {
-			const alive = isAlive(agent.pid) && now - Date.parse(agent.updatedAt) < STALE_ENTRY_MS;
-			if (!alive) pruned.push(agent.name);
-			return alive;
+		const live = state.entries.filter(entry => {
+			const active = isAlive(entry.pid);
+			if (!active) pruned.push(entry.name);
+			return active;
 		});
 		state.entries = live;
 		state.context = live.length > 0 ? live[live.length - 1].context : null;

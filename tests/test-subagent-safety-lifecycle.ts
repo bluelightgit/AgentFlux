@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SharedBoard } from "../src/core/shared-board";
@@ -68,6 +68,21 @@ try {
 	});
 	check("lock conflict is fail-closed", conflicted.exitCode === 73 && conflicted.errorMessage?.includes("file lock conflict") === true, `exit=${conflicted.exitCode}`);
 	check("lock conflict leaves no process", getActiveAgentRunIds().length === 0, `active=${getActiveAgentRunIds().length}`);
+
+	// ─── 文件锁过期偷锁的进程存活保护（与 fs-lock “活进程锁不可偷”一致） ───
+	const lockFiles = readdirSync(join(fluxDir, "shared", "locks")).filter(file => file.endsWith(".lock"));
+	check("competing lock file exists", lockFiles.length === 1, `locks=${lockFiles.join(",")}`);
+	const lockPath = join(fluxDir, "shared", "locks", lockFiles[0]);
+	const lockObj = JSON.parse(readFileSync(lockPath, "utf-8"));
+	lockObj.expiresAt = Date.now() - 1000;
+	writeFileSync(lockPath, JSON.stringify(lockObj));
+	check("expired lock held by a live process is not stealable",
+		board.acquireFileLock("other-run-2", target) === false, "live owner blocks steal");
+	lockObj.ownerId = "other-run:99999999-dead-uuid";
+	writeFileSync(lockPath, JSON.stringify(lockObj));
+	check("expired lock held by a dead process is stealable",
+		board.acquireFileLock("other-run-3", target) === true, "dead owner allows steal");
+	board.releaseFileLock(target, "other-run-3");
 
 	const pidFile = join(root, "process-tree.json");
 	const controller = new AbortController();

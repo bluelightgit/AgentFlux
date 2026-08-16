@@ -207,6 +207,9 @@ async function main() {
 		check("successful deferred subagent acknowledges injected V2 message",
 			success.exitCode === 0 && bus.getDelivery(successMessage.envelope.id, "runner-ok")?.status === "acknowledged",
 			`exit=${success.exitCode} status=${bus.getDelivery(successMessage.envelope.id, "runner-ok")?.status}`);
+		check("assistantMessages collects per-message text for last(k)",
+			Array.isArray(success.assistantMessages) && success.assistantMessages.includes("message processed"),
+			`assistantMessages=${JSON.stringify(success.assistantMessages)}`);
 
 		const failedMessage = bus.sendDirect("planner", "runner-fail", "question", "Keep unacked after failed processing");
 		const failed = await runAgent({

@@ -233,15 +233,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 		}
 	}
 
-	/** 空间总览：活跃上下文 + workflow/community 列表 + 最近 agent 活动时间线。 */
+	/** 空间总览：活跃上下文 + workflow/community 列表 + 最近 agent 活动时间线（只读，不清理/写盘）。 */
 	function formatSpaceOverview(cwd: string): string {
-		pruneStaleActiveContext(cwd);
 		const lines: string[] = [`active context: ${formatActiveContext(readActiveContext(cwd))}`];
 		const definitions = runtime ? listWorkflowDefinitions(runtime.fluxDir) : [];
 		lines.push(`workflows ${definitions.length > 0 ? definitions.map(def => `${def.name} v${def.version}`).join(", ") : "(none)"}`);
 		const issues = listIssues(cwd);
 		lines.push(`community issues ${issues.length > 0 ? issues.map(issue => `${issue.id} · ${issue.status} · ${issue.title.slice(0, 40)}`).join("\n  ") : "(none)"}`);
-		const events = readFileSync(join(cwd, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => { try { return JSON.parse(line); } catch { return null; } }).filter((event: any) => event?.type === "agent.lifecycle" && (event.action === "started" || event.action === "completed" || event.action === "failed" || event.action === "cancelled"));
+		const eventsPath = join(cwd, ".agentflux", "events.jsonl");
+		const events = existsSync(eventsPath) ? readFileSync(eventsPath, "utf-8").trim().split("\n").map(line => { try { return JSON.parse(line); } catch { return null; } }).filter((event: any) => event?.type === "agent.lifecycle" && (event.action === "started" || event.action === "completed" || event.action === "failed" || event.action === "cancelled")) : [];
 		const timeline = events.slice(-10).map((event: any) => `  ${new Date(event.ts ?? event.timestamp ?? event.createdAt).toLocaleTimeString()} [${event.action}] ${event.agent}${event.currentTask ? ` · ${String(event.currentTask).slice(0, 50)}` : ""}`).join("\n");
 		lines.push(`recent agent activity:\n${timeline || "  (none)"}`);
 		return lines.join("\n");
@@ -535,8 +535,6 @@ export default function agentFlux(pi: ExtensionAPI) {
 			task: Type.Optional(Type.String()),
 			last: Type.Optional(Type.Number()),
 			keepLatestK: Type.Optional(Type.Number()),
-			context: Type.Optional(Type.Union([Type.Literal("main"), Type.Literal("community")])),
-			issueId: Type.Optional(Type.String()),
 		}),
 		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
@@ -709,7 +707,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit, review and resolve Community work.",
-		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("propose"), Type.Literal("support"), Type.Literal("oppose"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.String()), proposalIds: Type.Optional(Type.Array(Type.String())), plan: Type.Optional(Type.String()), costUsd: Type.Optional(Type.Number()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
+		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("propose"), Type.Literal("support"), Type.Literal("oppose"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.Union([Type.Literal("pass"), Type.Literal("rework")])), proposalIds: Type.Optional(Type.Array(Type.String())), plan: Type.Optional(Type.String()), costUsd: Type.Optional(Type.Number()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
@@ -722,7 +720,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 							: params.action === "oppose" ? opposeProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main")
 								: params.action === "claim" ? claimIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.scope ?? "", { proposalIds: params.proposalIds, plan: params.plan })
 									: params.action === "submit" ? submitClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.plan, params.costUsd)
-										: params.action === "review" ? reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict === "rework" ? "rework" : "pass", params.agent ?? "main", params.body ?? "")
+										: params.action === "review" ? reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict ?? "pass", params.agent ?? "main", params.body ?? "")
 											: resolveIssue(runtime.cwd, params.issueId, params.body);
 			if (!issue) throw new Error(`Issue not found: ${params.issueId}`);
 			const taskId = ensureImplicitPlan()?.taskId;
@@ -1050,7 +1048,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id, rest.join(" "))), "info", 12);
 				if (action === "delete" && id) return notify(ctx, `Deleted issue ${deleteIssue(runtime.cwd, id).id}`);
 				if (action === "submit" && id && rest[0]) return notify(ctx, formatIssue(submitClaim(runtime.cwd, id, rest[0], rest.slice(1).join(" ").replace(/^--plan\s+/, ""))), "info", 12);
-				if (action === "review" && id && rest[0]) return notify(ctx, formatIssue(reviewClaim(runtime.cwd, id, rest[0], rest[1] === "rework" ? "rework" : "pass", "main", rest.slice(2).join(" "))), "info", 12);
+				if (action === "review" && id && rest[0]) { if (rest[1] !== "rework" && rest[1] !== "pass") throw new Error("Usage: /flux issue review <id> <claimId> pass|rework [feedback]"); return notify(ctx, formatIssue(reviewClaim(runtime.cwd, id, rest[0], rest[1], "main", rest.slice(2).join(" "))), "info", 12); }
 				throw new Error("Invalid /flux issue command");
 			}
 

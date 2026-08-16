@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { formatActiveContext, hasActiveContext, pruneStaleActiveContext, readActiveContext, registerActiveContext, releaseActiveContext, STALE_ENTRY_MS } from "../src/core/active-context";
+import { formatActiveContext, hasActiveContext, pruneStaleActiveContext, readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
 import { claimIssue, createIssue, resolveIssue } from "../src/core/community";
 
 let passed = 0;
@@ -51,9 +51,12 @@ async function main(): Promise<void> {
 		registerActiveContext(root, { name: "old-entry", context: "main", task: "long ago" });
 		const statePath = join(root, ".agentflux", "runtime", "active-context.json");
 		const raw = JSON.parse(readFileSync(statePath, "utf-8"));
-		raw.entries[0].updatedAt = new Date(Date.now() - STALE_ENTRY_MS - 1000).toISOString();
+		raw.entries[0].updatedAt = new Date(Date.now() - 60 * 60 * 1000 - 1000).toISOString();
 		writeFileSync(statePath, JSON.stringify(raw));
-		check(readActiveContext(root).entries.length === 0, "超过 stale 阈值的条目视为残留");
+		check(readActiveContext(root).entries.length === 1, "超过 stale 阈值但 pid 存活的条目仍视为活跃（长运行空间保留）");
+		raw.entries[0].pid = 999999;
+		writeFileSync(statePath, JSON.stringify(raw));
+		check(readActiveContext(root).entries.length === 0, "超过 stale 阈值且 pid 消失的条目视为崩溃残留");
 
 		// ─── workflow 运行中 community claim 被拒（社区入口集成） ───
 		registerActiveContext(root, { name: "workflow:task-1", context: "workflow", scope: "exec-1", task: "dag" });

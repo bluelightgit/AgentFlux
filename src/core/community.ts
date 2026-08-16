@@ -262,20 +262,23 @@ export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "
 	issue.updatedAt = new Date().toISOString(); return issue; }); }
 /** 删除已结束的 Issue（resolved 或 open 且无 active claim）；有活跃认领的拒绝。 */
 export function deleteIssue(cwd: string, id: string): CommunityIssue {
-	return update(cwd, store => {
+	const issue = update(cwd, store => {
 		const index = store.issues.findIndex(item => item.id === id);
 		if (index < 0) throw new Error(`Issue not found: ${id}`);
-		const issue = store.issues[index];
-		if (issue.claims.some(claim => claim.status === "active" || claim.status === "submitted")
-			&& (issue.stallStreak ?? 0) < stallThreshold) {
+		const item = store.issues[index];
+		if (item.claims.some(claim => claim.status === "active" || claim.status === "submitted")
+			&& (item.stallStreak ?? 0) < stallThreshold) {
 			throw new Error(`Issue has active or submitted claims: ${id}`);
 		}
-		if ((issue.stallStreak ?? 0) < stallThreshold && issue.status !== "resolved" && issue.status !== "open") {
-			throw new Error(`Only resolved or open issues can be deleted (${issue.status}): ${id}`);
+		if ((item.stallStreak ?? 0) < stallThreshold && item.status !== "resolved" && item.status !== "open") {
+			throw new Error(`Only resolved or open issues can be deleted (${item.status}): ${id}`);
 		}
 		store.issues.splice(index, 1);
-		return issue;
+		return item;
 	});
+	// 停摆兑底删除也释放认领时注册的 community 空间条目，避免幽灵占用阻塞其他空间
+	releaseActiveContext(cwd, `issue:${id}`);
+	return issue;
 }
 
 export function resolveIssue(cwd: string, id: string, reason?: string): CommunityIssue { const issue = update(cwd, store => { const item = store.issues.find(item => item.id === id); if (!item) throw new Error(`Issue not found: ${id}`); assertMutable(item); if ((item.stallStreak ?? 0) < stallThreshold && item.claims.some(claim => claim.status === "active" || claim.status === "submitted")) throw new Error("Issue has active or submitted claims"); item.status = "resolved"; if (reason?.trim()) item.resolvedReason = reason.trim(); item.updatedAt = new Date().toISOString(); appendEvent(item, "resolved", "main", reason?.trim() ? `${id} · ${reason.trim().slice(0, 200)}` : id); return item; }); releaseActiveContext(cwd, `issue:${id}`); return issue; }

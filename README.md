@@ -66,7 +66,7 @@ Main Agent 可通过工具直接调度：`flux_task`（历史查询与任务操�
 ## 验证
 
 ```bash
-npm run verify                        # 类型检查 + 全部确定性回归（25 组，581 断言）
+npm run verify                        # 类型检查 + 全部确定性回归（25 组，622 断言）
 npm run test:live                     # DeepSeek 全链路 smoke
 npm run test:live:history             # 同一会话两轮任务：自动继续与父任务关系
 npm run test:live:workflow-reuse      # 创建并精确复用已保存 Workflow

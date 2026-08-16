@@ -644,6 +644,15 @@ export class SharedBoard {
 		return `${agentName}:${PROCESS_OWNER_ID}`;
 	}
 
+	/** 从锁 ownerId（`<agent>:<pid>-<uuid>`）解析持有者 pid；解析不出返回 undefined。 */
+	private lockOwnerPid(ownerId: string): number | undefined {
+		for (const part of ownerId.split(":")) {
+			const m = /^(\d+)/.exec(part);
+			if (m) return Number(m[1]);
+		}
+		return undefined;
+	}
+
 	/** 获取文件锁. 返回 true=成功, false=已被其他 agent 锁定 */
 	acquireFileLock(agentName: string, filePath: string, ttlMs = 300000): boolean {
 		const lp = this.lockPath(filePath);
@@ -681,6 +690,10 @@ export class SharedBoard {
 				return true;
 			}
 			if (typeof lock.expiresAt !== "number" || now < lock.expiresAt) return false;
+			// 持有者进程仍存活时不偷锁（与 fs-lock 的“活进程锁不可偷”一致）——
+			// ownerId 格式 `<agent>:<pid>-<uuid>`，解析出 pid 后做存活检查
+			const ownerPid = this.lockOwnerPid(String(lock.ownerId ?? ""));
+			if (ownerPid !== undefined && isProcessAlive(ownerPid)) return false;
 			unlinkSync(lp);
 		} catch {
 			// 损坏或读取竞争时 fail-closed，不能把潜在活锁当成成功。

@@ -130,6 +130,15 @@ async function main(): Promise<void> {
 		check(await showFluxTuiMenu(ctx, menuData) === "gc dry-run", "Workbench Maintenance 子菜单可选择 GC 操作");
 		await flux.handler("issue create coordinate fix", ctx);
 		check(notices.some(text => text.includes("coordinate fix")), "TUI 直接创建 Community Issue（无模式选择）");
+		// verdict fail-closed：非 pass/rework 的值在命令层被拒绝（不再静默当 pass）
+		let vmark = notices.length;
+		await flux.handler("issue review fake-id fake-claim approve", ctx);
+		check(notices.slice(vmark).some(text => text.includes("Usage: /flux issue review")), "/flux issue review 非 pass/rework 值 fail-closed 拒绝");
+		// /flux space 在无 events.jsonl 时回退空时间线而不是抛 ENOENT
+		rmSync(join(root, ".agentflux", "events.jsonl"), { force: true });
+		vmark = notices.length;
+		await flux.handler("space", ctx);
+		check(notices.slice(vmark).some(text => text.includes("recent agent activity") && text.includes("(none)")), "/flux space 无 events.jsonl 时输出空时间线不抛错");
 		await flux.handler("task list", ctx);
 		check(notices.some(text => text.includes("AgentFlux tasks")), "TUI 可列出当前 Pi 会话的 Task Registry");
 		// Main 会话 usage 落盘：turn_end 累计 → agent_settled 写入 telemetry 与任务 executions
