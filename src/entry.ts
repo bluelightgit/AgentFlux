@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
@@ -35,13 +35,15 @@ interface RuntimeContext {
 	pricing?: PricingTable;
 }
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info", maxLines = 1): void {
-	const cleaned = cleanNotifyText(text, maxLines);
-	if (ctx.hasUI) {
-		// 统一走 info 级: pi 的 showStatus 在对话最底部渲染浅灰色小字（dim）,
-		// 连续通知会原地更新不堆积; warning/error 级别用前缀区分（不用彩色大字）
-		const prefixed = level === "error" ? `⚠ ${cleaned}` : level === "warning" ? `△ ${cleaned}` : cleaned;
-		ctx.ui.notify(prefixed, "info");
-	} else (level === "error" ? console.error : console.log)(cleaned);
+	try {
+		const cleaned = cleanNotifyText(text, maxLines);
+		if (ctx.hasUI) {
+			// 统一走 info 级: pi 的 showStatus 在对话最底部渲染浅灰色小字（dim）,
+			// 连续通知会原地更新不堆积; warning/error 级别用前缀区分（不用彩色大字）
+			const prefixed = level === "error" ? `⚠ ${cleaned}` : level === "warning" ? `△ ${cleaned}` : cleaned;
+			ctx.ui.notify(prefixed, "info");
+		} else (level === "error" ? console.error : console.log)(cleaned);
+	} catch { /* 会话已销毁时后台回调的通知尽力而为 */ }
 }
 
 /**
@@ -133,6 +135,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 	const resetMainUsage = (): MainUsage => { const usage = mainTurnUsage; mainTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }; return usage; };
 	const activeRuns = new Map<string, AbortController>();
 	const persistentControllers = new Map<string, AbortController>();
+	let uiCtx: any = null;  // TUI footer 状态行的 UI 上下文（session_start 时注入）
+	/** TUI 底部单行状态：subagent: name - status | ...（运行中优先，其次按创建时间；无子代理时清除）。 */
+	function updateSubagentStatusLine(): void {
+		try {
+			if (uiCtx?.ui?.setStatus && runtime) {
+				uiCtx.ui.setStatus("agentflux-subagents", formatSubagentStatusLine(listAgents(runtime.cwd)));
+			}
+		} catch { /* footer 更新尽力而为 */ }
+	}
 	const workflowInvocations = new Set<string>();
 
 	const operatingProtocol = [
@@ -379,6 +390,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
+		uiCtx = ctx;
 		const config = loadConfig(ctx.cwd);
 		const warnings = validateConfig(config);
 		const modelsConfig = loadModelsConfig(ctx.cwd);
@@ -442,7 +454,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async () => {
 		for (const controller of activeRuns.values()) controller.abort();
+		for (const controller of persistentControllers.values()) controller.abort();
 		activeRuns.clear();
+		persistentControllers.clear();
 		if (runtime) {
 			try { deleteSessionAgents(runtime.cwd, sessionId); } catch { /* 清理尽力而为 */ }
 		}
@@ -510,6 +524,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run returns the Agent's last message (last(k) for more). One project-level execution at a time: a running Agent blocks starting a Workflow or Community run.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
+			background: Type.Optional(Type.Boolean()),
 			name: Type.Optional(Type.String()),
 			agent: Type.Optional(Type.String()),
 			role: Type.Optional(Type.String()),
@@ -529,6 +544,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd)) }], details: { ok: true } };
 			if (params.action === "gc") {
 				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
+				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: removed.length ? `GC removed ${removed.length} Agent(s): ${removed.join(", ")}` : "GC: no Agents to remove." }], details: { ok: true, removed } };
 			}
 			if (params.action === "create") {
@@ -541,12 +557,14 @@ export default function agentFlux(pi: ExtensionAPI) {
 					throw error;
 				}
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role, forkPoint: agent.lineage.forkPoint });
+				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: `Created Agent ${agent.name} (${agent.role}, ${agent.scope})${agent.lineage.origin === "fork" ? ` · fork of ${params.forkFrom}` : ""}` }], details: { ok: true, agent: { name: agent.name, role: agent.role, scope: agent.scope } } };
 			}
 			if (params.action === "delete") {
 				if (!params.agent) throw new Error("delete requires agent");
 				const agent = deleteAgent(runtime.cwd, params.agent);
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
+				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: `Deleted ${agent.name}` }], details: { ok: true } };
 			}
 			if (params.action === "stop") {
@@ -557,6 +575,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const controller = persistentControllers.get(record.name);
 				if (controller) {
 					controller.abort();
+					updateSubagentStatusLine();
 					return { content: [{ type: "text", text: `Stop requested for ${record.name}` }], details: { ok: true } };
 				}
 				if (record.status === "running") {
@@ -583,6 +602,25 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const forwardAbort = () => controller.abort();
 				persistentControllers.set(matches[0].name, controller);
 				signal?.addEventListener("abort", forwardAbort, { once: true });
+				if (params.background) {
+					// 后台模式：不等待子代理完成，立即返回；结果在完成时 notify + footer 状态行
+					const name = matches[0].name;
+					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking })
+						.then(result => {
+							const ok = result.exitCode === 0 && !result.errorMessage;
+							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
+						})
+						.catch((error: any) => {
+							notify(uiCtx, `[subagent ${name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1);
+						})
+						.finally(() => {
+							signal?.removeEventListener("abort", forwardAbort);
+							persistentControllers.delete(name);
+							updateSubagentStatusLine();
+						});
+					updateSubagentStatusLine();
+					return { content: [{ type: "text", text: `后台已启动子代理 ${name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。运行中可用 /flux agent stop ${name} 停止，/flux status 查看状态；完成后会通知。` }], details: { ok: true, background: true } };
+				}
 				let result: AgentRunResult;
 				try {
 					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking });
@@ -594,6 +632,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				} finally {
 					signal?.removeEventListener("abort", forwardAbort);
 					persistentControllers.delete(matches[0].name);
+					updateSubagentStatusLine();
 				}
 				if (result.exitCode !== 0 || result.errorMessage) {
 					executionOutcome = result.exitCode === 130 || controller.signal.aborted
@@ -604,6 +643,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				} else {
 					executionOutcome = { action: "completed", status: "success", costUsd: result.usage.cost };
 				}
+				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: formatAgentRunResult(result, Math.max(1, params.last ?? 1)) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
 			}
 			throw new Error("Usage: flux_agent list|create|run|stop|retry|delete|gc");
@@ -943,13 +983,28 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const role = positional[0];
 					const agent = createAgent(runtime.cwd, { name: subject, role, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
+					updateSubagentStatusLine();
 					return notify(ctx, `Created ${agent.name} (${agent.role}, ${agent.scope})${flags.model ? ` · model ${flags.model}` : ""}${flags.thinking ? ` · thinking ${flags.thinking}` : ""}`);
 				}
 				if (action === "run" && subject) {
 					const task = positional.join(" ").trim();
-					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>]");
+					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>] [--background]");
 					const existing = findAgents(runtime.cwd, subject);
 					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
+					if (flags.background) {
+						const controller = new AbortController();
+						persistentControllers.set(agent.name, controller);
+						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any })
+							.then(result => {
+								const ok = result.exitCode === 0 && !result.errorMessage;
+								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
+							})
+							.catch((error: any) => notify(ctx, `[subagent ${agent.name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1))
+							.finally(() => { persistentControllers.delete(agent.name); updateSubagentStatusLine(); });
+						updateSubagentStatusLine();
+						return notify(ctx, `后台已启动子代理 ${agent.name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。/flux agent stop ${agent.name} 可停止。`, "info", 1);
+					}
+					updateSubagentStatusLine();
 					return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), undefined, undefined, { model: flags.model, thinking: flags.thinking as any }), 1), "info", 12);
 				}
 				if (action === "retry" && subject) {

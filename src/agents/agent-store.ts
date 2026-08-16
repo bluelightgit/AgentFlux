@@ -345,3 +345,18 @@ export function formatAgents(agents: AgentRecord[]): string {
 	if (agents.length === 0) return "No Agents.";
 	return ["Agents:", ...agents.map(agent => `  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}`)].join("\n");
 }
+
+/** TUI 底部状态行：运行中的优先，其次按创建时间新旧（最新在前），单行超长省略。 */
+export function formatSubagentStatusLine(agents: AgentRecord[]): string | undefined {
+	const sorted = agents
+		.filter(agent => agent.status !== "archived")
+		.sort((a, b) => {
+			const arunning = a.status === "running" ? 0 : 1;
+			const brunning = b.status === "running" ? 0 : 1;
+			if (arunning !== brunning) return arunning - brunning;
+			return b.createdAt.localeCompare(a.createdAt);
+		});
+	if (sorted.length === 0) return undefined;
+	const line = `subagent: ${sorted.map(agent => `${agent.name} - ${agent.status}`).join(" | ")}`;
+	return line.length > 140 ? `${line.slice(0, 137)}...` : line;
+}

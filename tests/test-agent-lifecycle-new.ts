@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -210,6 +210,19 @@ async function main(): Promise<void> {
 		check(deleteAgent(root, "gc-b").name === "gc-b", "手动删除 Agent");
 		check(!listAgents(root).some(agent => agent.name === "gc-b"), "删除后不再出现在列表");
 		check(formatAgents(listAgents(root)).includes("scope=project"), "formatAgents 展示作用域");
+		// ─── TUI 底部状态行（运行中优先、按创建时间新旧、单行省略）───
+		const statusAgents = [
+			{ ...createdDefault, name: "old-idle", status: "idle", createdAt: "2026-08-01T00:00:00.000Z" },
+			{ ...createdDefault, name: "new-running", status: "running", createdAt: "2026-08-10T00:00:00.000Z" },
+			{ ...createdDefault, name: "old-running", status: "running", createdAt: "2026-08-05T00:00:00.000Z" },
+			{ ...createdDefault, name: "archived-x", status: "archived", createdAt: "2026-08-12T00:00:00.000Z" },
+			{ ...createdDefault, name: "newest-idle", status: "idle", createdAt: "2026-08-12T00:00:00.000Z" },
+		];
+		const statusLine = formatSubagentStatusLine(statusAgents as any);
+		check(statusLine?.startsWith("subagent: new-running - running | old-running - running | newest-idle - idle | old-idle - idle"), "状态行：运行中优先（新的在前），其次按创建时间新旧，archived 排除");
+		const manyAgents = Array.from({ length: 30 }, (_, index) => ({ ...createdDefault, name: `agent-${index}`, status: "idle", createdAt: `2026-08-01T00:00:00.${String(index).padStart(3, "0")}Z` }));
+		check((formatSubagentStatusLine(manyAgents as any) ?? "").length <= 141, "状态行超长省略（140 字符上限）");
+		check(formatSubagentStatusLine([]) === undefined, "无子代理时状态行返回 undefined（footer 清除）");
 		// session 作用域与会话结束清理
 		const sessionAgent = createAgent(root, { name: "session-scope", scope: "session", ownerSessionId: "ses-1", modelsConfig: { models: {} } });
 		check(sessionAgent.scope === "session" && sessionAgent.ownerSessionId === "ses-1", "session 作用域记录 ownerSessionId");

@@ -112,6 +112,11 @@ check("parseAgentFlags 无标记时原样返回", () => {
 	assert.deepStrictEqual(flags, {});
 	assert.deepStrictEqual(positional, ["worker", "写文档"]);
 });
+check("parseAgentFlags 支持 --background 无值标志", () => {
+	const { flags, positional } = parseAgentFlags(["worker", "写文档", "--background", "--thinking", "high"]);
+	assert.deepStrictEqual(flags, { background: "true", thinking: "high" });
+	assert.deepStrictEqual(positional, ["worker", "写文档"]);
+});
 
 check("parses 'fork last'", () => {
 	const cmd = parseFluxCommand("fork last");

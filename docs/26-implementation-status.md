@@ -17,7 +17,7 @@
 | Workflow | wired / offline + live verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本、delete 和 Task Registry 关联。 |
 | Task history | wired / offline + live verified | Pi 原生 UUIDv7 作为 sessionId；`.agentflux/runtime/tasks.json` 保存 Task/Execution、operation 与完整父子谱系。Main/TUI 可精确读取历史；continue/reuse/retry/Workflow resume 均创建新的 Task/Execution，父历史保持只读。Main 会话逐轮 usage 从 pi turn_end(message_end) 读取，agent_settled/session_shutdown 时落入 telemetry 事件与 executions.usage（input/output/cacheRead/cacheWrite/costUsd/model）；`/flux usage` 展示本会话累计与缓存命中率。 |
 | Community | wired / offline + live verified / 部分 | Issue、comment、claim、submit、review（pass/rework）、resolve、delete 已接线；resolve 需全部 claim 收敛（reviewed）；Issue Room 时间线（13 类事件）与 next-actions 确定性推导；active claim 阻止关闭；claim 注册/释放 community 空间。提案实体（propose/support/oppose，轻量无状态机）与认领多提案绑定 + 方案总结（plan 可在 submit 细化）；决策理由落档（resolvedReason + 时间线）；停止条件门禁在核心层（连续退回无新反馈达 community_stall_threshold 默认 3 / 预算超支复用 max_cost_per_task / 轮次超限复用 max_iterations），停摆状态人工 resolve/delete 兜底；实链 T11 全链路 + 门禁 + 兜底通过。Proposal/Review/Decision 独立实体与全自动执行器后置。 |
-| 统一 Agent | wired / offline + live verified | 单一 Agent 实体取代 ephemeral/persistent 双轨：唯一 id + 可重名 name（重名自动 xxx(1) 后缀）、三种创建路径（默认 assistant 模板 / 角色模板 / 会话树分叉继承源会话记忆）、三层作用域（global/project/session，会话结束清理 session 作用域）、run=指令+超时+last(k)（AgentRunResult.assistantMessages）、stop/retry/delete/gc（保留最新 k 个，默认 10）；busy 拒绝，对话排队由 Message V2 承载。create/run 支持 model/thinking 覆盖（创建时持久化到记录，run 时单次覆盖不修改记录；未知模型 fail-closed 拒绝；命令层 --model/--thinking）。旧格式记录（2026-08-12 前无 scope/status/id）读取时内存级归一化补默认值，不重写文件。 |
+| 统一 Agent | wired / offline + live verified | 单一 Agent 实体取代 ephemeral/persistent 双轨：唯一 id + 可重名 name（重名自动 xxx(1) 后缀）、三种创建路径（默认 assistant 模板 / 角色模板 / 会话树分叉继承源会话记忆）、三层作用域（global/project/session，会话结束清理 session 作用域）、run=指令+超时+last(k)（AgentRunResult.assistantMessages）、stop/retry/delete/gc（保留最新 k 个，默认 10）；busy 拒绝，对话排队由 Message V2 承载。create/run 支持 model/thinking 覆盖（创建时持久化到记录，run 时单次覆盖不修改记录；未知模型 fail-closed 拒绝；命令层 --model/--thinking）。run/命令层支持 --background 会话内后台执行（工具立即返回，完成时通知，/flux agent stop 可中断，session_shutdown 中止；headless 进程退出即中止）。TUI 底部 footer 状态行 `subagent: name - status | ...`（运行中优先、按创建时间新旧、单行省略，ctx.ui.setStatus）。旧格式记录（2026-08-12 前无 scope/status/id）读取时内存级归一化补默认值，不重写文件。 |
 | pi session fork | wired / offline verified / limited | `/flux fork` 使用 pi `ctx.fork` 创建真实单分支，并保留原生会话树；Agent fork 继承源会话文件。一次从 snapshot 并行派生 N 个独立进程尚未实现，不能用 fresh Agent 冒充 fork。 |
 | Agent policy | wired / offline verified | 模板→注册实例→单次运行只能收窄；tools/skills/communication/workspace、revision、effective snapshot、telemetry 与 cache generation。MCP 非空 allowlist 因 pi 缺少门禁 hook 而 fail-closed。 |
 | Agent 消息 | wired / offline + live verified | Message V2 支持 direct/group、priority、dedupe、delivery/ACK、cursor、lease redelivery、expiry/backpressure。Main 工具与 TUI 均可查看 Main inbox、Poll 与显式 ACK。 |
@@ -28,7 +28,7 @@
 
 ## 本轮测试
 
-`npm run verify` 包含类型检查以及以下确定性测试（23 个测试文件全部纳入 test:unit，2026-08-16 为 592 断言）：
+`npm run verify` 包含类型检查以及以下确定性测试（23 个测试文件全部纳入 test:unit，2026-08-16 为 596 断言）：
 
 - 无模式执行协议、Task envelope（含畸形输入防御）：12 + 6/6。
 - Task Registry：11/11。
