@@ -382,7 +382,8 @@ export function resetAgentStatus(cwd: string, selector: string, status: Exclude<
 
 export function formatAgents(agents: AgentRecord[], cwd?: string): string {
 	if (agents.length === 0) return "No Agents.";
-	return ["Agents:", ...agents.map(agent => {
+	const sorted = sortAgentsByActivity(agents);
+	return ["Agents:", ...sorted.map(agent => {
 		const summary = (agent.lastResult?.summary.trim().replace(/\s+/g, " ") || "(no output)").slice(0, 60);
 		const lines = [`  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`];
 		const sessionCommand = cwd ? formatAgentSessionCommand(cwd, agent) : undefined;
@@ -405,26 +406,32 @@ export function resolveAgentSessionFile(cwd: string, record: AgentRecord): strin
 	} catch { return undefined; }
 }
 
-/** 读取子代理会话文件中最后一条 assistant 文本消息（“最后说的话”，Talk 展示用）。
- * 会话文件事件类型为 message（非 message_end），逐行倒序扫描取最后一条含 text 的 assistant 消息。 */
-export function readAgentLastMessage(cwd: string, record: AgentRecord): string | undefined {
+/** 读取子代理会话文件中最后 count 条 assistant 文本消息（时间正序，最新在后；Talk 展示“对话内容”用）。
+ * 会话文件事件类型为 message（非 message_end），逐行扫描收集最后 count 条含 text 的 assistant 消息。 */
+export function readAgentLastMessages(cwd: string, record: AgentRecord, count = 3): string[] {
 	const sessionFile = resolveAgentSessionFile(cwd, record);
-	if (!sessionFile) return undefined;
+	if (!sessionFile) return [];
+	const messages: string[] = [];
 	try {
 		const lines = readFileSync(sessionFile, "utf8").split("\n");
-		for (let i = lines.length - 1; i >= 0; i--) {
+		for (const line of lines) {
 			try {
-				const event = JSON.parse(lines[i]);
+				const event = JSON.parse(line);
 				if (event?.type === "message" && event.message?.role === "assistant") {
 					const texts = (event.message.content ?? [])
 						.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim())
 						.map((block: any) => block.text.trim());
-					if (texts.length) return texts.join(" ");
+					if (texts.length) messages.push(texts.join(" "));
 				}
 			} catch { /* 跳过坏行 */ }
 		}
-	} catch { return undefined; }
-	return undefined;
+	} catch { return []; }
+	return messages.slice(-count);
+}
+
+/** 读取子代理会话文件中最后一条 assistant 文本消息（“最后说的话”，Talk 展示用）。 */
+export function readAgentLastMessage(cwd: string, record: AgentRecord): string | undefined {
+	return readAgentLastMessages(cwd, record, 1)[0];
 }
 
 /** 进入子代理直接对话窗口的启动命令（单行）：npx pi --session "<会话文件>"。无会话文件时返回 undefined。 */
@@ -434,15 +441,18 @@ export function formatAgentSessionCommand(cwd: string, record: AgentRecord): str
 }
 
 /** TUI 底部状态行：运行中的优先，其次按创建时间新旧（最新在前），单行超长省略。 */
+/** 排序：运行中优先，其次按创建时间最新在前（/flux agent list、TUI 菜单与底部栏共用，保证一致）。 */
+export function sortAgentsByActivity(agents: AgentRecord[]): AgentRecord[] {
+	return [...agents].sort((a, b) => {
+		const arunning = a.status === "running" ? 0 : 1;
+		const brunning = b.status === "running" ? 0 : 1;
+		if (arunning !== brunning) return arunning - brunning;
+		return String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""));
+	});
+}
+
 export function formatSubagentStatusLine(agents: AgentRecord[]): string | undefined {
-	const sorted = agents
-		.filter(agent => agent.status !== "archived")
-		.sort((a, b) => {
-			const arunning = a.status === "running" ? 0 : 1;
-			const brunning = b.status === "running" ? 0 : 1;
-			if (arunning !== brunning) return arunning - brunning;
-			return b.createdAt.localeCompare(a.createdAt);
-		});
+	const sorted = sortAgentsByActivity(agents.filter(agent => agent.status !== "archived"));
 	if (sorted.length === 0) return undefined;
 	const line = `subagent: ${sorted.map(agent => `${agent.name} - ${agent.status}`).join(" | ")}`;
 	return line.length > 140 ? `${line.slice(0, 137)}...` : line;

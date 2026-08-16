@@ -14,6 +14,8 @@ export interface TuiAgentInfo {
 	sessionCommand?: string;
 	/** 最近一次 run 的回复摘要（Talk 时先展示）。 */
 	lastMessage?: string;
+	/** 会话文件最近几条 assistant 回复（Talk 展示“对话内容”，时间正序）。 */
+	lastHistory?: string[];
 	communication: "current_chat" | "persistent_session" | "message" | "none";
 }
 
@@ -90,8 +92,13 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	const action = await select(ctx, agent.name, actions);
 	if (action?.startsWith("Talk")) {
+		const history = (agent.lastHistory ?? []).map(text => `  · ${text.replace(/\s+/g, " ").slice(0, 100)}`);
+		if (history.length) {
+			ctx.ui.notify(`${agent.name} 最近对话：\n${history.join("\n")}`, "info");
+		} else {
+			ctx.ui.notify(`${agent.name} 还没有 run 过，暂无历史回复。`, "info");
+		}
 		const last = agent.lastMessage?.trim().replace(/\s+/g, " ").slice(0, 200);
-		ctx.ui.notify(last ? `${agent.name} 最近一次回复：${last}` : `${agent.name} 还没有 run 过，暂无历史回复。`, "info");
 		const message = await input(ctx, `Talk to ${agent.name}`, last ? `最近回复：${last.slice(0, 60)}` : "Describe the task, question or follow-up");
 		if (!message) return null;
 		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;

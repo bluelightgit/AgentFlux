@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, readAgentLastMessages, resetAgentStatus, runAgentRecord, sortAgentsByActivity } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -254,7 +254,19 @@ async function main(): Promise<void> {
 		].join("\n"), "utf8");
 		const lastMessage = readAgentLastMessage(root, { ...enterAgent, name: "talker", sessionId: "agent-talker" });
 		check(lastMessage === "汇总完毕。", "Talk 展示最后一条 assistant 文本（跳过 user/toolResult 与旧消息）");
+		const lastMessages = readAgentLastMessages(root, { ...enterAgent, name: "talker", sessionId: "agent-talker" }, 3);
+		check(lastMessages.length === 2 && lastMessages[0] === "报告写好了，共 12 个问题。" && lastMessages[1] === "汇总完毕。", "最近对话取最后 N 条 assistant 回复（时间正序）");
 		check(readAgentLastMessage(root, { ...enterAgent, name: "never-run", sessionId: "never-run" }) === undefined, "无会话文件时最后回复为空");
+		// 排序：运行中优先、最新创建在前（/flux agent list 与底部栏一致）
+		const sortRoot = mkdtempSync(join(tmpdir(), "flux-sort-"));
+		const older = createAgent(sortRoot, { name: "older-one", modelsConfig: { models: {} } });
+		const newer = createAgent(sortRoot, { name: "newer-one", modelsConfig: { models: {} } });
+		const running = createAgent(sortRoot, { name: "run-now", modelsConfig: { models: {} } });
+		const records = [{ ...running, status: "running" as const }, newer, older, { ...older, name: "archived-x", status: "archived" as const }];
+		const sorted = sortAgentsByActivity(records);
+		check(sorted[0].name === "run-now" && sorted[1].name === "newer-one" && sorted[2].name === "older-one", "排序：运行中最前，其次按 createdAt 最新在前");
+		check(formatAgents(records).split("\n")[1].includes("run-now"), "/flux agent list 首行是运行中的 Agent");
+		rmSync(sortRoot, { recursive: true, force: true });
 		const noSessionCmd = formatAgentSessionCommand(root, { ...enterAgent, name: "never-run", sessionId: "never-run" });
 		check(noSessionCmd === undefined, "无会话文件的子代理不输出启动命令");
 		// ─── TUI 底部状态行（运行中优先、按创建时间新旧、单行省略）───

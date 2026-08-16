@@ -97,9 +97,9 @@ async function main(): Promise<void> {
 		await flux.handler("agent", ctx);
 		check(notices.some(text => text.includes("Agent reviewer-main") && text.includes("capability")), "不带参数的 /flux agent 显示 Agent 列表与详细信息");
 		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Talk · continue Agent session"]; menuInputs = ["review this change"];
-		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "subagent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, lastMessage: "报告写好了，共 12 个问题。", sessionCommand: "npx pi --session \"x.jsonl\"", communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
+		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "subagent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, lastMessage: "报告写好了", lastHistory: ["报告写好了，共 12 个问题。", "汇总完毕。"], sessionCommand: "npx pi --session \"x.jsonl\"", communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(talkCommand === "agent run reviewer-main review this change", "选择 Agent 后 Talk 生成对话命令（恢复 Talk 入口）");
-		check(notices.some(text => text.includes("最近一次回复") && text.includes("报告写好了")), "Talk 输入前先展示子代理最后说的话");
+		check(notices.some(text => text.includes("最近对话") && text.includes("报告写好了") && text.includes("汇总完毕")), "Talk 输入前先展示最近几条对话内容");
 		menuSelections = ["worker-live · subagent · tester · running", "Message · send to active Agent"]; menuInputs = ["please report status"];
 		const messageCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "worker-live", kind: "subagent", role: "tester", status: "running", callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, communication: "message" }], roles: [], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(messageCommand === "message send worker-live please report status", "运行中的子代理可从列表发送 Message V2");
