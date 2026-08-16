@@ -10,6 +10,10 @@ export interface TuiAgentInfo {
 	totalCostUsd: number;
 	capabilityGeneration: number;
 	lastTask?: string;
+	/** 直接对话启动命令（npx pi --session "<会话文件>"），无会话文件时省略。 */
+	sessionCommand?: string;
+	/** 最近一次 run 的回复摘要（Talk 时先展示）。 */
+	lastMessage?: string;
 	communication: "current_chat" | "persistent_session" | "message" | "none";
 }
 
@@ -53,6 +57,7 @@ function agentDetails(agent: TuiAgentInfo): string {
 		`  role/status  ${agent.role} / ${agent.status}`,
 		`  model        ${agent.provider ? `${agent.provider}/` : ""}${agent.model ?? "default"}`,
 		`  session      ${agent.sessionId ?? "-"}`,
+		`  open         ${agent.sessionCommand ?? "-"}`,
 		`  calls/cost   ${agent.callCount} / $${agent.totalCostUsd.toFixed(6)}`,
 		`  capability   generation ${agent.capabilityGeneration}`,
 		`  last task    ${agent.lastTask ?? "-"}`,
@@ -76,7 +81,7 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	ctx.ui.notify(agentDetails(agent), "info");
 	const actions = ["Details · show information"];
 	if (agent.communication === "current_chat") actions.unshift("Talk · continue in current Main conversation");
-	if (agent.communication === "persistent_session") actions.unshift("Enter · open direct conversation window");
+	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Agent session");
 	if (agent.communication === "message") actions.unshift("Message · send to active Agent");
 	if (agent.kind === "subagent" && agent.status !== "archived") {
 		if (agent.status === "running") actions.push("Stop · abort the running run");
@@ -85,6 +90,8 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	}
 	const action = await select(ctx, agent.name, actions);
 	if (action?.startsWith("Talk")) {
+		const last = agent.lastMessage?.trim().replace(/\s+/g, " ").slice(0, 200);
+		ctx.ui.notify(last ? `${agent.name} 最近一次回复：${last}` : `${agent.name} 还没有 run 过，暂无历史回复。`, "info");
 		const message = await input(ctx, `Talk to ${agent.name}`, "Describe the task, question or follow-up");
 		if (!message) return null;
 		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;

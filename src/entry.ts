@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentEnterCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
@@ -270,12 +270,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 	const tuiMenuData = (ctx: any): FluxTuiMenuData => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
 		const agents = listAgents(runtime.cwd);
+		const cwd = runtime.cwd;
 		const board = new SharedBoard(runtime.fluxDir);
 		const mainInbox = new MessageBus(runtime.fluxDir).peek("main");
 		return {
 			agents: [
 				{ name: "main", kind: "main", role: "lead", status: currentPlan || implicitTask ? "running" : "idle", model: ctx.model?.id, provider: ctx.model?.provider, sessionId, callCount: turnIndex, totalCostUsd: 0, capabilityGeneration: 1, lastTask: currentPlan?.task ?? implicitTask?.task, communication: "current_chat" },
-				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const })),
+				...agents.map(agent => ({ ...agent, kind: "subagent" as const, communication: agent.status === "archived" || agent.status === "running" ? "none" as const : "persistent_session" as const, sessionCommand: formatAgentSessionCommand(cwd, agent), lastMessage: agent.lastResult?.summary })),
 			],
 			roles: [...loadAllRoles(runtime.cwd, runtime.modelsConfig).keys()].sort(),
 			issues: listIssues(runtime.cwd).map(issue => ({ id: issue.id, title: issue.title, status: issue.status, claims: issue.claims.map(claim => ({ id: claim.id, agent: claim.agent, scope: claim.scope, status: claim.status })), proposals: (issue.proposals ?? []).map(proposal => ({ id: proposal.id, title: proposal.title })) })),
@@ -535,7 +536,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		label: "Agent",
 		description: "Create (default / role template / session fork), run (talk to), stop, retry, enter (open a direct conversation window), list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there). enter prints the command to open a direct conversation with the Agent in a new pi window (--session on its session file); run is blocked only while the Agent's status is running.",
 		parameters: Type.Object({
-			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("enter"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
+			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
 			background: Type.Optional(Type.Boolean()),
 			name: Type.Optional(Type.String()),
 			agent: Type.Optional(Type.String()),
@@ -551,7 +552,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			const context = persistentContext();
-			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd)) }], details: { ok: true } };
+			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd), runtime.cwd) }], details: { ok: true } };
 			if (params.action === "gc") {
 				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
 				updateSubagentStatusLine();
@@ -576,12 +577,6 @@ export default function agentFlux(pi: ExtensionAPI) {
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
 				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: `Deleted ${agent.name}` }], details: { ok: true } };
-			}
-			if (params.action === "enter") {
-				if (!params.agent) throw new Error("enter requires agent");
-				const matches = findAgents(runtime.cwd, params.agent);
-				if (matches.length === 0) throw new Error(`Agent not found: ${params.agent}`);
-				return { content: [{ type: "text", text: formatAgentEnterCommand(runtime.cwd, matches[0]) }], details: { ok: true } };
 			}
 			if (params.action === "stop") {
 				if (!params.agent) throw new Error("stop requires agent");
@@ -872,7 +867,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
-			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd)), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
+			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd), runtime.cwd), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
 			if (command.kind === "usage") {
 				const usage = mainTurnUsage;
 				const total = usage.input + usage.cacheRead;
@@ -997,12 +992,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const [action, subject, ...rest] = command.args;
 				// 解析 --model <m> 与 --thinking <t> 覆盖参数（与 issue claim --props 同风格）
 				const { flags, positional } = parseAgentFlags(rest);
-				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd)), "info", 12);
-				if (action === "enter" && subject) {
-					const matches = findAgents(runtime.cwd, subject);
-					if (matches.length === 0) throw new Error(`Agent not found: ${subject}`);
-					return notify(ctx, formatAgentEnterCommand(runtime.cwd, matches[0]), "info", 12);
-				}
+				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd), runtime.cwd), "info", 12);
 				if (action === "create" && subject) {
 					const role = positional[0];
 					const agent = createAgent(runtime.cwd, { name: subject, role, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });

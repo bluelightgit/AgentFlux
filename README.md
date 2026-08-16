@@ -19,7 +19,7 @@ pi install git:github.com/bluelightgit/AgentFlux@v0.1.0  # 固定 tag
 ## 核心概念
 
 - **执行**：任务在 Main Agent 中直接完成，或按需派发子代理（`flux_agent`）。AgentFlux 不预设执行方式。
-- **Agent 实体**：单一子代理模型。三种创建路径——默认模板、角色模板、从既有会话树分叉（继承源会话记忆）；可重名（自动 `xxx(1)` 后缀）；三层作用域（global / project / session，会话结束清理 session 作用域）。`run` 携带指令与超时并返回对话的最近消息，`delete` 硬删除，自动 GC 保留最近 k 个（默认 10）。创建与单次运行可按任务指定 `model`/`thinking` 覆盖（未知模型拒绝；运行覆盖不修改记录）。TUI 会话中 run 默认后台执行（立即返回、完成时通知、`/flux agent stop` 可中断），`--sync` 或 headless 模式同步等待结果；运行过程实时显示（working 行逐条刷新消息与工具调用）；TUI 底部状态行显示运行中的子代理。直接对话：`/flux agent enter <name>` 输出 `pi --session` 启动命令，在新窗口打开子代理会话完整对话（与主 Agent 能力一致，对话写回会话记忆，run 仅受 running 状态阻塞）。
+- **Agent 实体**：单一子代理模型。三种创建路径——默认模板、角色模板、从既有会话树分叉（继承源会话记忆）；可重名（自动 `xxx(1)` 后缀）；三层作用域（global / project / session，会话结束清理 session 作用域）。`run` 携带指令与超时并返回对话的最近消息，`delete` 硬删除，自动 GC 保留最近 k 个（默认 10）。创建与单次运行可按任务指定 `model`/`thinking` 覆盖（未知模型拒绝；运行覆盖不修改记录）。TUI 会话中 run 默认后台执行（立即返回、完成时通知、`/flux agent stop` 可中断），`--sync` 或 headless 模式同步等待结果；运行过程实时显示（working 行逐条刷新消息与工具调用）；TUI 底部状态行显示运行中的子代理。直接对话：`/flux agent list` 的 Agent 详情最下方显示 `npx pi --session "<会话文件>"` 启动命令，在新窗口打开子代理会话完整对话（与主 Agent 能力一致，对话写回会话记忆，run 仅受 running 状态阻塞）。
 - **Workflow**：保存的固定 DAG 定义（含版本历史），按需创建执行；节点可并行、可挂质量门，执行支持断点续跑（`resume`）。
 - **Community**：Issue/Claim 协作。提案（propose/support/oppose）可多提案绑定认领，claim → submit → review（pass/rework）→ resolve，带轮次、成本与停摆门禁。
 - **消息**：Message V2 提供 Agent 间直接消息、群组与投递确认（send/poll/ack/lease 重投）。

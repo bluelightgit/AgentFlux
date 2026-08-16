@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentEnterCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, resetAgentStatus, runAgentRecord } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
@@ -241,10 +241,12 @@ async function main(): Promise<void> {
 		const sessionsDir = join(root, ".agentflux", "runtime", "sessions");
 		mkdirSync(sessionsDir, { recursive: true });
 		writeFileSync(join(sessionsDir, "2026-01-01T00-00-00-000Z_agent-enter-me-cap-abc123.jsonl"), "{\"type\":\"session\",\"version\":3}\n");
-		const enterCmd = formatAgentEnterCommand(root, enterAgent);
-		check(enterCmd.includes("npx pi --session") && enterCmd.includes("agent-enter-me-cap-abc123.jsonl") && enterCmd.includes("返回主 Agent"), "enter 输出可执行的 pi --session 启动命令");
-		const noSessionCmd = formatAgentEnterCommand(root, { ...enterAgent, name: "never-run", sessionId: "never-run" });
-		check(noSessionCmd.includes("尚无会话文件"), "无会话文件的子代理提示先 run 创建会话");
+		const enterCmd = formatAgentSessionCommand(root, enterAgent);
+		check(enterCmd?.includes("agent-enter-me-cap-abc123.jsonl") === true && enterCmd.startsWith("npx pi --session"), "启动命令单行输出（npx pi --session + 会话文件）");
+		const listText = formatAgents(listAgents(root), root);
+		check(listText.includes("npx pi --session") && listText.includes("agent-enter-me-cap-abc123.jsonl"), "agent 列表详情最下方显示 npx pi --session 启动命令");
+		const noSessionCmd = formatAgentSessionCommand(root, { ...enterAgent, name: "never-run", sessionId: "never-run" });
+		check(noSessionCmd === undefined, "无会话文件的子代理不输出启动命令");
 		// ─── TUI 底部状态行（运行中优先、按创建时间新旧、单行省略）───
 		const statusAgents = [
 			{ ...createdDefault, name: "old-idle", status: "idle", createdAt: "2026-08-01T00:00:00.000Z" },
