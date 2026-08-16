@@ -218,6 +218,46 @@ async function main() {
 			failed.exitCode !== 0 && bus.getDelivery(failedMessage.envelope.id, "runner-fail")?.status === "delivered",
 			`exit=${failed.exitCode} status=${bus.getDelivery(failedMessage.envelope.id, "runner-fail")?.status}`);
 
+		// provider 崩溃模拟：瞬时错误 → 指数退避重试恢复；持续崩溃 → 重试耗尽；模型不可用 → 降级
+		const crashState = join(root, "crash-state.txt");
+		const crashAgent = (name: string): AgentTemplate => ({ name, description: "test", systemPrompt: "", tools: [] });
+		const crashOnce = await runAgent({
+			cwd: root, agent: crashAgent("crash-once"), task: "recover from provider crash", sessionId: "provider-crash-once",
+			prefixLayout: false, timeoutMs: 30_000, maxRetries: 1,
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "provider-crash-once.cjs")] },
+			env: { AGENTFLUX_CRASH_STATE: crashState },
+		});
+		check("provider crash recovers via retry with backoff",
+			crashOnce.exitCode === 0 && crashOnce.retryCount === 1 && !crashOnce.errorMessage
+				&& /recovered after provider crash/.test(crashOnce.output),
+			`exit=${crashOnce.exitCode} retries=${crashOnce.retryCount} error=${crashOnce.errorMessage ?? ""}`);
+
+		const crashAlways = await runAgent({
+			cwd: root, agent: crashAgent("crash-always"), task: "survive persistent crash", sessionId: "provider-crash-always",
+			prefixLayout: false, timeoutMs: 30_000, maxRetries: 2, retryDelayMs: 100,
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "provider-crash-always.cjs")] },
+		});
+		check("persistent provider crash exhausts retries and reports the failure",
+			crashAlways.retryCount === 2 && /502/.test(crashAlways.errorMessage ?? ""),
+			`retries=${crashAlways.retryCount} error=${crashAlways.errorMessage ?? ""}`);
+
+		const modelState = join(root, "model-state.txt");
+		const modelsForFallback = {
+			"unavailable-model": { provider: "octopus-completions", contextWindow: 128000 },
+			"fallback-model": { provider: "octopus-anthropic", contextWindow: 128000 },
+		};
+		const fallbackRun = await runAgent({
+			cwd: root, agent: { ...crashAgent("model-missing"), model: "unavailable-model" }, task: "degrade model", sessionId: "provider-model-missing",
+			prefixLayout: false, timeoutMs: 30_000, maxRetries: 0, enableModelFallback: true,
+			modelsForFallback, roleRequirementForFallback: { reasoning: 0.5 },
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "provider-model-missing.cjs")] },
+			env: { AGENTFLUX_CRASH_STATE: modelState },
+		});
+		check("unavailable model degrades to a fallback model and succeeds",
+			fallbackRun.exitCode === 0 && fallbackRun.fallbackModel === "fallback-model" && !fallbackRun.errorMessage
+				&& /fallback model succeeded/.test(fallbackRun.output),
+			`exit=${fallbackRun.exitCode} fallback=${fallbackRun.fallbackModel ?? ""} error=${fallbackRun.errorMessage ?? ""}`);
+
 		const contractAgent: AgentTemplate = {
 			...agent("runner-contract"), tools: ["read"], communication: { requiredSendTo: ["planner"], allowedTargets: ["planner"] },
 		};

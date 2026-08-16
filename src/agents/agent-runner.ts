@@ -666,6 +666,7 @@ export async function runAgent(opts: {
 	maxTurns?: number;                                 // 完成一个 assistant turn 后检查的硬上限
 	maxInputTokens?: number;                           // 跨 turn 累计 input token 硬上限
 	completionProof?: AgentCompletionProof;            // 声明后所有成功都必须通过；仅 exit 74 可由文件事实恢复为成功
+	env?: Record<string, string>;                      // 透传给子进程的额外环境变量
 	taskId?: string;                                   // Message V2 / telemetry correlation
 	executionId?: string;                              // first-class parent execution correlation
 	liveTeamCommunication?: boolean;                    // Team child 在结束前主动轮询 operator/peer inbox
@@ -941,6 +942,7 @@ export async function runAgent(opts: {
 					windowsHide: true,
 					env: {
 						...process.env,
+						...(opts.env ?? {}),
 						AGENTFLUX_AGENT_NAME: agent.name,
 						AGENTFLUX_AGENT_ROLE: capabilityRole,
 						AGENTFLUX_AGENT_INSTANCE_ID: agentInstanceId,
