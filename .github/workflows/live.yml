@@ -1,9 +1,9 @@
 name: Live E2E
 
-# 真实模型链路测试。默认不运行（避免公共 CI 产生 API 费用与 key 暴露）。
+# 真实模型链路测试。仅在推送到 main 或手动触发时运行。
 # 触发方式：
-#   1. 手动 workflow_dispatch（推荐）：在 Actions 页面填入 provider 参数
-#   2. 定时 schedule：需先在仓库配置好 Secrets（见下方说明）
+#   1. 推送到 main：使用仓库 Secrets 中的 provider 参数
+#   2. 手动 workflow_dispatch：可在 Actions 页面覆盖 provider 参数
 #
 # provider 参数与 pi models.json 的 providers 段一一对应
 # （参考 pi docs/models.md；tests/live/live-config.ts 会生成临时 agent 目录）：
@@ -13,11 +13,13 @@ name: Live E2E
 #   model-*     → providers.<id>.models[].id
 #   thinking    → pi CLI 的 --thinking 等级
 #
-# 需要配置的 Secrets（schedule 定时任务使用；手动触发时可用 inputs 替代）：
+# 需要配置的 Secrets（push 触发使用；手动触发时可用 inputs 替代）：
 #   AGENTFLUX_LIVE_BASE_URL / AGENTFLUX_LIVE_API_KEY
 #   AGENTFLUX_LIVE_MODEL_PRO / AGENTFLUX_LIVE_MODEL_FLASH
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       base-url:
@@ -56,10 +58,6 @@ on:
         required: false
         default: direct
         type: string
-  schedule:
-    # 每日 03:17 定时回归（需要 Secrets.AGENTFLUX_LIVE_*）
-    - cron: "17 3 * * *"
-
 jobs:
   live:
     runs-on: ubuntu-latest
