@@ -57,7 +57,7 @@
 
 当前 `npm run verify` 合计 609/609（2026-09-01），通过后 production build 成功。
 
-2026-09-01 多角色真实链路：`npm run test:live:multirole`（本次使用 `octopus-completions/deepseek-v4-flash`、`thinking=off`、Provider 重试由测试任务限制）启动全新 Pi 进程；Main 实际调用 `flux_agent create(roles=[planner,reviewer])`，随后同步运行 planner 与 reviewer。两次 child 均 exit 0，Agent 注册表终态为 `idle`、`callCount=2`、`lastRole=reviewer`，Run Registry 各保存一个 planner/reviewer completed 运行，主进程 wall clock 82.255s，报告为 `.agentflux/test-results/multirole-latest.json`（该目录按 gitignore 不入库）。
+2026-09-01 多角色真实链路：`AGENTFLUX_LIVE_BUILT=1 npm run test:live:multirole`（本次使用 `octopus-completions/deepseek-v4-flash`、`thinking=off`、Provider 重试由测试任务限制）启动全新 Pi 进程，加载 production build 的 `dist/extension/entry.js` 与 `subagent-entry.js`；Main 实际调用 `flux_agent create(roles=[planner,reviewer])`，随后同步运行 planner 与 reviewer。两次 child 均 exit 0，Agent 注册表终态为 `idle`、`callCount=2`、`lastRole=reviewer`，Run Registry 各保存一个 planner/reviewer completed 运行，主进程 wall clock 81.753s，报告为 `.agentflux/test-results/multirole-latest.json`（该目录按 gitignore 不入库）。另新增外部监督命令 `npm run dogfood:restart`：它只在显式提供 `--old-pid` 时停止旧 Pi，随后重新 build、启动全新 Pi 并调用 built 多角色实链，按 iterationId 保存 source commit、改动文件、build/new-Pi 结果、实际 task/execution 与父谱系元数据；扩展自身不杀宿主进程。当前监督器的 `--operation continue|retry` 记录迭代谱系元数据，实际 fresh fixture 内任务仍从 `new` 开始，不能据此宣称完成 AgentFlux Task 的 continue/retry 实链。
 
 ### 2026-08-31 模型继承边界
 

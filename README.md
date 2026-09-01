@@ -73,7 +73,7 @@ npm run test:live:workflow-reuse      # 创建并精确复用已保存 Workflow
 npm run test:live:workflow-modify     # 修改得到 v2，保留 v1，再精确复用 v2
 ```
 
-Live 测试默认使用本机 `~/.pi/agent` 凭据与当前 pi 内置的 `octopus-completions` provider；通过 `AGENTFLUX_LIVE_*` 环境变量可指向任意 OpenAI/Anthropic 兼容端点（baseUrl、api、apiKey、模型、thinking、用例子集、provider id，详见 tests/live/）。多角色链路可运行 `npm run test:live:multirole`。CI 中由 `.github/workflows/live.yml` 在推送到 `main` 时触发，也支持手动触发；不再按计划定时运行。
+Live 测试默认使用本机 `~/.pi/agent` 凭据与当前 pi 内置的 `octopus-completions` provider；通过 `AGENTFLUX_LIVE_*` 环境变量可指向任意 OpenAI/Anthropic 兼容端点（baseUrl、api、apiKey、模型、thinking、用例子集、provider id，详见 tests/live/）。多角色链路可运行 `npm run test:live:multirole`；外部 build→新 Pi→真实链路监督可运行 `npm run dogfood:restart`（仅显式 `--old-pid` 时停止旧 Pi）。CI 中由 `.github/workflows/live.yml` 在推送到 `main` 时触发，也支持手动触发；不再按计划定时运行。
 
 ## 文档导航
 

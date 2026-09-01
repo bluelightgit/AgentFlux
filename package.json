@@ -55,6 +55,7 @@
     "test:live:workflow-reuse": "tsx tests/live/test-workflow-reuse-deepseek.ts",
     "test:live:workflow-modify": "tsx tests/live/test-workflow-modify-deepseek.ts",
     "test:live:multirole": "tsx tests/live/test-multirole-deepseek.ts",
+    "dogfood:restart": "tsx tests/live/test-dogfood-restart.ts",
     "verify": "npm run typecheck && npm run test:unit",
     "prepack": "npm run build"
   }

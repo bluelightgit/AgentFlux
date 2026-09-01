@@ -21,7 +21,9 @@ async function main(): Promise<void> {
 	const startedAt = Date.now();
 	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
-	cpSync(join(sourceRoot, "src"), join(fixtureRoot, "src"), { recursive: true });
+	const useBuiltExtension = process.env.AGENTFLUX_LIVE_BUILT === "1";
+	if (useBuiltExtension) cpSync(join(sourceRoot, "dist", "extension"), join(fixtureRoot, "dist", "extension"), { recursive: true });
+	else cpSync(join(sourceRoot, "src"), join(fixtureRoot, "src"), { recursive: true });
 	writeFileSync(join(fixtureRoot, "README.md"), "# AgentFlux multirole fixture\n");
 	writeFileSync(join(fixtureRoot, ".agentflux", "agentflux.json"), JSON.stringify({
 		budget: { max_cost_per_task: 0.15, max_iterations: 3, max_wall_clock_seconds: 180 },
@@ -35,14 +37,19 @@ async function main(): Promise<void> {
 		"3) action=run，agent=multirole-live，role=reviewer，background=false，task=只回复 REVIEW_LIVE_OK。",
 		"三次工具调用都成功后，只输出 MULTIROLE_LIVE_OK。",
 	].join("\n");
+	const extensionEntry = useBuiltExtension
+		? join(fixtureRoot, "dist", "extension", "entry.js")
+		: join(fixtureRoot, "src", "entry.ts");
 	const args = [
-		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", join(fixtureRoot, "src", "entry.ts"),
+		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
 		"--no-skills", "--tools", "read,grep,find,ls,flux_task,flux_agent", ...config.cliArgs(config.modelFlash), prompt,
 	];
 	let stdout = "";
 	let stderr = "";
+	let piPid: number | undefined;
 	try {
 		const child = spawn(process.execPath, args, { cwd: fixtureRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: config.env });
+		piPid = child.pid;
 		child.stdout.on("data", value => { stdout += value.toString(); });
 		child.stderr.on("data", value => { stderr += value.toString(); });
 		const exitCode = await new Promise<number>((resolveExit, reject) => {
@@ -56,20 +63,27 @@ async function main(): Promise<void> {
 		});
 		const agentsPath = join(fixtureRoot, ".agentflux", "runtime", "agents.json");
 		const runsPath = join(fixtureRoot, ".agentflux", "runtime", "runs.json");
+		const tasksPath = join(fixtureRoot, ".agentflux", "runtime", "tasks.json");
 		const agents = existsSync(agentsPath) ? JSON.parse(readFileSync(agentsPath, "utf-8")) : undefined;
 		const runs = existsSync(runsPath) ? JSON.parse(readFileSync(runsPath, "utf-8")) : undefined;
+		const tasks = existsSync(tasksPath) ? JSON.parse(readFileSync(tasksPath, "utf-8")) : undefined;
 		const agent = agents?.agents?.find((item: any) => item.name === "multirole-live");
 		const roleRuns = runs?.runs?.filter((item: any) => item.agent === "multirole-live") ?? [];
+		const taskItems = Array.isArray(tasks?.tasks) ? tasks.tasks : [];
+		const task = taskItems.slice().sort((a: any, b: any) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")))[0];
 		const evidence = {
 			updatedAt: new Date().toISOString(),
 			provider: config.providerId,
 			model: config.modelFlash,
 			thinking: config.thinking,
+			builtExtension: useBuiltExtension,
 			exitCode,
+			piPid,
 			wallClockMs: Date.now() - startedAt,
 			marker: stdout.includes("MULTIROLE_LIVE_OK") || stderr.includes("MULTIROLE_LIVE_OK"),
+			task: task ? { id: task.id, executionId: task.executionId, status: task.status, operation: task.operation } : undefined,
 			agent: agent ? { name: agent.name, roles: agent.roles, callCount: agent.callCount, lastRole: agent.lastRole, status: agent.status } : undefined,
-			roleRuns: roleRuns.map((item: any) => ({ role: item.role, status: item.status, costUsd: item.costUsd })),
+			roleRuns: roleRuns.map((item: any) => ({ runId: item.id, taskId: item.taskId, executionId: item.executionId, role: item.role, model: item.model, status: item.status, costUsd: item.costUsd })),
 			stdoutTail: stdout.slice(-4000),
 			stderrTail: stderr.slice(-4000),
 		};
