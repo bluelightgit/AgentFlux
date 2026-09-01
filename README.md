@@ -19,12 +19,12 @@ pi install git:github.com/bluelightgit/AgentFlux@v0.1.0  # 固定 tag
 ## 核心概念
 
 - **执行**：任务在 Main Agent 中直接完成，或按需派发子代理（`flux_agent`）。AgentFlux 不预设执行方式。
-- **Agent 实体**：单一子代理模型。三种创建路径——默认模板、角色模板、从既有会话树分叉（继承源会话记忆）；可重名（自动 `xxx(1)` 后缀）；三层作用域（global / project / session，会话结束清理 session 作用域）。`run` 携带指令与超时并返回对话的最近消息，`delete` 硬删除，自动 GC 保留最近 k 个（默认 10）。创建与单次运行可按任务指定 `model`/`thinking` 覆盖（未知模型拒绝；运行覆盖不修改记录）。TUI 会话中 run 默认后台执行（立即返回、完成时通知、`/flux agent stop` 可中断），`--sync` 或 headless 模式同步等待结果；运行过程实时显示（working 行逐条刷新消息与工具调用）；TUI 底部状态行显示运行中的子代理。直接对话：`/flux agent list` 的 Agent 详情最下方显示 `npx pi --session "<会话文件>"` 启动命令，在新窗口打开子代理会话完整对话（与主 Agent 能力一致，对话写回会话记忆，run 仅受 running 状态阻塞）。
+- **Agent 实体**：单一子代理模型。三种创建路径——默认模板、角色模板、从既有会话树分叉（继承源会话记忆）；可重名（自动 `xxx(1)` 后缀）；三层作用域（global / project / session，会话结束清理 session 作用域）。创建时可绑定多个角色（`roles`），每次 `run` 通过 `role` 选择当前职责并记录到 Run Registry/lastResult；Workflow 节点也可绑定同一 Agent。`run` 携带指令与超时并返回对话的最近消息，`delete` 硬删除，自动 GC 保留最近 k 个（默认 10）。没有显式 Agent/角色模型时运行时继承当前 Main Agent model/provider；创建与单次运行可按任务指定 `model`/`thinking` 覆盖（未知模型拒绝；运行覆盖不修改记录）。TUI 会话中 run 默认后台执行（立即返回、完成时通知、`/flux agent stop` 可中断），`--sync` 或 headless 模式同步等待结果；运行过程实时显示（working 行逐条刷新消息与工具调用）；TUI 底部状态行显示运行中的子代理。直接对话：`/flux agent list` 的 Agent 详情最下方显示 `npx pi --session "<会话文件>"` 启动命令，在新窗口打开子代理会话完整对话（与主 Agent 能力一致，对话写回会话记忆，run 仅受 running 状态阻塞）。
 - **Workflow**：保存的固定 DAG 定义（含版本历史），按需创建执行；节点可并行、可挂质量门，执行支持断点续跑（`resume`）。
 - **Community**：Issue/Claim 协作。提案（propose/support/oppose）可多提案绑定认领，claim → submit → review（pass/rework）→ resolve，带轮次、成本与停摆门禁。
 - **消息**：Message V2 提供 Agent 间直接消息、群组与投递确认（send/poll/ack/lease 重投）。
 - **互斥**：`.agentflux/runtime/active-context.json` 是权威互斥状态，一个空间活跃时阻止其他空间启动；空间内并行允许。
-- **权限**：角色模板定义上界，注册实例与单次运行逐层收窄，下层不能扩大上层能力。子代理的 `edit`/`write` 拒绝修改未声明文件；文件锁防并行编辑冲突。此门禁提供进程与文件级保护，覆盖 OS 级沙箱。
+- **权限**：角色模板定义上界，注册实例与单次运行逐层收窄，下层不能扩大上层能力。子代理的 `edit`/`write` 拒绝修改未声明文件；文件锁防并行编辑冲突。此门禁是 Host 级进程/文件策略，不是 OS 级沙箱；真实隔离仍需容器、虚拟机或其他受控运行环境。
 
 ## TUI 命令
 
@@ -66,14 +66,14 @@ Main Agent 可通过工具直接调度：`flux_task`（历史查询与任务操�
 ## 验证
 
 ```bash
-npm run verify                        # 类型检查 + 全部确定性回归（25 组，622 断言）
+npm run verify                        # 类型检查 + 全部确定性回归（24 个测试文件，607 断言）
 npm run test:live                     # DeepSeek 全链路 smoke
 npm run test:live:history             # 同一会话两轮任务：自动继续与父任务关系
 npm run test:live:workflow-reuse      # 创建并精确复用已保存 Workflow
 npm run test:live:workflow-modify     # 修改得到 v2，保留 v1，再精确复用 v2
 ```
 
-Live 测试默认使用本机 `~/.pi/agent` 凭据与 `octopus-anthropic` provider；通过 `AGENTFLUX_LIVE_*` 环境变量可指向任意 OpenAI/Anthropic 兼容端点（baseUrl、api、apiKey、模型、thinking、用例子集、provider id，详见 tests/live/）。CI 中由 `.github/workflows/live.yml` 在推送到 `main` 时触发，也支持手动触发；不再按计划定时运行。
+Live 测试默认使用本机 `~/.pi/agent` 凭据与当前 pi 内置的 `octopus-completions` provider；通过 `AGENTFLUX_LIVE_*` 环境变量可指向任意 OpenAI/Anthropic 兼容端点（baseUrl、api、apiKey、模型、thinking、用例子集、provider id，详见 tests/live/）。多角色链路可运行 `npm run test:live:multirole`。CI 中由 `.github/workflows/live.yml` 在推送到 `main` 时触发，也支持手动触发；不再按计划定时运行。
 
 ## 文档导航
 

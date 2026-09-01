@@ -3,7 +3,7 @@ import {
 	existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	resolveCommunicationPolicy, type CommunicationPolicy, type CommunicationPolicyInput,
 } from "./communication-policy";
@@ -306,17 +306,44 @@ function overridePath(fluxDir: string, agentName: string): string {
 	return join(fluxDir, "runtime", "capability-overrides", `${agentName}.json`);
 }
 
+function roleArtifactSuffix(role: string): string {
+	return createHash("sha256").update(role).digest("hex").slice(0, 16);
+}
+
+function roleOverridePath(fluxDir: string, agentName: string, role: string): string {
+	if (!NAME.test(agentName)) throw new Error(`invalid capability agent name: ${agentName}`);
+	return join(fluxDir, "runtime", "capability-overrides", `${agentName}.${roleArtifactSuffix(role)}.json`);
+}
+
+function effectiveSnapshotPath(fluxDir: string, agentName: string, role?: string): string {
+	if (!NAME.test(agentName)) throw new Error(`invalid capability agent name: ${agentName}`);
+	return join(fluxDir, "runtime", "capability-effective", role
+		? `${agentName}.${roleArtifactSuffix(role)}.json`
+		: `${agentName}.json`);
+}
+
 export function loadRegisteredCapabilityOverride(fluxDir: string, agentName: string): RegisteredCapabilityOverride | null {
 	const record = readJson<RegisteredCapabilityOverride>(overridePath(fluxDir, agentName));
 	return record?.schemaVersion === 1 && record.agentName === agentName ? record : null;
 }
 
-export function loadEffectiveCapabilitySnapshot(fluxDir: string, agentName: string): ResolvedCapabilityPolicy | null {
-	if (!NAME.test(agentName)) throw new Error(`invalid capability agent name: ${agentName}`);
-	const record = readJson<ResolvedCapabilityPolicy>(
-		join(fluxDir, "runtime", "capability-effective", `${agentName}.json`),
-	);
-	return record?.schemaVersion === 1 && record.agentName === agentName ? record : null;
+/** 按本次所选角色读取实例收窄；旧的单角色文件仍可直接使用。 */
+export function loadRegisteredCapabilityOverrideForRole(
+	fluxDir: string,
+	agentName: string,
+	role: string,
+): RegisteredCapabilityOverride | null {
+	const scoped = readJson<RegisteredCapabilityOverride>(roleOverridePath(fluxDir, agentName, role));
+	if (scoped?.schemaVersion === 1 && scoped.agentName === agentName && scoped.role === role) return scoped;
+	const base = loadRegisteredCapabilityOverride(fluxDir, agentName);
+	return base?.role === role ? base : null;
+}
+
+export function loadEffectiveCapabilitySnapshot(fluxDir: string, agentName: string, role?: string): ResolvedCapabilityPolicy | null {
+	const path = effectiveSnapshotPath(fluxDir, agentName, role);
+	const record = readJson<ResolvedCapabilityPolicy>(path)
+		?? (role ? readJson<ResolvedCapabilityPolicy>(effectiveSnapshotPath(fluxDir, agentName)) : null);
+	return record?.schemaVersion === 1 && record.agentName === agentName && (!role || record.role === role) ? record : null;
 }
 
 export function saveRegisteredCapabilityOverride(input: {
@@ -326,7 +353,11 @@ export function saveRegisteredCapabilityOverride(input: {
 	override: CapabilityPolicyInput;
 	expectedRevision?: number;
 }): RegisteredCapabilityOverride {
-	const path = overridePath(input.fluxDir, input.agentName);
+	const base = loadRegisteredCapabilityOverride(input.fluxDir, input.agentName);
+	// 保留旧的单角色文件作为默认角色；其他角色使用独立文件，避免覆盖不同角色的实例收窄。
+	const path = base && base.role !== input.role
+		? roleOverridePath(input.fluxDir, input.agentName, input.role)
+		: overridePath(input.fluxDir, input.agentName);
 	const lockPath = `${path}.lock`;
 	mkdirSync(dirname(path), { recursive: true });
 	let fd: number | null = null;
@@ -343,7 +374,7 @@ export function saveRegisteredCapabilityOverride(input: {
 			fd = openSync(lockPath, "wx");
 		}
 		ownsLock = true;
-		const current = loadRegisteredCapabilityOverride(input.fluxDir, input.agentName);
+		const current = readJson<RegisteredCapabilityOverride>(path);
 		if (input.expectedRevision !== undefined && (current?.revision ?? 0) !== input.expectedRevision) {
 			throw new Error(`capability revision conflict: expected ${input.expectedRevision}, current ${current?.revision ?? 0}`);
 		}
@@ -363,8 +394,8 @@ export function saveRegisteredCapabilityOverride(input: {
 	}
 }
 
-export function writeEffectiveCapabilitySnapshot(fluxDir: string, policy: ResolvedCapabilityPolicy): string {
-	const path = join(fluxDir, "runtime", "capability-effective", `${policy.agentName}.json`);
+export function writeEffectiveCapabilitySnapshot(fluxDir: string, policy: ResolvedCapabilityPolicy, role?: string): string {
+	const path = effectiveSnapshotPath(fluxDir, policy.agentName, role);
 	writeAtomic(path, policy);
 	return path;
 }

@@ -103,6 +103,11 @@ check("parseAgentFlags 提取 --model/--thinking 并保留位置参数", () => {
 	assert.deepStrictEqual(flags, { model: "flash-model", thinking: "high" });
 	assert.deepStrictEqual(positional, ["implementer", "project"]);
 });
+check("parseAgentFlags 提取角色与会话模式覆盖", () => {
+	const { flags, positional } = parseAgentFlags(["写验收", "--role", "reviewer", "--session-mode", "fresh", "--roles", "planner,reviewer"]);
+	assert.deepStrictEqual(flags, { role: "reviewer", sessionMode: "fresh", roles: "planner,reviewer" });
+	assert.deepStrictEqual(positional, ["写验收"]);
+});
 check("parseAgentFlags 缺值报错", () => {
 	assert.throws(() => parseAgentFlags(["--model"]), /requires a value/);
 	assert.throws(() => parseAgentFlags(["--thinking", "--model"]), /requires a value/);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	evaluateLockFileToolCall,
-	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, normalizeRuntimeCapabilityOverride,
+	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, loadRegisteredCapabilityOverrideForRole, normalizeRuntimeCapabilityOverride,
 	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
 	type CapabilityPolicyInput,
@@ -145,6 +145,17 @@ async function main() {
 		}), /already in progress/);
 		check("failed concurrent writer preserves lock ownership", existsSync(foreignLock), foreignLock);
 		unlinkSync(foreignLock);
+		const roleBase = saveRegisteredCapabilityOverride({
+			fluxDir, agentName: "role-switch", role: "reviewer", expectedRevision: 0, override: { tools: ["read"] },
+		});
+		const roleSecondary = saveRegisteredCapabilityOverride({
+			fluxDir, agentName: "role-switch", role: "implementer", expectedRevision: 0, override: { tools: ["read", "bash"] },
+		});
+		check("registered capability overrides remain separately bound for multiple roles",
+			roleBase.revision === 1 && roleSecondary.revision === 1
+				&& loadRegisteredCapabilityOverride(fluxDir, "role-switch")?.role === "reviewer"
+				&& loadRegisteredCapabilityOverrideForRole(fluxDir, "role-switch", "implementer")?.override.tools?.join(",") === "read,bash",
+			`${roleBase.role}/${roleSecondary.role}`);
 		const snapshot = writeEffectiveCapabilitySnapshot(fluxDir, policy);
 		check("effective capability snapshot is a stable Desktop-readable contract",
 			existsSync(snapshot) && JSON.parse(readFileSync(snapshot, "utf-8")).schemaVersion === 1,

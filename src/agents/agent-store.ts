@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "../core/json-store";
 import type { PricingTable } from "../core/pricing";
 import { assertSafePathSegment } from "../core/safe-path";
-import type { AgentRecord, AgentScope, AgentStatus } from "../core/types";
+import type { AgentRecord, AgentScope, AgentStatus, ThinkingLevel } from "../core/types";
 import type { TelemetryWriter } from "../telemetry/events";
 import { runAgent, type AgentRunResult, type AgentTemplate } from "./agent-runner";
 import { loadAllRoles } from "./templates";
@@ -32,8 +32,12 @@ export interface AgentRunContext {
 	executionId?: string;
 	sharedSkills?: string[];
 	prefixLayout: boolean;
+	/** 未显式指定 Agent/角色模型时，继承当前 Main Agent 的模型。 */
+	defaultModel?: string;
+	defaultProvider?: string;
 	timeoutMs?: number;
 	maxCostUsd?: number;
+	lockFiles?: string[];
 	invocationOverride?: { command: string; args: string[] };
 }
 
@@ -49,17 +53,26 @@ function normalizeAgentRecord(record: any): AgentRecord {
 		id: record.id ?? `legacy-${record.name ?? "unknown"}`,
 		name: record.name ?? record.id ?? "unknown",
 		scope: record.scope ?? "project",
-		role: record.role ?? "assistant",
+		role: typeof record.role === "string" && record.role.trim() ? record.role.trim() : "assistant",
+		roles: (() => {
+			const primary = typeof record.role === "string" && record.role.trim() ? record.role.trim() : "assistant";
+			const configured = Array.isArray(record.roles)
+				? record.roles.filter((value: unknown): value is string => typeof value === "string" && value.trim().length > 0)
+				: [];
+			return [...new Set([primary, ...configured])];
+		})(),
 		status: record.status ?? "idle",
 		lineage: record.lineage ?? { origin: "fresh", forkedFrom: undefined },
 		model: record.model,
 		provider: record.provider,
 		thinking: record.thinking,
 		sessionId: record.sessionId,
+		lastSessionId: record.lastSessionId,
 		ownerSessionId: record.ownerSessionId,
 		createdAt: record.createdAt ?? now,
 		updatedAt: record.updatedAt ?? now,
 		lastTask: record.lastTask,
+		lastRole: record.lastRole,
 		callCount: record.callCount ?? 0,
 		totalCostUsd: record.totalCostUsd ?? 0,
 		capabilityGeneration: record.capabilityGeneration ?? 1,
@@ -76,15 +89,17 @@ function updateRegistry<R>(path: string, update: (agents: AgentRecord[]) => R): 
 }
 
 /** 全部作用域列表（global → project → session 同文件）。 */
-export function listAgents(cwd: string): AgentRecord[] {
+export function listAgents(cwd: string, ownerSessionId?: string): AgentRecord[] {
 	const global = readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents;
 	const project = readJsonStore(registryPath(cwd, "project"), createRegistry, isRegistry).agents;
-	return [...global, ...project].map(normalizeAgentRecord);
+	return [...global, ...project].map(normalizeAgentRecord).filter(agent =>
+		!ownerSessionId || agent.scope !== "session" || agent.ownerSessionId === ownerSessionId,
+	);
 }
 
-/** 按 id（精确）或 name（可能多个）查找；archived/已删除不返回。 */
-export function findAgents(cwd: string, selector: string): AgentRecord[] {
-	return listAgents(cwd).filter(agent => agent.status !== "archived" && (agent.id === selector || agent.name === selector));
+/** 按 id（精确）或 name（可能多个）查找；archived/已删除不返回。提供 session 时隔离 session 作用域。 */
+export function findAgents(cwd: string, selector: string, ownerSessionId?: string): AgentRecord[] {
+	return listAgents(cwd, ownerSessionId).filter(agent => agent.status !== "archived" && (agent.id === selector || agent.name === selector));
 }
 
 function uniqueName(cwd: string, scope: AgentScope, name: string): string {
@@ -108,8 +123,12 @@ function uniqueName(cwd: string, scope: AgentScope, name: string): string {
  */
 /** 单次运行可覆盖的模型与思考等级（覆盖模板默认，不修改模板本身）。 */
 export interface AgentRunOverrides {
+	/** 以同一 Agent 身份执行本次任务时选择的角色。 */
+	role?: string;
+	/** shared 复用 Agent 会话；fresh 为本次角色运行生成独立持久会话。 */
+	sessionMode?: "shared" | "fresh";
 	model?: string;
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	thinking?: ThinkingLevel;
 }
 
 /** 最近一次运行结果摘要（后台运行时供 list/show 查询）。 */
@@ -120,6 +139,7 @@ export interface AgentRunSummary {
 	turns: number;
 	costUsd: number;
 	model?: string;
+	role?: string;
 	at: string;
 }
 
@@ -133,24 +153,32 @@ function assertModelOverride(modelsConfig: any, model: string | undefined): void
 	}
 }
 
-export function createAgent(cwd: string, input: { name: string; role?: string; forkFrom?: string; scope?: AgentScope; ownerSessionId?: string; modelsConfig: any; model?: string; thinking?: AgentRunOverrides["thinking"] }): AgentRecord {
+export function createAgent(cwd: string, input: { name: string; role?: string; roles?: string[]; forkFrom?: string; scope?: AgentScope; ownerSessionId?: string; modelsConfig: any; model?: string; thinking?: AgentRunOverrides["thinking"] }): AgentRecord {
 	const safeName = assertSafePathSegment(input.name, "Agent name");
 	const scope: AgentScope = input.scope ?? "project";
-	const roles = loadAllRoles(cwd, input.modelsConfig);
-	if (input.role && !roles.has(input.role)) {
-		throw new Error(`Unknown Agent template: ${input.role}. Use a registered template id (${[...roles.keys()].join(", ") || "none available"}); role is not a free-form description.`);
+	const roleDefinitions = loadAllRoles(cwd, input.modelsConfig);
+	const requestedRole = typeof input.role === "string" ? input.role.trim() : undefined;
+	const configuredRoles = Array.isArray(input.roles) && input.roles.length > 0
+		? [...new Set(input.roles.map(roleName => roleName.trim()).filter(Boolean))]
+		: [requestedRole ?? "assistant"];
+	const role = requestedRole ?? configuredRoles[0] ?? "assistant";
+	if (!configuredRoles.includes(role)) configuredRoles.unshift(role);
+	for (const roleName of configuredRoles) {
+		if (!roleDefinitions.has(roleName)) {
+			throw new Error(`Unknown Agent template: ${roleName}. Use a registered template id (${[...roleDefinitions.keys()].join(", ") || "none available"}); role is not a free-form description.`);
+		}
 	}
-	const role = input.role ?? "assistant";
 	assertModelOverride(input.modelsConfig, input.model);
 	if (input.thinking !== undefined && !THINKING_LEVELS.includes(input.thinking)) {
 		throw new Error(`Unknown thinking level: ${input.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
 	}
-	const template = roles.get(role);
+	const template = roleDefinitions.get(role);
 	const now = new Date().toISOString();
+	const multiRole = configuredRoles.length > 1;
 	let sessionId: string | undefined;
 	let forkPoint: string | undefined;
 	if (input.forkFrom) {
-		const forkCandidates = findAgents(cwd, input.forkFrom);
+		const forkCandidates = findAgents(cwd, input.forkFrom, input.ownerSessionId);
 		if (forkCandidates.length > 0) {
 			sessionId = forkCandidates[0].sessionId; // 继承源 Agent 会话记忆
 		} else {
@@ -165,14 +193,22 @@ export function createAgent(cwd: string, input: { name: string; role?: string; f
 		role,
 		status: "idle",
 		lineage: {
-			origin: input.forkFrom ? "fork" : input.role ? "template" : "fresh",
-			templateId: input.role,
+			origin: input.forkFrom ? "fork" : (requestedRole || input.roles?.length) ? "template" : "fresh",
+			templateId: requestedRole ?? (input.roles?.length ? role : undefined),
+			templateIds: [...configuredRoles],
 			templateRevision: 1,
 			forkPoint,
 		},
-		model: input.model ?? template?.model,
-		provider: (() => { const m = input.model ?? template?.model; return m ? input.modelsConfig?.models?.[m]?.provider : undefined; })(),
-		thinking: input.thinking ?? template?.thinking,
+		roles: [...configuredRoles],
+		// 多角色 Agent 不把首个角色的模型固化到整个身份；每次 Run 按所选角色解析。
+		model: input.model ?? (multiRole ? undefined : template?.model),
+		provider: (() => {
+			const m = input.model ?? (multiRole ? undefined : template?.model);
+			return input.model
+				? input.modelsConfig?.models?.[input.model]?.provider
+				: (multiRole ? undefined : template?.provider) ?? (m ? input.modelsConfig?.models?.[m]?.provider : undefined);
+		})(),
+		thinking: input.thinking ?? (multiRole ? undefined : template?.thinking),
 		sessionId: sessionId ?? `agent-${uniqueName(cwd, scope, safeName)}`,
 		createdAt: now,
 		updatedAt: now,
@@ -187,11 +223,13 @@ export function createAgent(cwd: string, input: { name: string; role?: string; f
 }
 
 /** 手动删除（硬删；运行中拒绝）。 */
-export function deleteAgent(cwd: string, selector: string): AgentRecord {
+export function deleteAgent(cwd: string, selector: string, ownerSessionId?: string): AgentRecord {
 	for (const scope of ["global", "project"] as const) {
 		const path = registryPath(cwd, scope);
 		const removed = updateRegistry(path, agents => {
-			const current = agents.find(agent => (agent.id === selector || agent.name === selector) && agent.status !== "archived");
+			const current = agents.find(agent => (agent.id === selector || agent.name === selector)
+				&& agent.status !== "archived"
+				&& (!ownerSessionId || agent.scope !== "session" || agent.ownerSessionId === ownerSessionId));
 			if (!current) return undefined;
 			if (current.status === "running") throw new Error(`Agent is running: ${current.name}`);
 			const index = agents.indexOf(current);
@@ -226,28 +264,42 @@ export function gcAgents(cwd: string, keepLatestK = 10, activeRefs: ReadonlySet<
 	return removed;
 }
 
-function toTemplate(record: AgentRecord, cwd: string, modelsConfig: any, sharedSkills: string[]): AgentTemplate {
-	const role = loadAllRoles(cwd, modelsConfig).get(record.role);
-	if (!role) throw new Error(`Unknown Agent template: ${record.role}`);
-	const model = record.model ?? role.model;
+export function getAgentRoles(record: Pick<AgentRecord, "role" | "roles">): string[] {
+	const primary = record.role?.trim() || "assistant";
+	const configured = Array.isArray(record.roles)
+		? record.roles
+			.filter(role => typeof role === "string" && role.trim().length > 0)
+			.map(role => role.trim())
+		: [];
+	return [...new Set([primary.trim(), ...configured])];
+}
+
+function toTemplate(record: AgentRecord, roleName: string, cwd: string, modelsConfig: any, sharedSkills: string[], defaults?: { model?: string; provider?: string }): AgentTemplate {
+	const role = loadAllRoles(cwd, modelsConfig).get(roleName);
+	if (!role) throw new Error(`Unknown Agent template: ${roleName}`);
+	const model = record.model ?? role.model ?? defaults?.model;
+	const provider = record.provider
+		?? role.provider
+		?? (record.model || role.model ? modelsConfig?.models?.[model ?? ""]?.provider : undefined)
+		?? (model && defaults?.model === model ? defaults?.provider : undefined);
 	return {
 		name: record.name,
-		role: record.role,
+		role: roleName,
 		description: role.description ?? record.role,
 		model,
-		provider: model ? modelsConfig?.models?.[model]?.provider : undefined,
+		provider,
 		tools: role.tools,
 		skills: [...new Set([...sharedSkills, ...(role.skills ?? [])])],
 		mcpServers: role.mcpServers,
 		workspace: role.workspace,
-		systemPrompt: role.systemPrompt ?? `You are the ${record.role} specialist.`,
+		systemPrompt: role.systemPrompt ?? `You are the ${roleName} specialist.`,
 		thinking: record.thinking ?? role.thinking,
 		communication: role.communication,
 	};
 }
 
-function findSingle(cwd: string, selector: string): AgentRecord {
-	const matches = findAgents(cwd, selector);
+function findSingle(cwd: string, selector: string, ownerSessionId?: string): AgentRecord {
+	const matches = findAgents(cwd, selector, ownerSessionId);
 	if (matches.length === 0) throw new Error(`Agent not found: ${selector}`);
 	if (matches.length > 1) {
 		throw new Error(`Agent name "${selector}" is ambiguous: ${matches.map(agent => `${agent.name} (${agent.id})`).join(", ")}. Use the unique id.`);
@@ -259,29 +311,43 @@ function findSingle(cwd: string, selector: string): AgentRecord {
  * 运行 Agent = 与子代理对话：发出指令并等待完成（超时可配），
  * 返回其最后一条消息；assistantMessages 供 last(k) 展示更多执行消息。
  * busy 时拒绝（对话排队由 Message V2 pending 投递承载）。
+ * 同一 Agent 可在每次 Run 中选择其已注册的允许角色。
  */
 export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void): Promise<AgentRunResult> {
 	assertModelOverride(context.modelsConfig, overrides?.model);
 	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
 		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
 	}
+	if (overrides?.sessionMode !== undefined && overrides.sessionMode !== "shared" && overrides.sessionMode !== "fresh") {
+		throw new Error(`Unknown session mode: ${overrides.sessionMode}. Use shared or fresh.`);
+	}
 	if (!task.trim()) throw new Error("run requires task");
-	const record = findSingle(context.cwd, selector);
+	const record = findSingle(context.cwd, selector, context.sessionId);
+	const selectedRole = overrides?.role ?? record.role;
+	const allowedRoles = getAgentRoles(record);
+	if (!allowedRoles.includes(selectedRole)) {
+		throw new Error(`Agent ${record.name} is not registered for role ${selectedRole}; allowed roles: ${allowedRoles.join(", ")}`);
+	}
 	const path = registryPath(context.cwd, record.scope);
+	const persistentSessionId = overrides?.sessionMode === "fresh"
+		? `${record.sessionId}-fresh-${randomUUID()}`
+		: record.sessionId;
 	const running = updateRegistry(path, agents => {
 		const current = agents.find(agent => agent.id === record.id);
 		if (!current) throw new Error(`Agent not found: ${selector}`);
 		if (current.status === "running") throw new Error(`Agent is already running: ${current.name}`);
 		current.status = "running";
 		current.lastTask = task;
+		current.lastRole = selectedRole;
+		current.lastSessionId = persistentSessionId;
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
 	onStatusChange?.("running", running);
-	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: "running", action: "started", role: running.role, forkPoint: running.lineage.forkPoint, model: running.model });
+	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: "running", action: "started", role: selectedRole, forkPoint: running.lineage.forkPoint, model: running.model ?? context.defaultModel });
 	let result: AgentRunResult;
 	try {
-		const template = toTemplate(running, context.cwd, context.modelsConfig, context.sharedSkills ?? []);
+		const template = toTemplate(running, selectedRole, context.cwd, context.modelsConfig, context.sharedSkills ?? [], { model: context.defaultModel, provider: context.defaultProvider });
 		if (overrides?.model) {
 			template.model = overrides.model;
 			template.provider = context.modelsConfig?.models?.[overrides.model]?.provider;
@@ -297,14 +363,16 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			telemetry: context.telemetry,
 			prefixLayout: context.prefixLayout,
 			persistent: true,
-			persistentSessionId: running.sessionId,
+			persistentSessionId,
 			sessionDir: sessionDir ?? join(context.cwd, ".agentflux", "runtime", "sessions"),
 			pricing: context.pricing,
 			timeoutMs: context.timeoutMs,
 			maxCostUsd: context.maxCostUsd,
+			lockFiles: context.lockFiles,
 			signal,
 			onProgress: onProgress,
 			invocationOverride: context.invocationOverride,
+			registeredRoles: allowedRoles,
 		});
 	} catch (error) {
 		let failed: AgentRecord;
@@ -317,7 +385,7 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 					exitCode: signal?.aborted ? 130 : 1,
 					success: false,
 					summary: String(error instanceof Error ? error.message : error).slice(0, 300),
-					turns: 0, costUsd: 0, at: new Date().toISOString(),
+					turns: 0, costUsd: 0, role: selectedRole, at: new Date().toISOString(),
 				};
 				current.updatedAt = new Date().toISOString();
 				return structuredClone(current);
@@ -326,7 +394,7 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			// 状态写回失败时保留原始 run 错误（原因为主），写回错误附加说明
 			throw new AggregateError([error, inner], `run failed and status write-back also failed: ${String(inner instanceof Error ? inner.message : inner)}`);
 		}
-		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed" });
+		context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed", role: selectedRole });
 		onStatusChange?.(signal?.aborted ? "cancelled" : "failed", failed);
 		throw error;
 	}
@@ -343,12 +411,13 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			turns: result.usage.turns,
 			costUsd: result.usage.cost,
 			model: result.model ?? undefined,
+			role: selectedRole,
 			at: new Date().toISOString(),
 		};
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
 	});
-	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "subagent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed" });
+	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "subagent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed", role: selectedRole });
 	onStatusChange?.(completed.status, completed);
 	return result;
 }
@@ -368,8 +437,8 @@ export function deleteSessionAgents(cwd: string, ownerSessionId: string): string
 }
 
 /** 重置状态（孤儿 running 恢复等）。 */
-export function resetAgentStatus(cwd: string, selector: string, status: Exclude<AgentStatus, "archived">): AgentRecord {
-	const record = findSingle(cwd, selector);
+export function resetAgentStatus(cwd: string, selector: string, status: Exclude<AgentStatus, "archived">, ownerSessionId?: string): AgentRecord {
+	const record = findSingle(cwd, selector, ownerSessionId);
 	const path = registryPath(cwd, record.scope);
 	return updateRegistry(path, agents => {
 		const current = agents.find(agent => agent.id === record.id);
@@ -385,18 +454,21 @@ export function formatAgents(agents: AgentRecord[], cwd?: string): string {
 	const sorted = sortAgentsByActivity(agents);
 	return ["Agents:", ...sorted.map(agent => {
 		const summary = (agent.lastResult?.summary.trim().replace(/\s+/g, " ") || "(no output)").slice(0, 60);
-		const lines = [`  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${agent.role} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`];
+		const roles = getAgentRoles(agent);
+		const roleLabel = roles.length > 1 ? roles.join("|") : roles[0];
+		const lines = [`  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${roleLabel} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}${roles.length > 1 ? `·${agent.lastResult.role ?? agent.lastRole ?? roleLabel}` : ""}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`];
 		const sessionCommand = cwd ? formatAgentSessionCommand(cwd, agent) : undefined;
 		if (sessionCommand) lines.push(`     ${sessionCommand}`);
 		return lines.join("\n");
 	})].join("\n");
 }
 
-/** 解析子代理实际会话文件（形如 <时间戳>_<sessionId>-cap-<hash>.jsonl，按 sessionId 前缀扫描最新文件）。 */
+/** 解析子代理实际会话文件（shared/fresh 均为 <时间戳>_<persistentSessionId>-cap-<hash>.jsonl，按最近一次 key 扫描）。 */
 export function resolveAgentSessionFile(cwd: string, record: AgentRecord): string | undefined {
-	if (!record.sessionId) return undefined;
+	const sessionKey = record.lastSessionId ?? record.sessionId;
+	if (!sessionKey) return undefined;
 	const sessionsDir = join(cwd, ".agentflux", "runtime", "sessions");
-	const pattern = `_${record.sessionId}-cap-`;
+	const pattern = `_${sessionKey}-cap-`;
 	try {
 		const name = readdirSync(sessionsDir)
 			.filter(name => name.endsWith(".jsonl") && name.includes(pattern))

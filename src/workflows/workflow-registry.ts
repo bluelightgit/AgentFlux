@@ -158,7 +158,7 @@ export function formatWorkflowDefinitions(definitions: WorkflowDefinition[], det
 		`${definition.id}@${definition.version} · ${definition.name}`,
 		definition.description,
 		...definition.dag.nodes.map(node =>
-			`  ${node.id} · ${node.role} · depends on ${node.dependsOn.join(", ") || "-"} · ${node.title}`,
+			`  ${node.id} · ${node.role}${node.agentId ? ` @${node.agentId}${node.sessionMode === "fresh" ? " [fresh]" : ""}` : ""} · depends on ${node.dependsOn.join(", ") || "-"} · ${node.title}`,
 		),
 	].join("\n")).join("\n\n");
 }

@@ -1,6 +1,6 @@
 # 26 - 实现状态与测试事实
 
-更新日期：2026-07-30。本文件是当前能力状态的事实源。
+更新日期：2026-09-01。本文件是当前能力状态的事实源。
 
 > **2026-08-12 决策：Desktop/PiDeck/Electron 已放弃**（host/contracts 层与 desktop/ 载体已移除）。本文中 PiDeck/Electron 的历史记录与测试基线仅作时间线存档，不再代表当前交付物；当前产品面为 Core + TUI。
 
@@ -8,18 +8,20 @@
 
 ## 本轮结论
 
+**2026-09-01 多角色 Agent 单元已实现（当前分支 `feat/agent-multirole-dogfood`）**：Agent 身份与角色绑定分离；创建时可声明多个已注册角色，单次 `flux_agent run` 通过 `role` 选择本次职责，Run Registry、lastRole、telemetry 和模型/provider 解析均记录实际角色。Workflow DAG 节点可选 `agentId` 绑定已注册 Agent，并按依赖顺序以不同角色运行；同一绑定 Agent 不会被排入同一并行批次。`sessionMode=shared|fresh` 已实现，`fork` 仍必须走真实 Pi 会话分支，不能用 fresh 冒充。DAG planner/parser 不再把未知角色静默改成 implementer，而是保留扩展角色并在执行前 fail-closed 校验；本地角色模板可独立提供模型/provider/thinking。确定性回归新增多角色 Agent、绑定 Workflow、角色级能力覆盖测试；真实 Pi/Provider 低成本链路已验证 planner→reviewer 两次运行及注册表/Run Registry 终态。
+
 2026-08-15 起执行 docs/33 重设计（阶段一至五已完成并提交）：不再有工作方式模式（WorkStyle 体系、flux_team、agent_decides、模式门禁与固定工作方式模板已删除）。执行在 Main Agent 中直接进行或按需派发子代理；workflow 与 community 是可选执行方法。旧 M1–M6、自动路由、experience/sidecar 和重复 Team/Pipeline executor 已从生产 Core 删除，不提供兼容 adapter。
 
 | 能力 | 状态 | 当前契约与证据 |
 |---|---|---|
 | 无模式执行 | wired / offline + live verified | 普通对话直接执行（隐式计划）；operatingProtocol 无模式文本；工具 schema 不随运行状态增删。 |
 | 空间互斥 | wired / offline + live verified | active-context.json 权威互斥；executeDAG（workflow）、claimIssue（community）注册空间条目，main 空间子代理不参与互斥（可自由并行，docs/33 设计）；任何非目标空间活跃条目拒绝新空间启动，空间内并行允许；条目活跃判定=持有 pid 存活（长运行空间保留，崩溃条目立即失效），registerActiveContext 注册前顺带清理 pid 已死残留条目（缩短 pid 复用误判窗口）；deleteIssue（含停摆兜底）释放认领时注册的条目；/flux space 展示活跃上下文、workflow/community 列表与最近 Agent 活动时间线（无 events.jsonl 时回退空时间线）。 |
-| Workflow | wired / offline + live verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本、delete 和 Task Registry 关联。 |
+| Workflow | wired / offline + live verified / 多角色绑定节点 offline verified | planner 生成 DAG，校验依赖/环，独立节点并行，带文件锁、质量门、重试、预算和取消；角色名称按已注册模板动态解析，未知角色执行前 fail-closed；节点可选 `agentId` 绑定已注册 Agent，并以 `sessionMode=shared|fresh` 选择会话策略，同一绑定 Agent 不会进入同一并行批次；定义保存到 `runtime/workflows.json`，支持 list/show、精确 reuse、modify 新版本、delete 和 Task Registry 关联。 |
 | Task history | wired / offline + live verified | Pi 原生 UUIDv7 作为 sessionId；`.agentflux/runtime/tasks.json` 保存 Task/Execution、operation 与完整父子谱系。Main/TUI 可精确读取历史；continue/reuse/retry/Workflow resume 均创建新的 Task/Execution，父历史保持只读。Main 会话逐轮 usage 从 pi turn_end(message_end) 读取，agent_settled/session_shutdown 时落入 telemetry 事件与 executions.usage（input/output/cacheRead/cacheWrite/costUsd/model）；`/flux usage` 展示本会话累计与缓存命中率。 |
 | Community | wired / offline + live verified / 部分 | Issue、comment、claim、submit、review（pass/rework）、resolve、delete 已接线；resolve 需全部 claim 收敛（reviewed）；Issue Room 时间线（13 类事件）与 next-actions 确定性推导；active claim 阻止关闭；claim 注册/释放 community 空间。提案实体（propose/support/oppose，轻量无状态机）与认领多提案绑定 + 方案总结（plan 可在 submit 细化）；决策理由落档（resolvedReason + 时间线）；停止条件门禁在核心层（连续退回无新反馈达 community_stall_threshold 默认 3 / 预算超支复用 max_cost_per_task / 轮次超限复用 max_iterations），停摆状态人工 resolve/delete 兜底；实链 T11 全链路 + 门禁 + 兜底通过。Proposal/Review/Decision 独立实体与全自动执行器后置。 |
-| 统一 Agent | wired / offline + live verified | 单一 Agent 实体取代 ephemeral/persistent 双轨：唯一 id + 可重名 name（重名自动 xxx(1) 后缀）、三种创建路径（默认 assistant 模板 / 角色模板 / 会话树分叉继承源会话记忆）、三层作用域（global/project/session，会话结束清理 session 作用域）、run=指令+超时+last(k)（AgentRunResult.assistantMessages）、stop/retry/delete/gc（保留最新 k 个，默认 10）；busy 拒绝，对话排队由 Message V2 承载。last(k) 由 assistantMessages 逐条消息驱动（message_end text 块按轮收集）。create/run 支持 model/thinking 覆盖（创建时持久化到记录，run 时单次覆盖不修改记录；未知模型 fail-closed 拒绝；命令层 --model/--thinking）。TUI 会话中 run/retry 默认后台执行（工具立即返回，完成时通知，/flux agent stop 可中断，session_shutdown 中止；同 agent 重复 run fail-fast 拒绝不覆盖 controller）；headless 自动回退同步等待；--sync/background:false 强制同步；后台结果写入 AgentRecord.lastResult 可经 /flux agent list 查询（摘要换行折叠、空摘要显示 (no output)）。运行过程实时直播：runAgent onProgress 回调（assistant 消息/工具调用逐条），TUI working 行显示最新一步。直接对话入口：/flux agent list 与 flux_agent action=list 的 Agent 详情最下方显示 `npx pi --session <会话文件>` 启动命令（会话文件按 sessionId-cap- 前缀扫描匹配，无会话文件时省略该行；TUI 菜单 Details 同样显示），新窗口以完整主 Agent 环境打开子代理会话，对话写回会话记忆（run 记忆互通，实链 SECRET 标记验证），run 判定只看 registry 状态；TUI 菜单恢复 Talk 行动（agent run <name> <message>），输入前先展示子代理最近对话内容（readAgentLastMessages 读会话文件最近 3 条 assistant 文本，跳过 user/toolResult，非 lastResult.summary），notify 多行显示 + 输入框 placeholder 兜底；/flux agent list、TUI 菜单与底部栏共用 sortAgentsByActivity（运行中最前、createdAt 最新在前）。TUI 底部 footer 状态行 `subagent: name - status | ...`（运行中优先、按创建时间新旧、单行省略，ctx.ui.setStatus）。旧格式记录（2026-08-12 前无 scope/status/id）读取时内存级归一化补默认值，不重写文件。 |
+| 统一 Agent | wired / offline + live verified | 单一 Agent 实体取代 ephemeral/persistent 双轨：唯一 id + 可重名 name（重名自动 xxx(1) 后缀）、三种创建路径（默认 assistant 模板 / 角色模板 / 会话树分叉继承源会话记忆）、三层作用域（global/project/session；按 ownerSessionId 过滤可见性，会话结束清理 session 作用域）、多角色绑定（`roles[]`，每次 Run 通过 `role` 选择职责并记录 `lastRole`）、run=指令+超时+last(k)（AgentRunResult.assistantMessages）、stop/retry/delete/gc（保留最新 k 个，默认 10）；busy 拒绝，对话排队由 Message V2 承载。last(k) 由 assistantMessages 逐条消息驱动（message_end text 块按轮收集）。create/run 支持 model/thinking 覆盖（创建时持久化到记录，run 时单次覆盖不修改记录；未知显式覆盖 fail-closed 拒绝；命令层 --model/--thinking/--role/--session-mode）。没有 Agent/角色级显式模型时，run 运行时继承当前 Main Agent 的 model/provider；角色模板显式模型优先，且 MD/JSON 角色支持显式 provider，继承的模型不写回 Agent 记录。TUI 会话中 run/retry 默认后台执行（工具立即返回，完成时通知，/flux agent stop 可中断，session_shutdown 中止；同 agent 重复 run fail-fast 拒绝不覆盖 controller）；headless 自动回退同步等待；--sync/background:false 强制同步；后台结果写入 AgentRecord.lastResult 可经 /flux agent list 查询（摘要换行折叠、空摘要显示 (no output)）。运行过程实时直播：runAgent onProgress 回调（assistant 消息/工具调用逐条），TUI working 行显示最新一步。直接对话入口：/flux agent list 与 flux_agent action=list 的 Agent 详情最下方显示 `npx pi --session <会话文件>` 启动命令（会话文件按 sessionId-cap- 前缀扫描匹配，无会话文件时省略该行；TUI 菜单 Details 同样显示），新窗口以完整主 Agent 环境打开子代理会话，对话写回会话记忆（run 记忆互通，实链 SECRET 标记验证），run 判定只看 registry 状态；TUI 菜单恢复 Talk 行动（agent run <name> <message>），输入前先展示子代理最近对话内容（readAgentLastMessages 读会话文件最近 3 条 assistant 文本，跳过 user/toolResult，非 lastResult.summary），notify 多行显示 + 输入框 placeholder 兜底；/flux agent list、TUI 菜单与底部栏共用 sortAgentsByActivity（运行中最前、createdAt 最新在前）。TUI 底部 footer 状态行 `subagent: name - status | ...`（运行中优先、按创建时间新旧、单行省略，ctx.ui.setStatus）。旧格式记录（2026-08-12 前无 scope/status/id）读取时内存级归一化补默认值，不重写文件。 |
 | pi session fork | wired / offline verified / limited | `/flux fork` 使用 pi `ctx.fork` 创建真实单分支，并保留原生会话树；Agent fork 继承源会话文件。一次从 snapshot 并行派生 N 个独立进程尚未实现，不能用 fresh Agent 冒充 fork。 |
-| Agent policy | wired / offline verified | 模板→注册实例→单次运行只能收窄；tools/skills/communication/workspace、revision、effective snapshot、telemetry 与 cache generation。MCP 非空 allowlist 因 pi 缺少门禁 hook 而 fail-closed。 |
+| Agent policy | wired / offline verified | 模板→注册实例→单次运行只能收窄；tools/skills/communication/workspace、revision、effective snapshot、telemetry 与 cache generation；多角色 Agent 的实例能力覆盖按角色独立保存，避免切换职责时复用错误策略。MCP 非空 allowlist 因 pi 缺少门禁 hook 而 fail-closed。 |
 | Agent 消息 | wired / offline + live verified | Message V2 支持 direct/group、priority、dedupe、delivery/ACK、cursor、lease redelivery、expiry/backpressure。Main 工具与 TUI 均可查看 Main inbox、Poll 与显式 ACK。 |
 | 缓存影响 | wired / offline verified | tool/skill/MCP/system/model/session generation 变化提示；成本倾向 `<=0.01` 时静默。任务信封在 input hook 被消费，不进入 session/provider；system prompt 只使用稳定通用协议，不包含 taskId、任务正文或动态预算。 |
 | 回收 | wired / offline verified | `/flux gc [dry-run]`（dry-run 只读）；运行中 task 阻止正式 GC；终态 Agent、已读消息、完成的 V2 delivery 和孤儿 session 可归档；Agent 自动 GC 保留最新 k 个（默认 10）。归档容量上限后置。 |
@@ -28,32 +30,38 @@
 
 ## 本轮测试
 
-`npm run verify` 包含类型检查以及以下确定性测试（23 个测试文件全部纳入 test:unit，2026-08-17 实测 584 断言；test-string-utils 已随 string-utils.ts 删除）：
+`npm run verify` 包含类型检查以及以下确定性测试（24 个测试文件全部纳入 test:unit，2026-09-01 实测 609 断言；test-string-utils 已随 string-utils.ts 删除）：
 
-- 无模式执行协议、Task envelope（含畸形输入防御）：12 + 6/6。
+- 无模式执行协议：12/12；Task envelope（含畸形输入防御）：6/6。
 - Task Registry：11/11。
-- Workflow Registry（含 delete 全版本与运行中拒绝）：10/10。
+- Workflow Registry（含 delete 全版本与运行中拒绝）：11/11。
 - Community 状态机（含终态保护与 deleteIssue）：41/41。
 - Main Agent 自然任务调度协议、Workflow 版本链、消息群组、稳定提示词、历史任务与重试终态：33/33。
-- 统一 Agent 生命周期（三创建路径、重名后缀、GC k 规则、session 清理）：42/42。
-- 空间互斥 active-context（跨空间拒绝/同空间并行/崩溃残留清理/claim-resolve 注册释放）：20/20。
-- TUI Core（含 footer 通知、信封防御与空间总览菜单）：44/44。
+- 统一 Agent 生命周期（三创建路径、重名后缀、GC k 规则、session 清理、Main 模型继承、角色 provider、多角色 Run、session 作用域隔离）：78/78。
+- 空间互斥 active-context（跨空间拒绝/同空间并行/崩溃残留清理/claim-resolve 注册释放）：21/21。
+- TUI Core（含 footer 通知、信封防御与空间总览菜单）：47/47。
 - Lifecycle GC（含 dry-run 无副作用与会话段边界匹配）：11/11。
-- Capability policy：29/29。
-- Message V2 与 cache impact：32/32。
+- Capability policy（含多角色实例覆盖）：30/30。
+- Message V2 与 cache impact：38/38。
 - Cache impact（成本敏感度抑制）：23/23。
-- Agent 子进程安全生命周期：21/21。
-- DAG contracts（含质量门 judge 决策与 dagLog sink）：24/24。
-- Persistent RPC inbox pump：15/15。
+- Agent 子进程安全生命周期：25/25。
+- DAG contracts（含质量门 judge 决策、模型继承、扩展角色、绑定 Agent 与 dagLog sink）：31/31。
+- Persistent RPC inbox pump：21/21。
 - Pricing：26/26。
-- /flux 命令解析与补全（当前契约：message 子命令化、空参数静默、space 命令）：36/36。
-- Config 合并：24/24。
+- /flux 命令解析与补全（当前契约：message 子命令化、空参数静默、space 命令、Agent role/session 覆盖）：42/42。
+- Config 合并：17/17。
 - Prefix layout：11/11。
 - Workflow summary 渲染：24/24。
-- String utils：46/46。
 - Task execution 计划：16/16。
+- FS lock（跨存储锁与进程存活保护）：12/12。
 
-当前 `npm run verify` 合计 584/584（2026-08-17），通过后生产构建成功。
+当前 `npm run verify` 合计 609/609（2026-09-01），通过后 production build 成功。
+
+2026-09-01 多角色真实链路：`npm run test:live:multirole`（本次使用 `octopus-completions/deepseek-v4-flash`、`thinking=off`、Provider 重试由测试任务限制）启动全新 Pi 进程；Main 实际调用 `flux_agent create(roles=[planner,reviewer])`，随后同步运行 planner 与 reviewer。两次 child 均 exit 0，Agent 注册表终态为 `idle`、`callCount=2`、`lastRole=reviewer`，Run Registry 各保存一个 planner/reviewer completed 运行，主进程 wall clock 82.255s，报告为 `.agentflux/test-results/multirole-latest.json`（该目录按 gitignore 不入库）。
+
+### 2026-08-31 模型继承边界
+
+项目本地角色模板可以显式指定 `openai/gpt-5.6-luna` 与 `thinking=max`；没有 Agent/角色级显式模型时，子代理与 Workflow 节点在运行时继承 Main Agent 当前 model/provider，继承值不写回 Agent 实例配置。能力亲和度只在没有 Main 模型可用时作为回退，不应静默替换 Main 的选择。
 
 `npm run test:live` 在隔离 fixture 中依次验证。四个用户 prompt 只描述任务特征与目标，不包含 AgentFlux、工作方式名称、工具名或调用指令：
 
@@ -118,7 +126,8 @@ Message V2 控制面同步完成：`flux_message` 增加 `group_create/group_lis
 - `default_work_style=agent_decides` 只允许 Main Agent在明确的四种工作方式中决定，不包含自动分类器。
 - Community 当前是可操作的 MVP 状态机，不是后台常驻自治社区；Main Agent仍是 moderator。
 - fork 当前是 pi 原生交互式单分支，不支持一次派生 N 个继承同一 snapshot 的并行运行时。
-- Persistent Agent 的稳定 session 已实现，但缓存收益需真实长任务 soak 后才可量化。
+- Persistent Agent 的稳定 session 已实现，但缓存收益需真实长任务 soak 后才可量化；多角色 Agent 的 `shared`/`fresh` 已可选，`fork` 仍需 Pi 原生真实分支。
+- Workflow 节点可绑定已注册 Agent 并按角色运行；Main 作为 Workflow 正式成员（而非外部协调者）的 host handoff、空间 lease 与“后续节点等待 Main settled”尚未接线，当前不能把 `main` 当作普通持久 Agent 冒充。
 - Team 的 `resume` 会重新调度 Main 判定仍需要的职责，不会恢复已退出的 Ephemeral 进程；要保留子 Agent 上下文需使用 Persistent Agent。
 - `maxTurns` / `maxInputTokens` 能限制失控读取并避免自动重试。结构化 Host 调度可声明基于 workspace 文件与必需文本的完成凭证：正常退出但凭证不满足时以 exit 75 拒绝假成功；工具已完成但模型在最终收尾阶段触发 exit 74，或已经产生非空结果后遇到瞬时 provider 错误时，只有凭证通过才恢复为成功。无输出 provider 失败与普通业务失败不会恢复。凭证目前只覆盖文件事实，不是任意命令或测试结果证明。
 - `lockFiles` 对 `edit`/`write` 是运行时硬门禁；`bash` 仍不是文件级沙箱。需要执行审查过的补丁时使用窄角色与 `git apply --check`，不要把它当作通用不可信代码沙箱。
@@ -134,7 +143,7 @@ Message V2 控制面同步完成：`flux_message` 增加 `group_create/group_lis
 3. [完成] PiDeck 模式选择器保持现状；Workflow Inspector 已展示 DAG、版本、checkpoint、重试、artifact 与 quality gate。
 4. [完成] 历史 task 的 Open、Continue、Reuse、Retry、Workflow Resume 与 lineage 展示。
 5. [部分完成] PiDeck 已用 Host 的 Run Registry/Persistent record 驱动运行状态、Stop/Retry/Message 与 Persistent 管理动作，不再从 lifecycle 日志猜测；forked runtime 的统一 roster 和 Host 直接返回统一 `can*` 投影尚未完成。
-6. 为 Persistent Agent 补角色模板创建、实例级动态收窄 UI，并执行多轮真实调用、cache generation、Desktop 重启恢复和回收 soak。
+6. [部分完成] Persistent Agent 已支持多角色创建/按 Run 选择/角色级能力覆盖；仍需补实例级动态收窄 UI，并执行多轮真实调用、cache generation、Main 正式 Workflow 成员 handoff 与回收 soak。
 7. 将 Community MVP 扩展为 Issue Room 时间线，补 review/decision 与 participant 主动循环，但仍由确定性状态门验证。
 8. 重构右侧为可多开的页签工作区：修复 Participants 折叠/激活/二次点击问题，复用 Main `ConversationSurface` 打开多个子 Agent 对话，并以 Host `canMessage` 控制输入能力；页签、时间线和 Composer 与主对话对齐。
 9. 统一回归 Direct、Team、Workflow 与 Community 基础能力，并完成深色主题、键盘焦点、1440/1280/1024/800 宽度、安装包实机和无源码仓库验证。真实模型测试默认使用 `deepseek-v4-flash`、最低思考档和简短提示，保存真实截图与事件证据。

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, readAgentLastMessages, resetAgentStatus, runAgentRecord, sortAgentsByActivity, type AgentRunContext } from "./agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, getAgentRoles, listAgents, readAgentLastMessage, readAgentLastMessages, resetAgentStatus, runAgentRecord, sortAgentsByActivity, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { loadAllRoles } from "./agents/templates";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
@@ -32,6 +32,9 @@ interface RuntimeContext {
 	config: ReturnType<typeof loadConfig>;
 	modelsConfig: any;
 	sharedSkills: string[];
+	/** 当前 Main Agent 模型；没有角色级显式模型时，子代理和 DAG 继承它。 */
+	mainModel?: string;
+	mainProvider?: string;
 	pricing?: PricingTable;
 }
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info", maxLines = 1): void {
@@ -107,7 +110,7 @@ function templateFromRole(runtime: RuntimeContext, roleName: string, name = role
 		role: roleName,
 		description: role.description ?? roleName,
 		model: role.model,
-		provider: role.model ? runtime.modelsConfig.models?.[role.model]?.provider : undefined,
+		provider: role.provider ?? (role.model ? runtime.modelsConfig.models?.[role.model]?.provider : undefined),
 		tools: role.tools,
 		skills: [...new Set([...runtime.sharedSkills, ...(role.skills ?? [])])],
 		mcpServers: role.mcpServers,
@@ -140,7 +143,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	function updateSubagentStatusLine(): void {
 		try {
 			if (uiCtx?.ui?.setStatus && runtime) {
-				uiCtx.ui.setStatus("agentflux-subagents", formatSubagentStatusLine(listAgents(runtime.cwd)));
+				uiCtx.ui.setStatus("agentflux-subagents", formatSubagentStatusLine(listAgents(runtime.cwd, sessionId)));
 			}
 		} catch { /* footer 更新尽力而为 */ }
 	}
@@ -167,7 +170,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		"- When the user asks to change a saved Workflow definition, call flux_workflow with action=modify and its saved selector; do not use action=run and do not create DAG nodes that edit AgentFlux registry files.",
 		"- Only one project-level execution may be active at a time: a Workflow run or a Community activity cannot overlap another. Internal session, task, run, and Agent identifiers are managed by AgentFlux; do not request or invent them.",
 		"- Execution guidance: run simple or short tasks directly in the main Agent; delegate isolated, independent sub-tasks to subagents (flux_agent); use flux_workflow for multi-step tasks with dependencies, parallelism, or repeatable structure; use flux_issue for collaborative tasks that need proposals, reviews, and decisions. Prefer the lightest approach that fits the task.",
-		"- Model guidance: subagents inherit the role template's model and thinking level; override per run with flux_agent model/thinking when the task warrants it (cheap fast models with low thinking for mechanical, well-scoped work; capable models with higher thinking for deep reasoning). Workflow roles are assigned by capability-and-price affinity ranking; an explicit override always wins over ranking.",
+		"- Model guidance: an explicit Agent/role model wins; when none is configured, subagents inherit the Main Agent's current model/provider. Override per run with flux_agent model/thinking only when requested. Workflow roles use the same precedence; capability-and-price affinity is only a fallback when no Main model is available.",
 	].join("\n");
 
 	function startPlan(plan: TaskExecutionPlan, writeCreated = true): TaskExecutionPlan {
@@ -264,12 +267,17 @@ export default function agentFlux(pi: ExtensionAPI) {
 
 	const persistentContext = (maxCostUsd = runtime?.config.budget.max_cost_per_task): AgentRunContext => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
-		return { cwd: runtime.cwd, modelsConfig: runtime.modelsConfig, telemetry: telemetry ?? undefined, pricing: runtime.pricing, sessionId, taskId: ensureImplicitPlan()?.taskId, executionId: ensureImplicitPlan()?.executionId, sharedSkills: runtime.sharedSkills, prefixLayout: runtime.config.cache.prefix_layout === "static_first", timeoutMs: runtime.config.budget.max_wall_clock_seconds * 1000, maxCostUsd };
+		// ctx.model 可能在会话中被用户切换；每次调度读取当前值，而不是永久锁定 session_start 的模型。
+		if (uiCtx?.model?.id) {
+			runtime.mainModel = uiCtx.model.id;
+			runtime.mainProvider = uiCtx.model.provider;
+		}
+		return { cwd: runtime.cwd, modelsConfig: runtime.modelsConfig, telemetry: telemetry ?? undefined, pricing: runtime.pricing, sessionId, taskId: ensureImplicitPlan()?.taskId, executionId: ensureImplicitPlan()?.executionId, sharedSkills: runtime.sharedSkills, prefixLayout: runtime.config.cache.prefix_layout === "static_first", defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, timeoutMs: runtime.config.budget.max_wall_clock_seconds * 1000, maxCostUsd };
 	};
 
 	const tuiMenuData = (ctx: any): FluxTuiMenuData => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
-		const agents = sortAgentsByActivity(listAgents(runtime.cwd));
+		const agents = sortAgentsByActivity(listAgents(runtime.cwd, sessionId));
 		const cwd = runtime.cwd;
 		const board = new SharedBoard(runtime.fluxDir);
 		const mainInbox = new MessageBus(runtime.fluxDir).peek("main");
@@ -323,7 +331,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.executionId);
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		if (plan.operation === "resume") throw new Error(`Workflow checkpoint is unavailable for ${plan.parentTaskId ?? "the selected task"}`);
 		let action = request.action ?? "run";
@@ -353,7 +361,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
 			updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "workflow", id: definition.id, version: definition.version } });
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: plan.budget.maxWallClockMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		const previous = action === "modify"
 			? getWorkflowDefinition(runtime.fluxDir, selector ?? "")
@@ -364,7 +372,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			plan.parentTaskId = previous.sourceTaskId;
 			registerTask(runtime.fluxDir, sessionId, plan, "running");
 		}
-		const planner = resolveDAGRoleModel(runtime.cwd, runtime.modelsConfig, "planner");
+		const planner = resolveDAGRoleModel(runtime.cwd, runtime.modelsConfig, "planner", { model: runtime.mainModel, provider: runtime.mainProvider });
 		const startedAt = Date.now();
 		const plannerAgentId = `agent-${plan.taskId}-planner`;
 		telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "subagent", origin: "fresh", status: "running", action: "started", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
@@ -381,7 +389,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					`Current executable DAG:\n${JSON.stringify(previous.dag, null, 2)}`,
 				].join("\n")
 				: plan.task;
-			dag = await generateTaskDAG(planningTask, { cwd: runtime.cwd, model: planner.model, provider: planner.provider, thinking: planner.thinking, models: runtime.modelsConfig.models, pricing: runtime.pricing, telemetry, sessionId, prefixLayout: runtime.config.cache.prefix_layout === "static_first", signal, maxCostUsd: plan.budget.maxCostUsd, timeoutMs: plan.budget.maxWallClockMs, taskId: plan.taskId, executionId: plan.executionId });
+			dag = await generateTaskDAG(planningTask, { cwd: runtime.cwd, model: planner.model, provider: planner.provider, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, thinking: planner.thinking, models: runtime.modelsConfig.models, modelsConfig: runtime.modelsConfig, pricing: runtime.pricing, telemetry, sessionId, prefixLayout: runtime.config.cache.prefix_layout === "static_first", signal, maxCostUsd: plan.budget.maxCostUsd, timeoutMs: plan.budget.maxWallClockMs, taskId: plan.taskId, executionId: plan.executionId });
 			mkdirSync(runsDir, { recursive: true });
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.taskId);
 			mkdirSync(runDir, { recursive: true });
@@ -399,7 +407,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "subagent", origin: "fresh", status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
 			throw error;
 		}
-		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: Math.max(1, plan.budget.maxWallClockMs - (Date.now() - startedAt)), maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: Math.max(1, plan.budget.maxWallClockMs - (Date.now() - startedAt)), maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: 3, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
@@ -410,7 +418,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		const fluxDir = join(ctx.cwd, ".agentflux");
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
-		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig) };
+		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig), mainModel: ctx.model?.id, mainProvider: ctx.model?.provider };
 		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.budget.max_iterations });
 		setDagLogSink(ctx.hasUI ? null : console.error);
 		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.hasUI ? undefined : ctx.model?.id); } catch {}
@@ -534,13 +542,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "flux_agent",
 		label: "Agent",
-		description: "Create (default / role template / session fork), run (talk to), stop, retry, enter (open a direct conversation window), list, delete or gc Agents. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there). enter prints the command to open a direct conversation with the Agent in a new pi window (--session on its session file); run is blocked only while the Agent's status is running.",
+		description: "Create (default / role template / session fork), run (talk to), stop, retry, list, delete or gc Agents. An Agent may bind to multiple registered roles; run selects the role for this Run without changing the Agent identity. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there). run is blocked while the Agent's status is running.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("create"), Type.Literal("run"), Type.Literal("stop"), Type.Literal("retry"), Type.Literal("list"), Type.Literal("delete"), Type.Literal("gc")]),
 			background: Type.Optional(Type.Boolean()),
 			name: Type.Optional(Type.String()),
 			agent: Type.Optional(Type.String()),
 			role: Type.Optional(Type.String()),
+			roles: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
+			sessionMode: Type.Optional(Type.Union([Type.Literal("shared"), Type.Literal("fresh")])),
 			model: Type.Optional(Type.String()),
 			thinking: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")])),
 			forkFrom: Type.Optional(Type.String()),
@@ -552,7 +562,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		async execute(_id, params, signal): Promise<any> {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			const context = persistentContext();
-			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd), runtime.cwd) }], details: { ok: true } };
+			if (params.action === "list") return { content: [{ type: "text", text: formatAgents(listAgents(runtime.cwd, sessionId), runtime.cwd) }], details: { ok: true } };
 			if (params.action === "gc") {
 				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
 				updateSubagentStatusLine();
@@ -562,25 +572,25 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!params.name) throw new Error("create requires name");
 				let agent;
 				try {
-					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, model: params.model, thinking: params.thinking, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, roles: params.roles, model: params.model, thinking: params.thinking, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 				} catch (error: any) {
 					executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
 					throw error;
 				}
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role, forkPoint: agent.lineage.forkPoint });
 				updateSubagentStatusLine();
-				return { content: [{ type: "text", text: `Created Agent ${agent.name} (${agent.role}, ${agent.scope})${agent.lineage.origin === "fork" ? ` · fork of ${params.forkFrom}` : ""}` }], details: { ok: true, agent: { name: agent.name, role: agent.role, scope: agent.scope } } };
+				return { content: [{ type: "text", text: `Created Agent ${agent.name} (${getAgentRoles(agent).join("|")}, ${agent.scope})${agent.lineage.origin === "fork" ? ` · fork of ${params.forkFrom}` : ""}` }], details: { ok: true, agent: { name: agent.name, role: agent.role, roles: agent.roles, scope: agent.scope } } };
 			}
 			if (params.action === "delete") {
 				if (!params.agent) throw new Error("delete requires agent");
-				const agent = deleteAgent(runtime.cwd, params.agent);
+				const agent = deleteAgent(runtime.cwd, params.agent, sessionId);
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
 				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: `Deleted ${agent.name}` }], details: { ok: true } };
 			}
 			if (params.action === "stop") {
 				if (!params.agent) throw new Error("stop requires agent");
-				const matches = findAgents(runtime.cwd, params.agent);
+				const matches = findAgents(runtime.cwd, params.agent, sessionId);
 				if (matches.length === 0) throw new Error(`Agent not found: ${params.agent}`);
 				const record = matches[0];
 				const controller = persistentControllers.get(record.name);
@@ -590,19 +600,21 @@ export default function agentFlux(pi: ExtensionAPI) {
 					return { content: [{ type: "text", text: `Stop requested for ${record.name}` }], details: { ok: true } };
 				}
 				if (record.status === "running") {
-					resetAgentStatus(runtime.cwd, record.name, "idle");
+					resetAgentStatus(runtime.cwd, record.name, "idle", sessionId);
 					return { content: [{ type: "text", text: `${record.name} was marked running without a live run; status reset to idle.` }], details: { ok: true } };
 				}
 				throw new Error(`Agent is not running: ${record.name}`);
 			}
 			if (params.action === "run" || params.action === "retry") {
 				if (!params.agent) throw new Error(`${params.action} requires agent`);
-				let matches = findAgents(runtime.cwd, params.agent);
+				let matches = findAgents(runtime.cwd, params.agent, sessionId);
 				if (params.action === "run" && matches.length === 0) {
-					const agent = createAgent(runtime.cwd, { name: params.agent, role: params.role, model: params.model, thinking: params.thinking, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					const agent = createAgent(runtime.cwd, { name: params.agent, role: params.role, roles: params.roles, model: params.model, thinking: params.thinking, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 					telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
-					matches = findAgents(runtime.cwd, agent.name);
+					matches = findAgents(runtime.cwd, agent.name, sessionId);
 				}
+				const selectedRole = params.role ?? (params.action === "retry" ? matches[0]?.lastRole : undefined);
+				const runOverrides = { role: selectedRole, sessionMode: params.sessionMode, model: params.model, thinking: params.thinking };
 				let task = params.task;
 				if (params.action === "retry") {
 					task = task ?? matches[0]?.lastTask ?? "";
@@ -618,7 +630,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (background) {
 					// 后台模式：不等待子代理完成，立即返回；结果在完成时 notify + footer 状态行
 					const name = matches[0].name;
-					void runAgentRecord(name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event))
+					void runAgentRecord(name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event))
 						.then(result => {
 							const ok = result.exitCode === 0 && !result.errorMessage;
 							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -637,7 +649,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				let result: AgentRunResult;
 				const headlessBgNote = params.background === true && !uiCtx?.hasUI ? "（headless 模式不支持后台，已同步执行）\n" : "";
 				try {
-					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, { model: params.model, thinking: params.thinking }, () => updateSubagentStatusLine(), event => showSubagentProgress(matches[0].name, event));
+					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(matches[0].name, event));
 				} catch (error: any) {
 					executionOutcome = controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
@@ -867,7 +879,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const command = parseFluxCommand(input);
 			if (command.kind === "help") return notify(ctx, FLUX_HELP);
 			if (command.kind === "compact") return notify(ctx, formatCompactionAdvice(analyzeCompaction(ctx)));
-			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd), runtime.cwd), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
+			if (command.kind === "status") return notify(ctx, [`task ${currentPlan?.taskId ?? "idle"}`, `active runs ${activeRuns.size}`, formatAgents(listAgents(runtime.cwd, sessionId), runtime.cwd), `issues ${listIssues(runtime.cwd).length}`].join("\n"), "info", 12);
 			if (command.kind === "usage") {
 				const usage = mainTurnUsage;
 				const total = usage.input + usage.cacheRead;
@@ -992,26 +1004,28 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const [action, subject, ...rest] = command.args;
 				// 解析 --model <m> 与 --thinking <t> 覆盖参数（与 issue claim --props 同风格）
 				const { flags, positional } = parseAgentFlags(rest);
-				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd), runtime.cwd), "info", 12);
+				if (action === "list") return notify(ctx, formatAgents(listAgents(runtime.cwd, sessionId), runtime.cwd), "info", 12);
 				if (action === "create" && subject) {
 					const role = positional[0];
-					const agent = createAgent(runtime.cwd, { name: subject, role, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
+					const roles = flags.roles?.split(",").map(item => item.trim()).filter(Boolean);
+					const agent = createAgent(runtime.cwd, { name: subject, role, roles, model: flags.model, thinking: flags.thinking as any, scope: positional.find((item): item is "global" | "project" | "session" => ["global", "project", "session"].includes(item)), ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role });
 					updateSubagentStatusLine();
-					return notify(ctx, `Created ${agent.name} (${agent.role}, ${agent.scope})${flags.model ? ` · model ${flags.model}` : ""}${flags.thinking ? ` · thinking ${flags.thinking}` : ""}`);
+					return notify(ctx, `Created ${agent.name} (${getAgentRoles(agent).join("|")}, ${agent.scope})${flags.model ? ` · model ${flags.model}` : ""}${flags.thinking ? ` · thinking ${flags.thinking}` : ""}`);
 				}
 				if (action === "run" && subject) {
 					const task = positional.join(" ").trim();
-					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--model <m>] [--thinking <t>] [--sync]");
-					const existing = findAgents(runtime.cwd, subject);
-					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
+					if (!task) throw new Error("Usage: /flux agent run <name> <task> [--role <role>] [--model <m>] [--thinking <t>] [--sync]");
+					const existing = findAgents(runtime.cwd, subject, sessionId);
+					const agent = existing[0] ?? createAgent(runtime.cwd, { name: subject, role: flags.role, model: flags.model, thinking: flags.thinking as any, modelsConfig: runtime.modelsConfig });
+					const runOverrides = { role: flags.role, sessionMode: flags.sessionMode as "shared" | "fresh" | undefined, model: flags.model, thinking: flags.thinking as any };
 					if (persistentControllers.has(agent.name)) throw new Error(`Agent is already running: ${agent.name}`);
 					const background = flags.sync !== "true" && ctx.hasUI; // TUI 默认后台；headless 同步（会话立即结束，后台无意义）；--sync 强制同步；--background 强制后台
 					if (flags.background === "true" && !ctx.hasUI) notify(ctx, "headless 模式不支持后台，已同步执行", "info", 1);
 					if (background) {
 						const controller = new AbortController();
 						persistentControllers.set(agent.name, controller);
-						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event))
+						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event))
 							.then(result => {
 								const ok = result.exitCode === 0 && !result.errorMessage;
 								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
@@ -1025,37 +1039,38 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const syncController = new AbortController();
 					persistentControllers.set(agent.name, syncController);
 					try {
-						return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), syncController.signal, undefined, { model: flags.model, thinking: flags.thinking as any }, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event)), 1), "info", 12);
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(agent.name, task, persistentContext(), syncController.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event)), 1), "info", 12);
 					} finally {
 						persistentControllers.delete(agent.name);
 						updateSubagentStatusLine();
 					}
 				}
 				if (action === "retry" && subject) {
-					const record = findAgents(runtime.cwd, subject)[0];
+					const record = findAgents(runtime.cwd, subject, sessionId)[0];
 					const agentName = record?.name ?? subject;
-					const task = rest.join(" ").trim() || record?.lastTask;
+					const task = positional.join(" ").trim() || record?.lastTask;
 					if (!task) throw new Error(`retry requires a previous task (lastTask is empty for ${subject})`);
+					const retryOverrides = { role: flags.role ?? record?.lastRole, sessionMode: flags.sessionMode as "shared" | "fresh" | undefined, model: flags.model, thinking: flags.thinking as any };
 					if (persistentControllers.has(agentName)) throw new Error(`Agent is already running: ${agentName}`);
 					const controller = new AbortController();
 					persistentControllers.set(agentName, controller);
 					try {
-						return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext(), controller.signal, undefined, undefined, () => updateSubagentStatusLine(), event => showSubagentProgress(agentName, event)), 1), "info", 12);
+						return notify(ctx, formatAgentRunResult(await runAgentRecord(subject, task, persistentContext(), controller.signal, undefined, retryOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(agentName, event)), 1), "info", 12);
 					} finally {
 						persistentControllers.delete(agentName);
 						updateSubagentStatusLine();
 					}
 				}
 				if (action === "stop" && subject) {
-					const record = findAgents(runtime.cwd, subject)[0];
+					const record = findAgents(runtime.cwd, subject, sessionId)[0];
 					if (!record) throw new Error(`Agent not found: ${subject}`);
 					const controller = persistentControllers.get(record.name);
 					if (controller) { controller.abort(); return notify(ctx, `Stop requested for ${record.name}`, "info"); }
-					if (record.status === "running") { resetAgentStatus(runtime.cwd, record.name, "idle"); return notify(ctx, `${record.name} was marked running without a live run; status reset to idle.`, "info"); }
+					if (record.status === "running") { resetAgentStatus(runtime.cwd, record.name, "idle", sessionId); return notify(ctx, `${record.name} was marked running without a live run; status reset to idle.`, "info"); }
 					throw new Error(`Agent is not running: ${record.name}`);
 				}
 				if (action === "delete" && subject) {
-					const agent = deleteAgent(runtime.cwd, subject);
+					const agent = deleteAgent(runtime.cwd, subject, sessionId);
 					telemetry.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "archived", action: "archived" });
 					return notify(ctx, `Deleted ${agent.name}`);
 				}

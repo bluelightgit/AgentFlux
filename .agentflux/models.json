@@ -27,20 +27,24 @@
   },
   "roles": {
     "planner": {
-      "model": "oa/glm-5.2",
-      "thinking": "high"
+      "model": "gpt-5.6-luna",
+      "provider": "openai",
+      "thinking": "max"
     },
     "implementer": {
-      "model": "oa/deepseek-v4-flash",
-      "thinking": "off"
+      "model": "gpt-5.6-luna",
+      "provider": "openai",
+      "thinking": "max"
     },
     "reviewer": {
-      "model": "oa/glm-5.2",
-      "thinking": "xhigh"
+      "model": "gpt-5.6-luna",
+      "provider": "openai",
+      "thinking": "max"
     },
     "tester": {
-      "model": "oa/glm-5.2",
-      "thinking": "medium"
+      "model": "gpt-5.6-luna",
+      "provider": "openai",
+      "thinking": "max"
     }
   },
   "sharedSkills": []

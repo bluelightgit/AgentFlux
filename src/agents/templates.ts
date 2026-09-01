@@ -15,6 +15,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, basename } from "node:path";
 import { communicationPolicyFromFrontmatter, type CommunicationPolicyInput } from "../core/communication-policy";
 import type { WorkspaceCapabilityInput } from "../core/capability-policy";
+import type { ThinkingLevel } from "../core/types";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
@@ -22,6 +23,7 @@ export interface RoleDefinition {
 	name: string;
 	description?: string;
 	model?: string;              // 直接指定模型
+	provider?: string;           // 与模型绑定的 pi provider，可不在 AgentFlux 模型表中
 	requirement?: Record<string, number>;  // 能力需求向量
 	tools?: string[];            // 可用工具列表
 	skills?: string[];           // 角色特有 skills
@@ -29,7 +31,7 @@ export interface RoleDefinition {
 	workspace?: WorkspaceCapabilityInput;
 	systemPrompt?: string;       // 角色 system prompt
 	source: "md" | "json" | "builtin";  // 来源
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	thinking?: ThinkingLevel;
 	/** Role-template defaults. A registered/run instance may apply a narrower override. */
 	communication?: CommunicationPolicyInput;
 }
@@ -138,6 +140,7 @@ function loadRolesFromMD(agentsDir: string): Map<string, RoleDefinition> {
 			name,
 			description: frontmatter.description,
 			model: frontmatter.model,
+			provider: frontmatter.provider,
 			requirement,
 			tools: frontmatter.tools ? parseList(frontmatter.tools) : undefined,
 			skills: frontmatter.skills ? parseList(frontmatter.skills) : undefined,
@@ -175,6 +178,7 @@ function loadRolesFromJSON(modelsConfig: any): Map<string, RoleDefinition> {
 			name,
 			description: d.description,
 			model: d.model,
+			provider: d.provider,
 			requirement: d.requirement,
 			tools: d.tools,
 			skills: d.skills,

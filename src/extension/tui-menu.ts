@@ -2,6 +2,7 @@ export interface TuiAgentInfo {
 	name: string;
 	kind: "main" | "subagent";
 	role: string;
+	roles?: string[];
 	status: string;
 	model?: string;
 	provider?: string;
@@ -49,14 +50,15 @@ async function input(ctx: any, title: string, placeholder: string): Promise<stri
 }
 
 function agentLabel(agent: TuiAgentInfo): string {
-	return `${agent.name} · ${agent.kind} · ${agent.role} · ${agent.status}${agent.model ? ` · ${agent.model}` : ""}`;
+	const roles = agent.roles?.length ? agent.roles.join("|") : agent.role;
+	return `${agent.name} · ${agent.kind} · ${roles} · ${agent.status}${agent.model ? ` · ${agent.model}` : ""}`;
 }
 
 function agentDetails(agent: TuiAgentInfo): string {
 	return [
 		`Agent ${agent.name}`,
 		`  kind          ${agent.kind}`,
-		`  role/status  ${agent.role} / ${agent.status}`,
+		`  role/status  ${agent.roles?.length ? agent.roles.join("|") : agent.role} / ${agent.status}`,
 		`  model        ${agent.provider ? `${agent.provider}/` : ""}${agent.model ?? "default"}`,
 		`  session      ${agent.sessionId ?? "-"}`,
 		`  open         ${agent.sessionCommand ?? "-"}`,
@@ -68,15 +70,18 @@ function agentDetails(agent: TuiAgentInfo): string {
 
 export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
-	const createLabel = "+ Create Persistent Agent";
+	const createLabel = "+ Create Agent";
 	const options = [...data.agents.map(agentLabel), createLabel];
-	const selected = await select(ctx, "Persistent Agents · select an Agent to inspect or talk", options);
+	const selected = await select(ctx, "Agents · select an Agent to inspect or talk", options);
 	if (!selected) return null;
 	if (selected === createLabel) {
 		const name = await input(ctx, "Agent name", "e.g. reviewer-main");
 		if (!name) return null;
-		const role = await select(ctx, "Role template", data.roles);
-		return role ? `agent create ${name} ${role}` : null;
+		const role = await select(ctx, "Primary role template", data.roles);
+		if (!role) return null;
+		const additional = await input(ctx, "Additional roles (optional)", "planner,reviewer");
+		const roles = [role, ...(additional ? additional.split(",").map(item => item.trim()).filter(Boolean) : [])];
+		return `agent create ${name} ${role}${roles.length > 1 ? ` --roles ${[...new Set(roles)].join(",")}` : ""}`;
 	}
 	const agent = data.agents.find(candidate => agentLabel(candidate) === selected);
 	if (!agent) return null;
@@ -99,11 +104,14 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 			ctx.ui.notify(`${agent.name} 还没有 run 过，暂无历史回复。`, "info");
 		}
 		const last = agent.lastMessage?.trim().replace(/\s+/g, " ").slice(0, 200);
+		const selectedRole = agent.communication === "current_chat" || (agent.roles?.length ?? 0) <= 1
+			? undefined
+			: await select(ctx, `Role for this Run · ${agent.name}`, agent.roles ?? []);
+		if (agent.roles && agent.roles.length > 1 && !selectedRole) return null;
 		const message = await input(ctx, `Talk to ${agent.name}`, last ? `最近回复：${last.slice(0, 60)}` : "Describe the task, question or follow-up");
 		if (!message) return null;
-		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}`;
+		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}${selectedRole ? ` --role ${selectedRole}` : ""}`;
 	}
-	if (action?.startsWith("Enter")) return `agent enter ${agent.name}`;
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Details")) { ctx.ui.notify(agentDetails(agent), "info"); return null; }
 	if (action?.startsWith("Stop")) return `agent stop ${agent.name}`;

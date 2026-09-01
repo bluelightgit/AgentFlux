@@ -4,11 +4,13 @@ export type AgentScope = "global" | "project" | "session";
 export type AgentKind = "main" | "subagent";
 export type AgentOrigin = "fresh" | "template" | "fork";
 export type AgentStatus = "idle" | "running" | "blocked" | "done" | "failed" | "cancelled" | "archived";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AgentLineage {
 	origin: AgentOrigin;
 	parentAgentId?: string;
 	templateId?: string;
+	templateIds?: string[];
 	templateRevision?: number;
 	forkPoint?: string;
 	contextSnapshotId?: string;
@@ -19,20 +21,25 @@ export interface AgentRecord {
 	name: string;
 	scope: AgentScope;
 	role: string;
+	/** 允许该 Agent 在不同 Run 中承担的角色；role 是首选/兼容字段。 */
+	roles?: string[];
 	status: AgentStatus;
 	lineage: AgentLineage;
 	model?: string;
 	provider?: string;
-	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";  // 创建时覆盖角色模板的思考等级
+	thinking?: ThinkingLevel;  // 创建时覆盖角色模板的思考等级
 	sessionId?: string;
+	/** 最近一次物理运行使用的持久会话 key；fresh 运行与身份基准 sessionId 分开。 */
+	lastSessionId?: string;
 	ownerSessionId?: string;
 	createdAt: string;
 	updatedAt: string;
 	lastTask?: string;
+	lastRole?: string;
 	callCount: number;
 	totalCostUsd: number;
 	capabilityGeneration: number;
-	lastResult?: { exitCode: number; success: boolean; summary: string; turns: number; costUsd: number; model?: string; at: string };  // 最近一次运行结果摘要（后台运行时供 list 查询）
+	lastResult?: { exitCode: number; success: boolean; summary: string; turns: number; costUsd: number; model?: string; role?: string; at: string };  // 最近一次运行结果摘要（后台运行时供 list 查询）
 }
 
 export interface CacheStats {

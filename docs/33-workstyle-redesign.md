@@ -1,6 +1,8 @@
 # docs/33 工作方式重构设计（2026-08-13 用户决策）
 
-> 状态：**开发完成（2026-08-15，阶段一至七全部落地）**。本文是 docs/28 的继任设计；docs/28 已标注历史存档。实现细节见 .codex/CONTINUATION.md 七.5（提交 80a1e14/6a91419/0c546b5/9b17d7b/b561234/9416fdc）与 docs/26 当前状态表。
+> 状态：**基础重构开发完成（2026-08-15，阶段一至七落地）**；多角色 Agent 扩展于 2026-09-01 在 `feat/agent-multirole-dogfood` 完成。本文是 docs/28 的继任设计；docs/28 已标注历史存档。实现细节见 `.codex/CONTINUATION.md` 顶部当前分支说明与 docs/26 当前状态表。
+>
+> **2026-09-01 实现补充**：Agent 身份与职责分离，Agent 可通过 `roles[]` 绑定多个已注册角色，单次 Run 以 `role` 选择一个职责；角色级能力覆盖/快照独立保存，`sessionMode=shared|fresh` 可选。Workflow `TaskNode` 支持 `agentId` 绑定已有 Agent，按依赖顺序可让同一 Agent 先后承担不同角色；未知角色执行前 fail-closed。真实低成本 Pi 链路已验证同一 Agent 的 planner→reviewer 两次同步运行。`fork` 仍必须使用真实 Pi 会话分支。当前 busy run 仍 fail-fast，排队尚由 Message V2 待投递承载，尚未实现 Agent 内部队列；Main 作为 Workflow 正式节点成员的 handoff/lease 也仍是后续工作。
 
 ## 一、背景与目标
 
@@ -41,6 +43,7 @@
   3. 会话树分叉（fork）：指定 session id（本项目其他 session 的对话，或其他子代理的对话），利用 pi 对话树从指定节点分出新对话；保留原 agent 记忆，可分配不同后续任务。
 - 创建可指定名称；**重名自动后缀** `xxx(1)`、`xxx(2)`……保证 name 唯一。
 - 按 name 查询/拉起：若存在多个匹配（防御性，如历史数据）返回 list 由调用方选定；按 id 精确拉起。
+- **职责绑定**：Agent 可声明 `roles[]` 允许角色；`role` 保留首选角色，每次 Run 选择一个当前职责并记录 `lastRole`，不改变 Agent 身份。
 - 生命周期：idle 保留（长期存在）→ 手动删除（agent 或用户）或自动 GC。
 - **自动 GC**：删除"无工作引用 且 创建时间早于最新第 k 个（默认 k=10，可配置）创建"的 Agent；有工作引用的永不自动删。
 
@@ -58,20 +61,20 @@
 ### 2.5 run 语义（与子代理沟通）
 
 - `flux_agent run {agent: name|id, task, timeout?, last?: k}`：向子代理发出指令，等待其完成（超时可配），返回子代理最后一条消息（last 默认 1，可 last(k) 查看最近 k 条执行消息）。
-- 子代理 busy 时新指令**排队**（agent 任务队列），当前任务完成后自动执行队列；也支持中断（stop）。
+- 设计目标是子代理 busy 时新指令**排队**（agent 任务队列），当前实现对直接重复 run fail-fast 拒绝；待投递消息仍由 Message V2 承载，Agent 内部自动队列尚未实现；也支持中断（stop）。
 - 输出携带执行信息：模型、turns、token、缓存命中、成本（复用现有 usage 结构）。
 
 ### 2.6 Main 的参与方式
 
-- **执行者**：main-agent 可作为一个执行者参与 workflow 节点或 community claim；其任务未完成时对话需等待（排队）或直接中断。
+- **执行者（目标能力）**：main-agent 可作为一个执行者参与 workflow 节点或 community claim；其任务未完成时对话需等待（排队）或直接中断。当前 Workflow 已支持绑定已注册 Agent 节点，但 Main 正式成员的 handoff/lease 尚未接线。
 - **调度/规划者**：仅调度与规划（不执行节点）时，无活动任务即可随时对话。
-- 实现：Agent 状态 busy 时消息进入队列（2.5 排队机制同一实现）。
+- 当前状态：Agent 状态 busy 时直接 run fail-fast；Message V2 支持待投递/重投，但尚未把它实现为 Agent 内部自动排队。Main 正式成员的 handoff/lease 仍待实现。
 
 ## 三、数据格式（新，不兼容旧版）
 
-- Agent 注册：`.agentflux/runtime/agents.json`（新 schema：id/name/role/scope(global|project|session)/sessionId/status/lineage/callCount/totalCostUsd/lastTask/createdAt/updatedAt，无 kind ephemeral/persistent）。
+- Agent 注册：`.agentflux/runtime/agents.json`（当前 schema：id/name/role/roles/scope(global|project|session)/sessionId/status/lineage/callCount/totalCostUsd/lastTask/lastRole/lastSessionId/lastResult/createdAt/updatedAt，无 kind ephemeral/persistent）。
 - 任务注册表：`.agentflux/runtime/tasks.json`（去 workStyle 字段，保留 executions/usage）。
-- workflow 定义：`.agentflux/runtime/workflows.json`（保留多定义+版本）。
+- workflow 定义：`.agentflux/runtime/workflows.json`（保留多定义+版本；TaskNode 可选 role、agentId、sessionMode=shared|fresh）。
 - community：`.agentflux/issues.json`（保留多 issue+claims+timeline）。
 - 空间运行状态：`.agentflux/runtime/active-context.json`（当前活跃空间归属与活跃 agent 集合，互斥判定的权威来源）。
 - **迁移**：开发切换时旧 `runtime/` 数据文件备份为 `.bak-<date>` 并重建；不做代码级兼容。

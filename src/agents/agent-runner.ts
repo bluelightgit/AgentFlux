@@ -35,7 +35,7 @@ import {
 	type CommunicationContractReport, type CommunicationPolicyInput,
 } from "../core/communication-policy";
 import {
-	loadRegisteredCapabilityOverride, resolveCapabilityPolicy, writeEffectiveCapabilitySnapshot,
+	loadEffectiveCapabilitySnapshot, loadRegisteredCapabilityOverride, loadRegisteredCapabilityOverrideForRole, resolveCapabilityPolicy, writeEffectiveCapabilitySnapshot,
 	type CapabilityPolicyInput, type WorkspaceCapabilityInput,
 } from "../core/capability-policy";
 import { createEphemeralRecord, finishEphemeralRecord, startEphemeralRecord } from "./agent-lifecycle";
@@ -305,6 +305,8 @@ export interface AgentTemplate {
 
 export interface AgentRunResult {
 	agent: string;
+	/** 本次运行实际选择的角色。 */
+	role?: string;
 	exitCode: number;
 	output: string;
 	usage: {
@@ -672,6 +674,8 @@ export async function runAgent(opts: {
 	liveTeamCommunication?: boolean;                    // Team child 在结束前主动轮询 operator/peer inbox
 	communicationOverride?: CommunicationPolicyInput; // 注册实例/单次调用动态覆盖角色模板
 	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
+	/** 注册实例允许的角色集合；用于选择多角色 Agent 的本次角色。 */
+	registeredRoles?: string[];
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
 	invocationOverride?: { command: string; args: string[] };
 	/** 运行过程实时回调（assistant 消息 / 工具调用 / 回合），供 UI 直播子代理运行过程。 */
@@ -695,13 +699,17 @@ export async function runAgent(opts: {
 	const processRunId = opts.runId ?? `subagent-${randomUUID()}`;
 	const agentInstanceId = `${agent.name}:${processRunId}`;
 	const capabilityRole = agent.role ?? agent.name;
-	const registeredRecord = loadRegisteredCapabilityOverride(join(cwd, ".agentflux"), agent.name);
-	if (registeredRecord && registeredRecord.role !== capabilityRole) {
+	const fluxDir = join(cwd, ".agentflux");
+	const registeredRecord = loadRegisteredCapabilityOverrideForRole(fluxDir, agent.name, capabilityRole);
+	const baseRegisteredRecord = loadRegisteredCapabilityOverride(fluxDir, agent.name);
+	// 直接调用 runAgent 时没有 Agent 注册表可校验角色；只有显式传入允许角色集合
+	// 才能安全地把旧的单角色收窄配置与新的角色绑定区分开。
+	if (baseRegisteredRecord && !registeredRecord && !opts.registeredRoles?.includes(capabilityRole)) {
 		return {
 			agent: agent.name, exitCode: 77, output: "",
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
-			errorMessage: `capability policy rejected: registered role ${registeredRecord.role} does not match ${capabilityRole}`,
+			errorMessage: `capability policy rejected: registered role ${baseRegisteredRecord.role} does not match ${capabilityRole}`,
 			retryCount: 0,
 		};
 	}
@@ -711,6 +719,7 @@ export async function runAgent(opts: {
 		: undefined;
 	let capabilityPolicy;
 	let capabilitySnapshotPath = "";
+	const capabilitySnapshotRole = opts.registeredRoles && opts.registeredRoles.length > 1 ? capabilityRole : undefined;
 	let previousEffectiveCapability: any = null;
 	try {
 		capabilityPolicy = resolveCapabilityPolicy({
@@ -723,11 +732,8 @@ export async function runAgent(opts: {
 			run: runCapability,
 		});
 		if (!prefixLayout) capabilityPolicy.effective.workspace.enforcement = "unavailable";
-		const previousSnapshotPath = join(cwd, ".agentflux", "runtime", "capability-effective", `${agent.name}.json`);
-		if (existsSync(previousSnapshotPath)) {
-			try { previousEffectiveCapability = JSON.parse(readFileSync(previousSnapshotPath, "utf-8")).effective; } catch {}
-		}
-		capabilitySnapshotPath = writeEffectiveCapabilitySnapshot(join(cwd, ".agentflux"), capabilityPolicy);
+		previousEffectiveCapability = loadEffectiveCapabilitySnapshot(fluxDir, agent.name, capabilitySnapshotRole)?.effective ?? null;
+		capabilitySnapshotPath = writeEffectiveCapabilitySnapshot(fluxDir, capabilityPolicy, capabilitySnapshotRole);
 	} catch (error: any) {
 		telemetry?.writeCapabilityPolicy({
 			sessionId, runId: processRunId, agent: agent.name, role: capabilityRole,
@@ -755,7 +761,14 @@ export async function runAgent(opts: {
 		shapeChanged("mcpServers") ? "mcp_set" : null,
 		shapeChanged("communication") || shapeChanged("workspace") ? "runtime_policy_guard" : null,
 	].filter((item): item is "tool_schema" | "skill_set" | "mcp_set" | "runtime_policy_guard" => !!item))];
+	// 角色切换不仅可能改变工具，还可能改变 system prompt/model；持久会话
+	// 不能把 planner 的上下文静默复用给 reviewer，因此这些字段都参与 generation。
 	const capabilityGeneration = createHash("sha256").update(JSON.stringify({
+		role: capabilityRole,
+		systemPrompt: agent.systemPrompt,
+		model: opts.model ?? agent.model,
+		provider: opts.provider ?? agent.provider,
+		thinking: opts.thinking ?? agent.thinking,
 		tools: capabilityPolicy.effective.tools,
 		skills: capabilityPolicy.effective.skills,
 		mcpServers: capabilityPolicy.effective.mcpServers,
@@ -766,7 +779,6 @@ export async function runAgent(opts: {
 		narrowed: capabilityPolicy.narrowed, cacheImpact: capabilityCacheChanges,
 		detail: `snapshot=${capabilitySnapshotPath}`,
 	});
-	const fluxDir = join(cwd, ".agentflux");
 	registerAgentRun(fluxDir, {
 		id: processRunId,
 		taskId: opts.taskId,
@@ -919,7 +931,7 @@ export async function runAgent(opts: {
 		attemptArgs.push(`Task: ${taskWithInbox}`);
 
 		const result: AgentRunResult = {
-			agent: agent.name, exitCode: 0, output: "",
+			agent: agent.name, role: capabilityRole, exitCode: 0, output: "",
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
 			retryCount,
@@ -1296,7 +1308,7 @@ export function formatAgentRunResult(r: AgentRunResult, last = 1): string {
 		? recent[recent.length - 1]
 		: r.output.trim() ? r.output : r.errorMessage ?? "(no message)";
 	const header = [
-		`[AgentFlux subagent: ${r.agent}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
+		`[AgentFlux subagent: ${r.agent}${r.role ? ` · role=${r.role}` : ""}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
 		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}`,
 		...(r.errorMessage ? [`error: ${r.errorMessage}`] : []),
 		...(!succeeded ? ["next: choose one bounded action — continue directly without this delegation, select a healthy provider, or stop and report; do not repeat the same failed delegation without a new plan"] : []),

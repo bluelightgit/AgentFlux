@@ -2,7 +2,7 @@
   "name": "agentflux",
   "version": "0.1.2",
   "type": "module",
-  "description": "A multi-Agent workbench for pi: direct work, dynamic teams, DAG workflows and issue communities",
+  "description": "A multi-Agent workbench for pi: direct execution, optional DAG workflows and issue communities",
   "keywords": [
     "pi-package",
     "agent",
@@ -54,6 +54,7 @@
     "test:live:history": "tsx tests/live/test-task-history-deepseek.ts",
     "test:live:workflow-reuse": "tsx tests/live/test-workflow-reuse-deepseek.ts",
     "test:live:workflow-modify": "tsx tests/live/test-workflow-modify-deepseek.ts",
+    "test:live:multirole": "tsx tests/live/test-multirole-deepseek.ts",
     "verify": "npm run typecheck && npm run test:unit",
     "prepack": "npm run build"
   }

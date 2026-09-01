@@ -286,6 +286,12 @@ async function main(): Promise<void> {
 		const sessionAgent = createAgent(root, { name: "session-scope", scope: "session", ownerSessionId: "ses-1", modelsConfig: { models: {} } });
 		check(sessionAgent.scope === "session" && sessionAgent.ownerSessionId === "ses-1", "session 作用域记录 ownerSessionId");
 		createAgent(root, { name: "session-other", scope: "session", ownerSessionId: "ses-2", modelsConfig: { models: {} } });
+		check(listAgents(root, "ses-1").some(agent => agent.name === "session-scope")
+			&& !listAgents(root, "ses-1").some(agent => agent.name === "session-other")
+			&& listAgents(root, "ses-2").some(agent => agent.name === "session-other"),
+		"session 作用域列表按 ownerSessionId 隔离");
+		check(findAgents(root, "session-scope", "ses-2").length === 0 && findAgents(root, "session-scope", "ses-1").length === 1,
+		"session 作用域按 name/id 查询按会话隔离");
 		const cleaned = deleteSessionAgents(root, "ses-1");
 		check(cleaned.includes("session-scope") && !cleaned.includes("session-other"), "会话结束清理本会话的 session Agent（保留其他会话）");
 		const afterCleanup = listAgents(root);
@@ -314,6 +320,81 @@ async function main(): Promise<void> {
 				"pro-model": { provider: "octopus-anthropic", contextWindow: 128000, pricing: { input: 1, output: 2 } },
 			},
 		};
+		const inheritedCapture = join(root, "main-model-capture.json");
+		process.env.AGENTFLUX_TEST_CAPTURE = inheritedCapture;
+		const inheritedAgent = createAgent(root, { name: "inherits-main", modelsConfig: { models: {} } });
+		const inheritedRun = await runAgentRecord("inherits-main", "inherit main model", {
+			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
+		});
+		const inheritedArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
+		check(inheritedRun.exitCode === 0 && inheritedAgent.model === undefined
+			&& inheritedArgs.argv.includes("--model") && inheritedArgs.argv.includes("main-selected-model")
+			&& inheritedArgs.argv.includes("--provider") && inheritedArgs.argv.includes("main-selected-provider"),
+		"未显式指定模型的 Agent 运行时继承 Main 当前模型和 provider，且不写回 Agent 配置");
+		const roleDir = join(root, ".agentflux", "agents");
+		mkdirSync(roleDir, { recursive: true });
+		writeFileSync(join(roleDir, "role-provider.md"), [
+			"---",
+			"name: role-provider",
+			"model: role-selected-model",
+			"provider: role-selected-provider",
+			"thinking: max",
+			"tools: read",
+			"---",
+			"Use the explicitly configured role model.",
+		].join("\n"));
+		const roleAgent = createAgent(root, { name: "role-provider-agent", role: "role-provider", modelsConfig: { models: {} } });
+		const roleRun = await runAgentRecord("role-provider-agent", "use role model", {
+			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
+		});
+		const roleArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
+		check(roleRun.exitCode === 0 && roleAgent.model === "role-selected-model" && roleAgent.provider === "role-selected-provider"
+			&& roleArgs.argv.includes("role-selected-model") && roleArgs.argv.includes("role-selected-provider")
+			&& !roleArgs.argv.includes("main-selected-model"),
+		"角色模板显式模型/provider 优先于 Main 模型继承");
+		writeFileSync(join(roleDir, "role-acceptor.md"), [
+			"---",
+			"name: role-acceptor",
+			"model: acceptor-model",
+			"provider: acceptor-provider",
+			"thinking: low",
+			"tools: read",
+			"---",
+			"Use the acceptance role.",
+		].join("\n"));
+		const multiRoleAgent = createAgent(root, {
+			name: "multi-role-agent", roles: ["role-provider", "role-acceptor"], modelsConfig: { models: {} },
+		});
+		check(multiRoleAgent.role === "role-provider"
+			&& multiRoleAgent.roles?.join(",") === "role-provider,role-acceptor"
+			&& multiRoleAgent.model === undefined,
+		"同一 Agent 可绑定多个角色且不把首个角色模型固化到身份");
+		const acceptanceRun = await runAgentRecord("multi-role-agent", "accept the result", {
+			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
+		}, undefined, undefined, { role: "role-acceptor" });
+		const afterAcceptance = listAgents(root).find(agent => agent.name === "multi-role-agent")!;
+		const acceptanceArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
+		check(acceptanceRun.exitCode === 0 && acceptanceRun.role === "role-acceptor"
+			&& afterAcceptance.lastRole === "role-acceptor" && afterAcceptance.lastResult?.role === "role-acceptor"
+			&& acceptanceArgs.argv.includes("acceptor-model") && acceptanceArgs.argv.includes("acceptor-provider")
+			&& !acceptanceArgs.argv.includes("main-selected-model"),
+		"多角色 Agent 按本次 Run 选择验收角色并使用该角色的模型/provider");
+		const planningRun = await runAgentRecord("multi-role-agent", "plan the next change", {
+			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
+		}, undefined, undefined, { role: "role-provider" });
+		const afterPlanning = listAgents(root).find(agent => agent.name === "multi-role-agent")!;
+		const planningArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
+		check(planningRun.exitCode === 0 && planningRun.role === "role-provider" && afterPlanning.callCount === 2
+			&& planningArgs.argv.includes("role-selected-model") && planningArgs.argv.includes("role-selected-provider"),
+		"同一 Agent 可再次以规划角色运行并保留独立 Run 统计");
+		let unauthorizedRoleRejected = false;
+		try { await runAgentRecord("multi-role-agent", "not registered", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true, invocationOverride }, undefined, undefined, { role: "tester" }); } catch (error: any) { unauthorizedRoleRejected = /not registered for role tester/.test(String(error?.message ?? "")); }
+		check(unauthorizedRoleRejected && listAgents(root).find(agent => agent.name === "multi-role-agent")?.status === "idle",
+		"多角色 Agent 拒绝未绑定角色且不污染运行状态");
 		const overridden = createAgent(root, { name: "doc-writer", role: "implementer", model: "flash-model", thinking: "off", modelsConfig });
 		check(overridden.model === "flash-model" && overridden.thinking === "off" && overridden.provider === "octopus-completions", "create 时 model/thinking 覆盖角色模板并持久化");
 		let unknownModelRejected = false;

@@ -5,8 +5,8 @@ import { join } from "node:path";
 /**
  * Live 测试的可配置 Provider 加载。
  *
- * 默认（不设置任何环境变量）与历史行为完全一致：使用 pi 内置
- * octopus-anthropic provider 和本机 auth.json 凭据。
+ * 默认（不设置任何环境变量）使用当前 pi 内置
+ * octopus-completions provider 和本机 auth.json 凭据；如需兼容旧环境可显式传入 provider id。
  *
  * 设置 AGENTFLUX_LIVE_BASE_URL 后，会把 provider 定义按 pi models.json
  * 的 providers 段结构写入临时 agent 目录（PI_CODING_AGENT_DIR 重定向），
@@ -51,7 +51,7 @@ export interface LiveConfig {
 
 export function loadLiveConfig(): LiveConfig {
 	const baseUrl = process.env.AGENTFLUX_LIVE_BASE_URL?.trim();
-	const providerId = process.env.AGENTFLUX_LIVE_PROVIDER_ID?.trim() || (baseUrl ? "agentflux-ci" : "octopus-anthropic");
+	const providerId = process.env.AGENTFLUX_LIVE_PROVIDER_ID?.trim() || (baseUrl ? "agentflux-ci" : "octopus-completions");
 	const api = process.env.AGENTFLUX_LIVE_API?.trim() || "openai-completions";
 	const apiKey = process.env.AGENTFLUX_LIVE_API_KEY?.trim();
 	const modelPro = process.env.AGENTFLUX_LIVE_MODEL_PRO?.trim() || "deepseek-v4-pro";

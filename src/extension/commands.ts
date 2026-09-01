@@ -18,7 +18,7 @@ export interface FluxCompletionItem { value: string; label: string; description:
 const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
 		{ value: "task", label: "task", description: "查看、复用、恢复或继续历史任务" },
 	{ value: "workflow", label: "workflow", description: "查看、复用或修改固定 DAG 定义" },
-	{ value: "agent", label: "agent", description: "管理 Persistent Agents" },
+	{ value: "agent", label: "agent", description: "管理 Agents" },
 	{ value: "fork", label: "fork", description: "从当前会话上下文创建分支" },
 	{ value: "issue", label: "issue", description: "管理 Community Issues 与 Claims" },
 	{ value: "message", label: "message", description: "向运行中的 Agent 发送 Message V2" },
@@ -61,7 +61,7 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	]);
 	if (prefix.startsWith("agent ")) return completions(prefix, [
 		["agent list", "列出 Agents"], ["agent create", "创建 Agent（默认/角色模板/分叉）"],
-		["agent run", "与 Agent 对话（指令+超时）"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
+		["agent run", "与 Agent 对话（可选择本次角色）"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
 		["agent delete", "删除 Agent"], ["agent gc", "自动 GC（保留最新 k 个）"],
 	]);
 	if (prefix.startsWith("issue ")) return completions(prefix, [
@@ -84,16 +84,17 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 	return null;
 }
 
-/** 解析 --model <m> / --thinking <t> / --background / --sync 覆盖参数，其余参数保持位置语义。 */
+/** 解析 --model <m> / --thinking <t> / --role <role> / --roles <r1,r2> / --session-mode <shared|fresh> / --background / --sync 覆盖参数，其余参数保持位置语义。 */
 export function parseAgentFlags(rest: string[]): { flags: Record<string, string>; positional: string[] } {
 	const flags: Record<string, string> = {};
 	const positional: string[] = [];
 	for (let index = 0; index < rest.length; index++) {
 		const item = rest[index];
-		if (item === "--model" || item === "--thinking") {
+		if (item === "--model" || item === "--thinking" || item === "--role" || item === "--roles" || item === "--session-mode") {
 			const value = rest[index + 1];
 			if (!value || value.startsWith("--")) throw new Error(`${item} requires a value`);
-			flags[item.slice(2)] = value;
+			const key = item === "--session-mode" ? "sessionMode" : item.slice(2);
+			flags[key] = value;
 			index++;
 		} else if (item === "--background" || item === "--sync") {
 			flags[item.slice(2)] = "true";
@@ -129,7 +130,7 @@ export const FLUX_HELP = [
 	"AgentFlux",
 	"  /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]",
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
-	"  /flux agent list|create <name> <role>|run <name> <task> [--model <m>] [--thinking <t>] [--sync]|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
+	"  /flux agent list|create <name> [role] [--roles <role1,role2>]|run <name> <task> [--role <role>] [--session-mode <shared|fresh>] [--model <m>] [--thinking <t>] [--sync]|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
 	"  /flux fork [last|index|entryId]",
 	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>] [--props <id1,id2>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",

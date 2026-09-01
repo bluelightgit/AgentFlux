@@ -1,8 +1,10 @@
-import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, setDagLogSink, validateTaskDAG, type TaskNode } from "../src/workflows/dag-executor";
+import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, setDagLogSink, validateTaskDAG, type TaskDAG, type TaskNode } from "../src/workflows/dag-executor";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TelemetryWriter } from "../src/telemetry/events";
+import { createAgent, listAgents } from "../src/agents/agent-store";
+import { listAgentRuns } from "../src/core/run-registry";
 
 const node = (id: string, dependsOn: string[] = []): TaskNode => ({
 	id, title: id, role: "implementer", dependsOn, parallelizable: false,
@@ -78,6 +80,60 @@ const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "f
 	roles: { planner: { model: "deepseek-v4-pro", thinking: "off" } },
 }, "planner");
 check("DAG planner honors role model/provider configuration", configuredPlanner.model === "deepseek-v4-pro" && configuredPlanner.provider === "octopus-anthropic" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
+const inheritedPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
+	models: { "affinity-model": { provider: "other", contextWindow: 128_000 } },
+	roles: {},
+}, "planner", { model: "main-selected-model", provider: "main-selected-provider" });
+check("DAG role without explicit model inherits Main model/provider", inheritedPlanner.model === "main-selected-model"
+	&& inheritedPlanner.provider === "main-selected-provider" && inheritedPlanner.source === "main", `${inheritedPlanner.provider}/${inheritedPlanner.model}`);
+const explicitProviderRole = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
+	models: {},
+	roles: { planner: { model: "role-selected-model", provider: "role-selected-provider", thinking: "max" } },
+}, "planner", { model: "main-selected-model", provider: "main-selected-provider" });
+check("DAG explicit role provider wins over Main inheritance", explicitProviderRole.model === "role-selected-model"
+	&& explicitProviderRole.provider === "role-selected-provider" && explicitProviderRole.source === "model", `${explicitProviderRole.provider}/${explicitProviderRole.model}`);
+const extensibleDag = parsePlannerTaskDAG(JSON.stringify({
+	description: "custom role binding",
+	nodes: [{ id: "custom", title: "custom", role: "acceptance-specialist", agentId: "multi-agent", sessionMode: "fresh", dependsOn: [], parallelizable: false, acceptanceCriteria: [], files: [] }],
+}), "fallback");
+check("planner DAG preserves registered custom roles and Agent bindings", extensibleDag.nodes[0].role === "acceptance-specialist"
+	&& extensibleDag.nodes[0].agentId === "multi-agent" && extensibleDag.nodes[0].sessionMode === "fresh", JSON.stringify(extensibleDag.nodes[0]));
+
+const boundAgentRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-bound-agent-"));
+try {
+	const boundFluxDir = join(boundAgentRoot, ".agentflux");
+	const boundAgent = createAgent(boundAgentRoot, { name: "multi-agent", roles: ["planner", "reviewer"], modelsConfig: { models: {} } });
+	const boundDag: TaskDAG = {
+		description: "same Agent across workflow stages",
+		nodes: [
+			{ id: "plan", title: "plan", role: "planner", agentId: boundAgent.id, sessionMode: "shared", dependsOn: [], parallelizable: false, acceptanceCriteria: [], files: [] },
+			{ id: "review", title: "review", role: "reviewer", agentId: boundAgent.id, sessionMode: "fresh", dependsOn: ["plan"], parallelizable: false, acceptanceCriteria: [], files: [] },
+		],
+	};
+	const boundResult = await executeDAG(boundDag, {
+		cwd: boundAgentRoot,
+		fluxDir: boundFluxDir,
+		modelsConfig: { models: {}, roles: {} },
+		telemetry: new TelemetryWriter(boundFluxDir),
+		prefixLayout: true,
+		sessionId: "bound-session",
+		executionId: "bound-execution",
+		maxWallClockMs: 30_000,
+		maxRetries: 0,
+		enableQualityGate: false,
+		invocationOverride: { command: process.execPath, args: [resolve(process.cwd(), "tests/helpers/successful-subagent.cjs")] },
+	});
+	const boundAfter = listAgents(boundAgentRoot).find(agent => agent.id === boundAgent.id);
+	const boundRuns = listAgentRuns(boundFluxDir).filter(run => run.agent === boundAgent.name);
+	check("Workflow can execute sequential nodes with one Agent in different roles", boundResult.status === "passed"
+		&& boundAfter?.callCount === 2 && boundAfter.lastRole === "reviewer"
+		&& boundAfter.lastSessionId?.includes("-fresh-") === true
+		&& boundResult.taskResults.get("plan")?.subagentResult.role === "planner"
+		&& boundResult.taskResults.get("review")?.subagentResult.role === "reviewer", boundResult.status);
+	check("bound Workflow nodes keep the registered Agent Run Registry lineage", boundRuns.length === 2
+		&& boundRuns.every(run => run.agent === boundAgent.name)
+		&& new Set(boundRuns.map(run => run.role)).size === 2, JSON.stringify(boundRuns.map(run => run.role)));
+} finally { rmSync(boundAgentRoot, { recursive: true, force: true }); }
 
 const resumeRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-resume-"));
 try {

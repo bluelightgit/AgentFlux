@@ -4,6 +4,7 @@
  */
 
 import { runAgent, type AgentTemplate, type AgentRunResult } from "../agents/agent-runner";
+import { findAgents, getAgentRoles, runAgentRecord } from "../agents/agent-store";
 import { checkQualityGate, type QualityGateResult } from "./quality-gate";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
@@ -28,7 +29,11 @@ function dagLog(message: string): void { dagLogSink?.(message); }
 export interface TaskNode {
 	id: string;
 	title: string;
-	role: string;               // planner | implementer | reviewer | tester
+	role: string;               // 已注册角色模板名称，可扩展，不限于内置四角色
+	/** 可选的已注册 Agent id/name；填写后本节点以该 Agent 身份运行。 */
+	agentId?: string;
+	/** 该绑定 Agent 的会话策略；shared 复用身份会话，fresh 使用独立会话。 */
+	sessionMode?: "shared" | "fresh";
 	dependsOn: string[];        // 前置任务 ID
 	parallelizable: boolean;    // 是否可与其他任务并行
 	acceptanceCriteria: string[]; // 验收标准
@@ -92,21 +97,39 @@ export interface ResolvedDAGRoleModel {
 	model: string;
 	provider?: string;
 	thinking?: RoleDefinition["thinking"];
-	source: "model" | "affinity" | "single";
+	source: "model" | "main" | "affinity" | "single";
 }
 
 /** Resolve a DAG role through the same MD > models.json > builtin precedence as node execution. */
-export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: string): ResolvedDAGRoleModel {
+export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: string, defaults?: { model?: string; provider?: string }): ResolvedDAGRoleModel {
 	const role = loadAllRoles(cwd, modelsConfig).get(roleName);
 	if (!role) throw new Error(`DAG role not found: ${roleName}`);
 	const models = modelsConfig?.models ?? {};
+	// 显式角色模型优先，即使它只存在于 pi provider 配置而尚未出现在 AgentFlux 模型表中。
+	if (role.model) {
+		return {
+			model: role.model,
+			provider: role.provider ?? models[role.model]?.provider,
+			thinking: role.thinking,
+			source: "model",
+		};
+	}
+	// 没有角色级模型时，继承当前 Main Agent；能力亲和度不应静默替换 Main 的选择。
+	if (defaults?.model) {
+		return {
+			model: defaults.model,
+			provider: defaults.provider ?? models[defaults.model]?.provider,
+			thinking: role.thinking,
+			source: "main",
+		};
+	}
 	const requirement = (role.requirement as RoleRequirement | undefined)
 		?? ROLE_FALLBACK_REQUIREMENTS[roleName]
 		?? { coding: 0.5, reasoning: 0.5, cost_eff: 0.5 };
 	const assigned = assignModel(roleName, { model: role.model, requirement }, models);
 	return {
 		model: assigned.model,
-		provider: models[assigned.model]?.provider,
+		provider: role.provider ?? models[assigned.model]?.provider,
 		thinking: role.thinking,
 		source: assigned.source,
 	};
@@ -126,9 +149,13 @@ export async function generateTaskDAG(
 		cwd: string;
 		model?: string;
 		provider?: string;
+		/** 无显式 planner 模型时继承 Main Agent 当前模型。 */
+		defaultModel?: string;
+		defaultProvider?: string;
 		thinking?: RoleDefinition["thinking"];
 		pricing?: PricingTable;
 		models?: Record<string, ModelEntry>;
+		modelsConfig?: any;
 		telemetry?: TelemetryWriter;
 		sessionId: string;
 		prefixLayout: boolean;
@@ -165,7 +192,8 @@ Output EXACTLY this JSON format (no other text):
 \`\`\`
 
 Rules:
-- Use roles: "planner", "implementer", "reviewer", "tester"
+- Use an exact registered role template name; built-ins include "planner", "implementer", "reviewer", and "tester", while project roles may add more names
+- An optional agentId may bind a node to an existing Agent identity; use sessionMode "shared" or "fresh" when appropriate
 - dependsOn lists task IDs that must complete before this task
 - parallelizable=true means this task can run alongside other parallelizable tasks
 - acceptanceCriteria are verifiable conditions
@@ -176,15 +204,16 @@ Rules:
 		thinking: opts.thinking ?? "high",
 	};
 
+	const roleNames = [...loadAllRoles(opts.cwd, opts.modelsConfig ?? { models: opts.models }).keys()].sort();
 	const result = await runAgent({
 		cwd: opts.cwd,
 		agent: plannerAgent,
-		task: `Analyze this task and decompose it into a structured DAG:\n\n${task}`,
+		task: `Analyze this task and decompose it into a structured DAG:\n\n${task}\n\nRegistered role templates (use exact names only): ${roleNames.join(", ")}`,
 		sessionId: opts.sessionId,
 		telemetry: opts.telemetry,
 		prefixLayout: opts.prefixLayout,
-		model: opts.model,
-		provider: opts.provider,
+		model: opts.model ?? opts.defaultModel,
+		provider: opts.provider ?? opts.defaultProvider,
 		pricing: opts.pricing,
 		thinking: opts.thinking ?? "high",
 		maxRetries: 1,
@@ -244,7 +273,9 @@ export function parsePlannerTaskDAG(output: string, fallbackDescription: string,
 		return {
 			id: typeof node.id === "string" && node.id ? node.id : `t${index + 1}`,
 			title: typeof node.title === "string" && node.title ? node.title : `Task ${index + 1}`,
-			role: typeof node.role === "string" && ["planner", "implementer", "reviewer", "tester"].includes(node.role) ? node.role : "implementer",
+			role: typeof node.role === "string" && node.role.trim() ? node.role.trim() : "implementer",
+			agentId: typeof node.agentId === "string" && node.agentId.trim() ? node.agentId.trim() : undefined,
+			sessionMode: node.sessionMode === undefined ? undefined : node.sessionMode === "fresh" || node.sessionMode === "shared" ? node.sessionMode : (() => { throw new Error(`invalid planner node ${index + 1} sessionMode`); })(),
 			dependsOn: strings(node.dependsOn),
 			parallelizable: node.parallelizable === true,
 			acceptanceCriteria: strings(node.acceptanceCriteria),
@@ -263,6 +294,9 @@ export function parsePlannerTaskDAG(output: string, fallbackDescription: string,
 export function validateTaskDAG(nodes: TaskNode[]): void {
 	const ids = new Set<string>();
 	for (const node of nodes) {
+		if (typeof node.role !== "string" || !node.role.trim()) throw new Error("invalid DAG: node role must be a non-empty registered role name");
+		if (node.agentId !== undefined && (typeof node.agentId !== "string" || !node.agentId.trim())) throw new Error(`invalid DAG: ${node.id} agentId must be a non-empty selector`);
+		if (node.sessionMode !== undefined && node.sessionMode !== "shared" && node.sessionMode !== "fresh") throw new Error(`invalid DAG: ${node.id} sessionMode must be shared or fresh`);
 		let id: string;
 		try { id = assertSafeOpaqueId(node.id, "DAG node id"); }
 		catch (error) { throw new Error(`invalid DAG: ${error instanceof Error ? error.message : String(error)}`); }
@@ -316,6 +350,9 @@ export interface DAGExecutorOptions {
 	pricing?: PricingTable;
 	sessionId: string;
 	sharedSkills?: string[];
+	/** 节点没有显式模型时继承当前 Main Agent 模型。 */
+	defaultModel?: string;
+	defaultProvider?: string;
 	maxRetries?: number;
 	enableQualityGate?: boolean;
 	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
@@ -325,6 +362,8 @@ export interface DAGExecutorOptions {
 	maxWallClockMs?: number;   // 整个 DAG 的 wall-clock 上限
 	maxIterations?: number;    // 全局节点执行批次数上限
 	maxParallel?: number;      // 并发节点上限
+	/** 确定性测试或受控宿主可替换子进程入口；正常生产调用留空。 */
+	invocationOverride?: { command: string; args: string[] };
 	executionId?: string;      // 显式 run id；也用于断点文件
 	taskId?: string;
 	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
@@ -379,9 +418,25 @@ export async function executeDAG(
 	if (opts.taskId) assertSafeOpaqueId(opts.taskId, "taskId");
 	const artifactPaths: Record<string, string> = {};
 
-	// 加载角色定义
+	// 加载角色定义并在执行前验证所有节点绑定，避免执行到一半才发现角色/Agent 配置错误。
 	const roles = loadAllRoles(opts.cwd, opts.modelsConfig);
 	const models = opts.modelsConfig?.models ?? {};
+	const boundAgentIds = new Map<string, string>();
+	const boundAgentNames = new Map<string, string>();
+	for (const node of dag.nodes) {
+		if (!roles.has(node.role)) throw new Error(`DAG role not found: ${node.role}`);
+		if (node.agentId) {
+			const matches = findAgents(opts.cwd, node.agentId, opts.sessionId);
+			if (matches.length === 0) throw new Error(`DAG Agent not found: ${node.agentId}`);
+			if (matches.length > 1) throw new Error(`DAG Agent selector is ambiguous: ${node.agentId}`);
+			const bound = matches[0];
+			if (!getAgentRoles(bound).includes(node.role)) {
+				throw new Error(`DAG Agent ${bound.name} is not registered for role ${node.role}; allowed roles: ${getAgentRoles(bound).join(", ")}`);
+			}
+			boundAgentIds.set(node.id, bound.id);
+			boundAgentNames.set(node.id, bound.name);
+		}
+	}
 	const board = new SharedBoard(opts.fluxDir);
 	// 本次 DAG 内的 model/provider 熔断记忆：一次明确降级后，后续批次不再重复撞同一故障模型。
 	const unavailableModels = new Set<string>();
@@ -483,8 +538,11 @@ export async function executeDAG(
 			if (ready.length >= Math.max(1, opts.maxParallel ?? 3)) break;
 			const normalizedFiles = node.files.map(file => file.replace(/\\/g, "/").toLowerCase());
 			const conflicts = normalizedFiles.some(file => batchFiles.has(file));
+			const boundAgentId = boundAgentIds.get(node.id);
+			const sameBoundAgent = boundAgentId !== undefined
+				&& ready.some(other => boundAgentIds.get(other.id) === boundAgentId);
 			const canJoinBatch = ready.length === 0
-				|| (node.parallelizable && ready.every(other => other.parallelizable) && !conflicts);
+				|| (node.parallelizable && ready.every(other => other.parallelizable) && !conflicts && !sameBoundAgent);
 			if (!canJoinBatch) continue;
 			ready.push(node);
 			for (const file of normalizedFiles) batchFiles.add(file);
@@ -504,8 +562,8 @@ export async function executeDAG(
 			opts.telemetry.writeAgentLifecycle({
 				sessionId: opts.sessionId,
 				taskId: opts.taskId,
-				agentId: `agent-${executionId}-${node.id}`,
-				agent: `dag-${node.id}`,
+				agentId: boundAgentIds.get(node.id) ?? `agent-${executionId}-${node.id}`,
+				agent: boundAgentNames.get(node.id) ?? `dag-${node.id}`,
 				kind: "subagent",
 				origin: "fresh",
 				status: "running",
@@ -578,8 +636,8 @@ export async function executeDAG(
 			opts.telemetry.writeAgentLifecycle({
 				sessionId: opts.sessionId,
 				taskId: opts.taskId,
-				agentId: `agent-${executionId}-${node.id}`,
-				agent: `dag-${node.id}`,
+				agentId: boundAgentIds.get(node.id) ?? `agent-${executionId}-${node.id}`,
+				agent: boundAgentNames.get(node.id) ?? `dag-${node.id}`,
 				kind: "subagent",
 				origin: "fresh",
 				status: passed ? "done" : result.exitCode === 130 ? "cancelled" : "failed",
@@ -634,31 +692,41 @@ async function executeNodeWithGate(
 	maxCostUsd?: number,
 ): Promise<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> {
 	const role = roles.get(node.role);
-	if (!role) {
-		dagLog(`[flux dag] role ${node.role} not found, using implementer`);
-	}
+	if (!role) throw new Error(`DAG role not found: ${node.role}`);
 
-	// 用 assignModel 选模型 (优先 role.model 指定, 否则亲和度匹配)
+	// 选择节点模型：显式角色模型 > Main 当前模型 > 旧的能力亲和度匹配。
 	let assignedModel: string | undefined;
 	let assignedProvider: string | undefined;
 	const roleRequirement = (role?.requirement as RoleRequirement | undefined)
 		?? ROLE_FALLBACK_REQUIREMENTS[node.role]
 		?? { coding: 0.5, reasoning: 0.5, cost_eff: 0.5 };
 	try {
-		const assign = assignModel(node.role, { model: role?.model, requirement: role?.requirement }, models);
-		assignedModel = assign.model;
-		assignedProvider = models[assign.model]?.provider;
-		if (unavailableModels.has(assignedModel)) {
+		let assignmentSource: ResolvedDAGRoleModel["source"];
+		if (role?.model) {
+			assignedModel = role.model;
+			assignedProvider = role.provider ?? models[role.model]?.provider;
+			assignmentSource = "model";
+		} else if (opts.defaultModel) {
+			assignedModel = opts.defaultModel;
+			assignedProvider = opts.defaultProvider ?? models[opts.defaultModel]?.provider;
+			assignmentSource = "main";
+		} else {
+			const assign = assignModel(node.role, { model: role?.model, requirement: role?.requirement }, models);
+			assignedModel = assign.model;
+			assignedProvider = role?.provider ?? models[assign.model]?.provider;
+			assignmentSource = assign.source;
+		}
+		if (assignedModel && unavailableModels.has(assignedModel)) {
 			const healthyFallback = selectHealthyModel(assignedModel, roleRequirement, models, unavailableModels);
 			dagLog(`[flux dag] ${node.id} circuit breaker skips ${assignedModel} → ${healthyFallback}`);
 			assignedModel = healthyFallback;
 			assignedProvider = models[healthyFallback]?.provider;
 		}
-		dagLog(`[flux dag] ${node.id} model: ${assignedModel} (${assign.source}${assignedModel !== assign.model ? ", circuit-breaker fallback" : ""})`);
+		dagLog(`[flux dag] ${node.id} model: ${assignedModel ?? "none"} (${assignmentSource!})`);
 	} catch (e: any) {
-		dagLog(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using role.model`);
-		assignedModel = role?.model;
-		assignedProvider = role?.model ? models[role.model]?.provider : undefined;
+		dagLog(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using explicit role/Main model`);
+		assignedModel = role?.model ?? opts.defaultModel;
+		assignedProvider = role?.provider ?? (role?.model ? models[role.model]?.provider : opts.defaultProvider);
 	}
 
 	// 构建 agent 定义
@@ -711,39 +779,62 @@ async function executeNodeWithGate(
 				gateResult: lastGateResult, retryCount, passed: false, cost: totalNodeCost,
 			};
 		}
-		// 执行 subagent
+		// 执行 subagent。绑定了 agentId 的节点通过统一 Agent 存储运行，
+		// 因而会保留身份、角色选择、session 与 Run Registry 事实；未绑定节点沿用 DAG 临时参与者。
 		const attemptTask = retryCount > 0 && lastGateResult
 			? `${taskText}\n\nPrevious attempt failed quality gate:\n${lastGateResult.feedback}\n\nPlease fix the issues and retry.`
 			: taskText;
-
-		const result = await runAgent({
-			cwd: opts.cwd,
-			agent: agentDef,
-			task: attemptTask,
-			sessionId: opts.sessionId,
-			telemetry: opts.telemetry,
-			prefixLayout: opts.prefixLayout,
-			model: agentDef.model,
-			provider: agentDef.provider,
-			pricing: opts.pricing,
-			thinking: agentDef.thinking,
-			timeoutMs: Math.max(1, nodeDeadline - Date.now()), // 所有重试/降级共享节点总时限
-			maxRetries: 1,                        // 底层自动重试 1 次
-			retryDelayMs: 3000,
-			persistent: opts.persistent ?? true,
-			persistentSessionId: `flux-dag-${executionId}-${node.id}`,
-			enableModelFallback: Object.keys(models).length > 1,
-			modelsForFallback: models,
-			roleRequirementForFallback: roleRequirement,
-			signal: opts.signal,
-			// A quality-gate retry or reviewer-triggered re-run is a new immutable Run
-			// while agent.name and persistentSessionId preserve the logical DAG node.
-			runId: createDAGRunId(executionId, node.id),
-			maxCostUsd: maxCostUsd === undefined ? undefined : Math.max(0, maxCostUsd - totalNodeCost),
-			taskId: opts.taskId,
-			executionId,
-			lockFiles: node.files,
-		});
+		const remainingNodeCost = maxCostUsd === undefined ? undefined : Math.max(0, maxCostUsd - totalNodeCost);
+		const result = node.agentId
+			? await runAgentRecord(node.agentId, attemptTask, {
+				cwd: opts.cwd,
+				modelsConfig: opts.modelsConfig,
+				telemetry: opts.telemetry,
+				pricing: opts.pricing,
+				sessionId: opts.sessionId,
+				taskId: opts.taskId,
+				executionId,
+				sharedSkills: opts.sharedSkills,
+				prefixLayout: opts.prefixLayout,
+				defaultModel: opts.defaultModel,
+				defaultProvider: opts.defaultProvider,
+				timeoutMs: Math.max(1, nodeDeadline - Date.now()),
+				maxCostUsd: remainingNodeCost,
+				lockFiles: node.files,
+				invocationOverride: opts.invocationOverride,
+			}, opts.signal, undefined, {
+				role: node.role,
+				sessionMode: node.sessionMode,
+			})
+			: await runAgent({
+				cwd: opts.cwd,
+				agent: agentDef,
+				task: attemptTask,
+				sessionId: opts.sessionId,
+				telemetry: opts.telemetry,
+				prefixLayout: opts.prefixLayout,
+				model: agentDef.model,
+				provider: agentDef.provider,
+				pricing: opts.pricing,
+				thinking: agentDef.thinking,
+				timeoutMs: Math.max(1, nodeDeadline - Date.now()), // 所有重试/降级共享节点总时限
+				maxRetries: 1,                        // 底层自动重试 1 次
+				retryDelayMs: 3000,
+				persistent: opts.persistent ?? true,
+				persistentSessionId: `flux-dag-${executionId}-${node.id}`,
+				enableModelFallback: Object.keys(models).length > 1,
+				modelsForFallback: models,
+				roleRequirementForFallback: roleRequirement,
+				signal: opts.signal,
+				// A quality-gate retry or reviewer-triggered re-run is a new immutable Run
+				// while agent.name and persistentSessionId preserve the logical DAG node.
+				runId: createDAGRunId(executionId, node.id),
+				maxCostUsd: remainingNodeCost,
+				taskId: opts.taskId,
+				executionId,
+				lockFiles: node.files,
+				invocationOverride: opts.invocationOverride,
+			});
 
 		lastResult = result;
 		if (result.fallbackFrom) {
@@ -847,7 +938,7 @@ export function formatDAG(dag: TaskDAG): string {
 	for (const node of dag.nodes) {
 		const deps = node.dependsOn.length > 0 ? ` ← [${node.dependsOn.join(", ")}]` : "";
 		const par = node.parallelizable ? " ∥" : "";
-		lines.push(`  ${node.id}: ${node.title} (${node.role})${deps}${par}`);
+		lines.push(`  ${node.id}: ${node.title} (${node.role}${node.agentId ? ` @${node.agentId}${node.sessionMode === "fresh" ? ":fresh" : ""}` : ""})${deps}${par}`);
 		if (node.acceptanceCriteria.length > 0) {
 			lines.push(`    criteria: ${node.acceptanceCriteria.join("; ")}`);
 		}
