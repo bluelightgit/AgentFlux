@@ -1,86 +1,75 @@
 # AgentFlux
 
-AgentFlux 是基于 [pi](https://github.com/earendil-works/pi-coding-agent) 的多 Agent 调度扩展。日常任务在 Main Agent 中直接执行，需要时可派发子代理；Workflow（固定 DAG）与 Community（Issue/Claim 协作）是两种可选的执行方法，由 Main Agent 按任务需要调用。同一时间只允许一个项目级执行空间（main / workflow / community）活跃。
+AgentFlux 是基于 [pi](https://github.com/earendil-works/pi-coding-agent) 的 Core + TUI Agent 调度扩展。
 
-## 安装
+用户只需描述目标，Main Agent 可以直接完成任务，也可以按需要派发 Agent、运行固定 Workflow 或推进 Community 协作。项目重点是统一身份、角色职责、独立上下文、可控成本、可恢复执行和可审计结果。
 
-AgentFlux 是 npm 上的 pi 包，安装后自动注册 `/flux` 命令族和调度工具：
+## 快速开始
 
 ```bash
-pi install npm:agentflux            # 从 npm registry 安装（推荐）
-pi install git:github.com/bluelightgit/AgentFlux   # 从 git 仓库安装
-pi install git:github.com/bluelightgit/AgentFlux@v0.1.0  # 固定 tag
+npm install
+npm run build
+pi -e ./dist/extension/entry.js
 ```
 
-未安装时临时试用：`pi -e npm:agentflux`。
+发布包携带 production dist，不依赖目标项目源码。需要真实模型调用时，使用本机 pi/provider 凭据或设置 `AGENTFLUX_LIVE_*` 环境变量。
 
-开发本仓库时，先执行 `npm run build` 生成 `dist/extension/entry.js`，然后在项目内直接运行 `pi`（`.pi/settings.json` 已配置本地扩展）或手动加载：`pi -e ./dist/extension/entry.js`。发布包只携带 `dist`，不携带 `src`。
+## 产品能力
 
-## 核心概念
+- **Main**：直接执行和跨步骤协调。
+- **Agent**：默认、角色模板或真实会话分支创建；支持 `roles[]`、`shared/fresh`、模型继承、运行、停止、重试和 GC。
+- **Workflow**：版本化固定 DAG，支持依赖、并行、文件锁、质量门、预算、重试和 checkpoint。
+- **Community**：Issue → Proposal → Claim → Submit → Review → Resolve。
+- **Message V2**：direct/group、recipient delivery、ACK、重投、过期、dedupe 和背压。
+- **历史与恢复**：Task、Execution、Run Registry 保存状态、成本、失败原因和父谱系。
 
-- **执行**：任务在 Main Agent 中直接完成，或按需派发子代理（`flux_agent`）。AgentFlux 不预设执行方式。
-- **Agent 实体**：单一子代理模型。三种创建路径——默认模板、角色模板、从既有会话树分叉（继承源会话记忆）；可重名（自动 `xxx(1)` 后缀）；三层作用域（global / project / session，会话结束清理 session 作用域）。创建时可绑定多个角色（`roles`），每次 `run` 通过 `role` 选择当前职责并记录到 Run Registry/lastResult；Workflow 节点也可绑定同一 Agent。`run` 携带指令与超时并返回对话的最近消息，`delete` 硬删除，自动 GC 保留最近 k 个（默认 10）。没有显式 Agent/角色模型时运行时继承当前 Main Agent model/provider；创建与单次运行可按任务指定 `model`/`thinking` 覆盖（未知模型拒绝；运行覆盖不修改记录）。TUI 会话中 run 默认后台执行（立即返回、完成时通知、`/flux agent stop` 可中断），`--sync` 或 headless 模式同步等待结果；运行过程实时显示（working 行逐条刷新消息与工具调用）；TUI 底部状态行显示运行中的子代理。直接对话：`/flux agent list` 的 Agent 详情最下方显示 `npx pi --session "<会话文件>"` 启动命令，在新窗口打开子代理会话完整对话（与主 Agent 能力一致，对话写回会话记忆，run 仅受 running 状态阻塞）。
-- **Workflow**：保存的固定 DAG 定义（含版本历史），按需创建执行；节点可并行、可挂质量门，执行支持断点续跑（`resume`）。
-- **Community**：Issue/Claim 协作。提案（propose/support/oppose）可多提案绑定认领，claim → submit → review（pass/rework）→ resolve，带轮次、成本与停摆门禁。
-- **消息**：Message V2 提供 Agent 间直接消息、群组与投递确认（send/poll/ack/lease 重投）。
-- **互斥**：`.agentflux/runtime/active-context.json` 是权威互斥状态，一个空间活跃时阻止其他空间启动；空间内并行允许。
-- **权限**：角色模板定义上界，注册实例与单次运行逐层收窄，下层不能扩大上层能力。子代理的 `edit`/`write` 拒绝修改未声明文件；文件锁防并行编辑冲突。此门禁是 Host 级进程/文件策略，不是 OS 级沙箱；真实隔离仍需容器、虚拟机或其他受控运行环境。
+## 架构入口
 
-## TUI 命令
+```text
+src/entry.ts
+├── src/agents/       Agent、角色、会话、运行和子进程
+├── src/workflows/    planner、DAG、checkpoint 和质量门
+├── src/core/         Task、Community、Message V2、权限、成本和回收
+└── src/extension/    TUI、命令、补全、通知和 RPC pump
+```
+
+Core 是任务、Agent、Workflow、Issue、消息、权限和运行状态的事实源；TUI 只呈现事实并发起命令。Host 文件/进程门禁不等于操作系统隔离。
+
+## 常用命令
 
 | 命令 | 作用 |
 |---|---|
-| `/flux` | 打开 Workbench 菜单；`/flux ` 可补全子命令 |
-| `/flux task list\|show\|new\|reuse\|resume\|continue\|retry` | 任务注册表：查询、新建、复用、恢复、继续、重试（保留父任务谱系，不修改历史任务） |
-| `/flux workflow list\|show\|reuse\|modify\|delete` | 已保存 Workflow 定义：列出、查看 DAG、按原版本执行、生成新版本并执行、删除 |
-| `/flux agent list\|create\|run\|stop\|retry\|delete\|gc` | 子代理生命周期：列出、创建（默认/角色模板）、对话、停止、重跑上次任务、删除、自动回收 |
-| `/flux issue list\|create\|show\|comment\|propose\|support\|oppose\|claim\|submit\|review\|resolve\|delete` | Community 协作全流程 |
-| `/flux message send\|inbox\|ack` | 直接消息：发送、收件箱、确认 |
-| `/flux message group list\|create\|send` | 消息群组 |
-| `/flux fork [last\|index\|entryId]` | 从当前 pi 会话创建真实分支 |
-| `/flux status` | 当前任务、活跃运行、Agents 与 Issues 概览 |
-| `/flux space` | 活跃空间、Workflow/Community 定义与最近 Agent 活动时间线 |
-| `/flux usage` | Main 会话逐轮 token、缓存命中与成本 |
-| `/flux gc [dry-run]` | 预览或执行终态 Agent、消息与孤儿 session 回收 |
-| `/flux cancel [taskId]` | 取消运行中的 Workflow |
-| `/flux compact` | 查看上下文压缩建议 |
+| `/flux` | 打开 Workbench |
+| `/flux task ...` | 查询、继续、复用、恢复和重试任务 |
+| `/flux agent ...` | 管理 Agent、运行、停止、重试和 GC |
+| `/flux workflow ...` | 查看、复用、修改和删除 Workflow 定义 |
+| `/flux issue ...` | 管理 Community Issue/Claim |
+| `/flux message ...` | 发送、查看和确认 Message V2 |
+| `/flux fork ...` | 从当前 pi 会话创建真实分支 |
+| `/flux status` | 查看当前运行和状态 |
+| `/flux usage` | 查看 Main usage 和成本 |
 
-Main Agent 可通过工具直接调度：`flux_task`（历史查询与任务操作）、`flux_agent`（子代理）、`flux_workflow`（DAG 执行）、`flux_issue`（Community）、`flux_message`（消息）。用户只需描述目标（如“继续最近的 Workflow”“恢复刚才超时的任务”），无需提供内部 ID。
-
-## 数据目录
-
-```text
-.agentflux/
-├── agentflux.json       # 预算、缓存、通信、回收等配置
-├── models.json          # 模型表、角色模板与共享 Skills
-├── issues.json          # Community Issues 与 Claims
-├── events.jsonl         # task/agent/message telemetry
-├── runtime/             # 任务注册表、Workflow 定义、会话与运行状态
-│   ├── tasks.json       # Task Registry
-│   ├── workflows.json   # Workflow 定义及历史版本
-│   ├── runs/<id>/       # 执行 DAG、checkpoint 与产物
-│   └── sessions/        # 子代理会话文件
-└── shared/              # Message V2、文件锁与协作数据
-```
+Workflow 的命令/TUI 新建与直接 run 入口仍在当前开发规划中；已保存定义可通过工具执行或由 TUI 复用。
 
 ## 验证
 
 ```bash
-npm run verify                        # 类型检查 + 全部确定性回归（24 个测试文件，607 断言）
-npm run test:live                     # DeepSeek 全链路 smoke
-npm run test:live:history             # 同一会话两轮任务：自动继续与父任务关系
-npm run test:live:workflow-reuse      # 创建并精确复用已保存 Workflow
-npm run test:live:workflow-modify     # 修改得到 v2，保留 v1，再精确复用 v2
+npm run verify
+npm run typecheck
+npm run build
+npm run test:live:multirole
+npm run dogfood:restart
 ```
 
-Live 测试默认使用本机 `~/.pi/agent` 凭据与当前 pi 内置的 `octopus-completions` provider；通过 `AGENTFLUX_LIVE_*` 环境变量可指向任意 OpenAI/Anthropic 兼容端点（baseUrl、api、apiKey、模型、thinking、用例子集、provider id，详见 tests/live/）。多角色链路可运行 `npm run test:live:multirole`；外部 build→新 Pi→真实链路监督可运行 `npm run dogfood:restart`（仅显式 `--old-pid` 时停止旧 Pi）。CI 中由 `.github/workflows/live.yml` 在推送到 `main` 时触发，也支持手动触发；不再按计划定时运行。
+最近确定性基线为 609/609，production build 已通过。真实链路测试默认使用低成本模型、`thinking=off`、短提示和受限输入；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
-## 文档导航
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/26-implementation-status.md](docs/26-implementation-status.md) | 当前实现状态、测试证据与已知限制 |
-| [docs/33-workstyle-redesign.md](docs/33-workstyle-redesign.md) | 执行模型与空间互斥设计 |
-| [docs/31-live-test-report-2026-08-12.md](docs/31-live-test-report-2026-08-12.md) | 真实链路测试报告 |
-| [docs/32-code-review-2026-08-14.md](docs/32-code-review-2026-08-14.md) | 代码评审与修复记录 |
-| [docs/design-spec.md](docs/design-spec.md) 与 docs/00-overview.md | 设计与总览 |
+| [docs/00-product.md](docs/00-product.md) | 产品目标、范围和成功标准 |
+| [docs/01-architecture.md](docs/01-architecture.md) | 项目架构和不可违反的契约 |
+| [docs/development-plan/00-index.md](docs/development-plan/00-index.md) | 当前开发规划入口和规划规则 |
+| [docs/history-plans/](docs/history-plans/) | 已完成或被替代的历史规划 |
+
+开发规则见 `AGENTS.md`；续接事实见 `.codex/CONTINUATION.md`。
