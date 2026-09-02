@@ -261,21 +261,28 @@ async function main(): Promise<void> {
 			max_turns_per_task: 16,
 			max_input_tokens_per_task: 100_000,
 			max_parallel_agents: 1,
-			max_wall_clock_seconds: 30,
+			max_wall_clock_seconds: 240,
 		}, { qualityGate: true });
 		const propagationPrompt = [
 			"Use AgentFlux Workflow and do not perform the work directly in Main.",
-			"Create and execute a brand-new one-node implementer Workflow. The node must read the first line of README.md and respond with exactly PARENT_DEADLINE_PROPAGATION_NODE_OK. Set one acceptance criterion requiring that marker, then wait for the real quality gate and DAG result.",
-			"After the Workflow returns, output PARENT_DEADLINE_PROPAGATION_MAIN_OK only if its result is terminal (passed or timed_out); do not claim success from an unfinished run.",
+			"Create and execute a brand-new minimal Workflow. Override any generic planner guidance about creating 2-5 nodes: the generated DAG MUST contain exactly one node total, an implementer node, and no planner, reviewer, tester, or validation/waiting nodes. The quality gate is executed by AgentFlux after the node; do not model it as a DAG node.",
+			"The only node must read the first line of README.md and respond with exactly PARENT_DEADLINE_PROPAGATION_NODE_OK. Its acceptanceCriteria must contain exactly one output-check criterion requiring that marker. Do not put DAG-structure or quality-gate requirements into the node acceptance criteria.",
+			"Wait for the real quality gate and DAG result. After the Workflow returns, output PARENT_DEADLINE_PROPAGATION_MAIN_OK only if its result is terminal (passed or timed_out); do not claim success from an unfinished run.",
 		].join("\n");
 		writeFileSync(join(propagationRoot, "README.md"), "# Parent deadline propagation fixture\\n");
 		const propagationSnapshots: any[] = [];
-		propagationPi = launch(propagationRoot, join(propagationRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, propagationPrompt, 240_000);
-		const propagationResult = await waitForPi(propagationRoot, propagationPi, propagationSnapshots, 240_000);
+		propagationPi = launch(propagationRoot, join(propagationRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, propagationPrompt, 600_000);
+		const propagationResult = await waitForPi(propagationRoot, propagationPi, propagationSnapshots, 600_000);
 		const propagationRuns = readRuns(propagationRoot);
 		const propagationStore = readJson(join(propagationRoot, ".agentflux", "runtime", "tasks.json")) ?? { tasks: [], executions: [] };
 		const propagationTask = latestRun(propagationStore.tasks ?? [], task => task.resource?.type === "workflow");
 		const propagationExecution = propagationTask ? (propagationStore.executions ?? []).find((item: any) => item.id === propagationTask.executionId) : undefined;
+		const propagationDag = propagationTask?.executionId
+			? safeRead(join(propagationRoot, ".agentflux", "runtime", "runs", propagationTask.executionId, "dag.json"))
+			: undefined;
+		const propagationNodes = Array.isArray(propagationDag?.nodes) ? propagationDag.nodes : [];
+		const propagationSingleNode = propagationNodes.length === 1 && propagationNodes[0]?.role === "implementer"
+			&& Array.isArray(propagationNodes[0]?.acceptanceCriteria) && propagationNodes[0].acceptanceCriteria.length === 1;
 		const propagationParentDeadline = propagationTask?.deadlineAt ? Date.parse(propagationTask.deadlineAt) : NaN;
 		const propagationPhaseRuns = propagationRuns.filter(run => run.taskId === propagationTask?.id);
 		const propagationPlanner = propagationPhaseRuns.find(run => run.agent === "dag-planner");
@@ -286,10 +293,21 @@ async function main(): Promise<void> {
 		const propagationGate = (propagationCheckpoint?.taskResults ?? [])
 			.map((entry: any) => entry?.[1]?.gateResult)
 			.find((gate: any) => gate && Array.isArray(gate.criteriaResults));
+		const propagationGatePassed = propagationGate?.status === "passed"
+			&& propagationGate.passed === true
+			&& Array.isArray(propagationGate.criteriaResults)
+			&& propagationGate.criteriaResults.length > 0;
+		const propagationNodeIds = new Set(propagationNodeRuns.map(run => run.agent));
+		const propagationNodeCompleted = propagationNodeIds.size === 1
+			&& propagationNodeRuns.some(run => run.status === "completed" && (run.turns ?? 0) > 0)
+			&& propagationNodeRuns.every(run => !ACTIVE.has(run.status));
 		const propagationDeadlinesMatch = Number.isFinite(propagationParentDeadline)
+			&& propagationSingleNode
+			&& propagationNodeCompleted
 			&& propagationPhaseRuns.length > 0
 			&& propagationPhaseRuns.every(run => Date.parse(String(run.deadlineAt ?? "")) === propagationParentDeadline)
-			&& (!propagationGate || propagationGate.deadlineAt === propagationParentDeadline);
+			&& propagationGatePassed
+			&& propagationGate.deadlineAt === propagationParentDeadline;
 		const propagationMarker = propagationResult.stdout.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK") || propagationResult.stderr.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK");
 		const propagationTerminal = propagationTask && propagationExecution
 			&& ["completed", "failed", "cancelled", "timed_out"].includes(propagationTask.status)
@@ -303,6 +321,9 @@ async function main(): Promise<void> {
 			planner: propagationPlanner,
 			nodeRuns: propagationNodeRuns,
 			qualityGate: propagationGate,
+			dag: propagationDag ? { description: propagationDag.description, nodes: propagationNodes } : undefined,
+			singleImplementerNode: propagationSingleNode,
+			nodeCompleted: propagationNodeCompleted,
 			checkpoint: propagationCheckpoint ? { status: propagationCheckpoint.status, completed: propagationCheckpoint.completed, failed: propagationCheckpoint.failed } : undefined,
 			task: propagationTask,
 			execution: propagationExecution,
