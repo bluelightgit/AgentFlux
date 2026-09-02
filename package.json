@@ -60,6 +60,11 @@
     "test:live:p0-07-workflow-deadline": "tsx tests/live/test-p0-07-workflow-deadline.ts",
     "test:live:p0-07-fanout": "tsx tests/live/test-p0-07-fanout.ts",
     "test:live:p0-07-long": "tsx tests/live/test-p0-07-long-deadline.ts",
+    "test:live:p0-07-provider-overload": "tsx tests/live/test-p0-07-provider-overload.ts",
+    "test:live:p0-07-task-lineage": "tsx tests/live/test-p0-07-task-lineage.ts",
+    "test:live:p0-07-package-boundary": "tsx tests/live/test-p0-07-package-boundary.ts",
+    "test:live:p0-07-restart-recovery": "tsx tests/live/test-p0-07-restart-recovery.ts",
+    "test:live:p0-07-soak": "tsx tests/live/test-p0-07-soak.ts",
     "dogfood:restart": "tsx tests/live/test-dogfood-restart.ts",
     "verify": "npm run typecheck && npm run test:unit",
     "prepack": "npm run build"

@@ -18,7 +18,7 @@ import { loadPricing, type PricingTable } from "./core/pricing";
 import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
 import { resolvePathInsideExistingRoot } from "./core/safe-path";
 import { remainingDuration } from "./core/deadline";
-import { listAgentRuns, markAgentRunStopRequested, type AgentRunRecord } from "./core/run-registry";
+import { listAgentRuns, markAgentRunStopRequested, reconcileStaleAgentRuns, type AgentRunRecord } from "./core/run-registry";
 import { parseAgentFluxTaskEnvelope, type AgentFluxTaskEnvelope } from "./core/task-envelope";
 import { formatTasks, getTask, listTasks, registerTask, resolveTask, updateTaskMetadata, updateTaskStatus, type TaskStatus } from "./core/task-registry";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
@@ -568,7 +568,18 @@ export default function agentFlux(pi: ExtensionAPI) {
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
 		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig), mainModel: ctx.model?.id, mainProvider: ctx.model?.provider };
-		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.budget.max_iterations });
+		try {
+			const reconciled = reconcileStaleAgentRuns(fluxDir);
+			const activeAgentNames = new Set(listAgentRuns(fluxDir, { activeOnly: true }).map(run => run.agent));
+			for (const agent of listAgents(ctx.cwd, sessionId)) {
+				if (agent.status !== "running" || activeAgentNames.has(agent.name)) continue;
+				try { resetAgentStatus(ctx.cwd, agent.id, "idle", sessionId); } catch { /* stale Agent cleanup is best-effort */ }
+			}
+			if (reconciled.length > 0) notify(ctx, `Reconciled ${reconciled.length} stale Agent Run(s) after restart.`, "warning");
+		} catch (error) {
+			notify(ctx, `Run recovery unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`, "warning");
+		}
+		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.community_stall_threshold ?? 3 });
 		setDagLogSink(ctx.hasUI ? null : console.error);
 		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.hasUI ? undefined : ctx.model?.id); } catch {}
 		for (const warning of warnings) notify(ctx, warning, "warning");

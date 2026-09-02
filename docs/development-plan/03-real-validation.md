@@ -4,6 +4,15 @@
 
 本文件只记录需要 production dist、全新 Pi/Provider 或长时运行才能完成的验证任务。P2 不是实现完成后的末尾阶段：除 P2-05 长时 soak 外，各场景在对应 P0/P1 实现具备条件后立即执行，真实失败直接阻止该任务结项。
 
+## P0-07 独立审计补证（当前收口项）
+
+- **状态**：进行中
+- **背景**：P0-07 核心实现与首轮 production-dist 闭环已归档，但独立审计要求所有报告绑定同一当前提交，并补齐 provider overload/retry、Pi 重启/孤儿 Run、资源/包边界、真实 Task continue/retry 与长期 soak 证据后才能结项。
+- **验收**：每个报告记录精确 `sourceCommit`、`changedFiles`、profile/provider/model/thinking、build、PID、Task/Execution/Run 谱系、usage/cost、health、关键事件和失败原因；失败证据保留，不能以自然语言替代持久事实。
+- **当前补证入口**：`test:live:p0-07-provider-overload`（真实 503→planner retry）、`test:live:p0-07-restart-recovery`（双 Pi 强制退出→孤儿 Run 回收）、`test:live:p0-07-task-lineage`（真实 `flux_task` continue/retry）、`test:live:p0-07-package-boundary`（npm 包无源码且从解包 dist 启动）和 `test:live:p0-07-soak`（三轮 fresh Pi、Run/registry 边界）；此前 controls、fanout、long、workflow-deadline 报告也必须在同一最终提交重跑。
+- **实现补强**：Run Registry 在 runs.json 锁内维护按 Run 的父 usage reservation/聚合门禁；终态写入失败有界重试并保留业务结果；Main session_start 主动回收无存活 PID 的 stale Run 与孤儿 Agent。
+- **约束**：验证使用 `tests/live/live-test-config.json` 的 profile；测试代码不得绑定具体模型名称；工作区/进程门禁只作为 Host 策略，不声称 OS sandbox。
+
 ## P2-01 Production Workflow
 
 - **状态**：部分完成（P0-01/P0-04 核心链路已验证）

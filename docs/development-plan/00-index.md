@@ -32,7 +32,7 @@
 
 采用“可观察的最小闭环 → 可靠 Workflow → 执行语义/数据边界 → 长期验证”的纵向顺序，不再把所有真实验证推迟到最后：
 
-1. P0-01/P0-04、P0-05、P0-07 的确定性实现与 production-dist 核心闭环证据已完成并归档；当前补齐 P0-06 单一路径；Agent 在运行中可 inspect/steer/stop，以可选显式 deadline 取代固定总时长，并执行健康提示、消息背压和父 Task 聚合预算；
+1. P0-01/P0-04、P0-05、P0-07 的核心实现与首轮 production-dist 闭环已归档；P0-07 当前按独立审计补证项复核 provider/recovery、资源/包边界、谱系和 soak；同时补齐 P0-06 单一路径；Agent 在运行中可 inspect/steer/stop，以可选显式 deadline 取代固定总时长，并执行健康提示、消息背压和父 Task 聚合预算；
 2. 继续闭合 P0-02，形成跨空间可创建、可运行、可失败恢复且可核对的 Workflow；对应 P2 production 扩展场景随实现立即执行；
 3. P0-03 Community fail-closed 契约独立完成，不阻塞与 Community 无关的 P1-03、P1-04、P1-05、P1-06；
 4. P1 按显式依赖推进，P1-07 并行写隔离在核心谱系和空间 lease 稳定后实施；

@@ -50,6 +50,7 @@ import {
 	updateAgentRunHealth,
 	updateAgentRunSnapshot,
 	type AgentRunHealthUpdate,
+	type AgentRunParentBudget,
 	type AgentRunSnapshot,
 } from "../core/run-registry";
 import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
@@ -925,7 +926,10 @@ export async function runAgent(opts: {
 			provider: opts.provider ?? agent.provider,
 			kind: opts.persistent ? "persistent" : "ephemeral",
 			deadlineAt: deadline === undefined ? undefined : new Date(deadline).toISOString(),
-		}, { parentMaxParallel: opts.parentMaxParallel });
+		}, {
+			parentMaxParallel: opts.parentMaxParallel,
+			parentBudget: { maxCostUsd: opts.parentMaxCostUsd, maxTurns: opts.parentMaxTurns, maxInputTokens: opts.parentMaxInputTokens },
+		});
 	} catch (error) {
 		if (error instanceof Error && error.message.includes("parent concurrency budget exhausted")) {
 			return {
@@ -1031,9 +1035,18 @@ export async function runAgent(opts: {
 			console.error(`[flux run-registry] ${agent.name}/${processRunId} further ${operation} failures suppressed`);
 		}
 	};
+	let parentBudgetSnapshotError: string | undefined;
+	const parentBudget: AgentRunParentBudget = {
+		maxCostUsd: opts.parentMaxCostUsd,
+		maxTurns: opts.parentMaxTurns,
+		maxInputTokens: opts.parentMaxInputTokens,
+	};
 	const writeLiveSnapshot = (snapshot: AgentRunSnapshot): boolean => {
 		try {
-			updateSnapshotRun(fluxDir, processRunId, snapshot);
+			const record = updateSnapshotRun(fluxDir, processRunId, snapshot, parentBudget);
+			if (record.status === "stop_requested" && record.error?.includes("parent ")) {
+				parentBudgetSnapshotError = record.error;
+			}
 			return true;
 		} catch (error) {
 			// 在线遥测是 best-effort；不能把 Registry 故障伪装成业务错误或杀掉健康 child。
@@ -1488,6 +1501,10 @@ export async function runAgent(opts: {
 						const summary = typeof ev.error === "string" ? `${toolName} failed: ${ev.error}` : `${toolName} completed`;
 						activeRunSnapshot(result.usage, { phase: "running", lastActivityType: "tool_end", lastActivitySummary: summary, model, provider });
 					}
+					if (parentBudgetSnapshotError && forcedExitCode === null) {
+						result.errorMessage = parentBudgetSnapshotError;
+						requestTermination(75);
+					}
 				};
 
 				proc.stdout.on("data", (data) => {
@@ -1727,15 +1744,15 @@ export async function runAgent(opts: {
 	} else {
 		updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
 	}
-	finishRun(fluxDir, processRunId, {
+	const terminalInput = {
 		status: finalResult.exitCode === 0 && !finalResult.errorMessage
-			? "completed"
+			? "completed" as const
 			: finalResult.exitCode === 130
-				? "cancelled"
+				? "cancelled" as const
 				: finalResult.exitCode === 124
-					? "timed_out"
-					: "failed",
-		phase: "terminal",
+					? "timed_out" as const
+					: "failed" as const,
+		phase: "terminal" as const,
 		turns: aggregateUsage.turns,
 		input: aggregateUsage.input,
 		output: aggregateUsage.output,
@@ -1749,7 +1766,23 @@ export async function runAgent(opts: {
 		modelError,
 		providerError,
 		error: finalResult.errorMessage,
-	});
+	};
+	let terminalized = false;
+	for (let attempt = 0; attempt < 3 && !terminalized; attempt++) {
+		try {
+			finishRun(fluxDir, processRunId, terminalInput);
+			terminalized = true;
+		} catch (error) {
+			reportRegistryFailure("terminal convergence", error);
+			if (attempt < 2) {
+				const waiter = new Int32Array(new SharedArrayBuffer(4));
+				Atomics.wait(waiter, 0, 0, Math.min(250, 25 * 2 ** attempt));
+			}
+		}
+	}
+	if (!terminalized) {
+		console.error(`[flux run-registry] ${agent.name}/${processRunId} terminal convergence unavailable; business result preserved as ${terminalInput.status}`);
+	}
 	clearAgentRunStop(cwd, processRunId);
 
 	// 文件锁: 释放所有锁

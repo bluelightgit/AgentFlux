@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readJsonStore, updateJsonStore } from "./json-store";
 import { assertSafeOpaqueId } from "./safe-path";
 import { isProcessAlive } from "./fs-lock";
+import { getTaskExecution } from "./task-registry";
 import type { AgentRunHealth } from "./run-health";
 export type { AgentRunHealth } from "./run-health";
 
@@ -98,6 +99,12 @@ export interface AgentRunRecord {
  * 在线遥测采用绝对快照，不接受增量。调用方必须提供完整 usage counters，
  * Registry 会在同一文件锁/原子替换事务内校验并写入。
  */
+export interface AgentRunParentBudget {
+	maxCostUsd?: number;
+	maxTurns?: number;
+	maxInputTokens?: number;
+}
+
 export interface AgentRunSnapshot {
 	phase: AgentRunPhase;
 	turns: number;
@@ -128,16 +135,27 @@ export interface AgentRunSnapshot {
 	repeatActionWindowStartedAt?: string | null;
 }
 
+interface AgentRunBudgetReservation {
+	runId: string;
+	taskId: string;
+	costUsd: number;
+	turns: number;
+	input: number;
+	updatedAt: string;
+}
+
 interface AgentRunStore {
 	version: 1;
 	runs: AgentRunRecord[];
+	/** Per-Run observed-usage reservations, retained for atomic parent aggregation. */
+	reservations?: AgentRunBudgetReservation[];
 }
 
 const TERMINAL = new Set<AgentRunStatus>(["completed", "failed", "cancelled", "timed_out"]);
 const ACTIVE = new Set<AgentRunStatus>(["starting", "running", "stop_requested"]);
 const USAGE_FIELDS = ["turns", "input", "output", "cacheRead", "cacheWrite", "contextTokens", "costUsd"] as const;
 
-const createStore = (): AgentRunStore => ({ version: 1, runs: [] });
+const createStore = (): AgentRunStore => ({ version: 1, runs: [], reservations: [] });
 const isStatus = (value: unknown): value is AgentRunStatus =>
 	value === "starting" || value === "running" || value === "stop_requested"
 	|| value === "completed" || value === "failed" || value === "cancelled" || value === "timed_out";
@@ -163,12 +181,24 @@ const isRunShape = (value: unknown): value is AgentRunRecord => {
 	}
 	return true;
 };
-const isStore = (value: unknown): value is AgentRunStore =>
-	!!value
-	&& typeof value === "object"
-	&& (value as AgentRunStore).version === 1
-	&& Array.isArray((value as AgentRunStore).runs)
-	&& (value as AgentRunStore).runs.every(isRunShape);
+const isReservationShape = (value: unknown): value is AgentRunBudgetReservation => {
+	if (!value || typeof value !== "object") return false;
+	const reservation = value as Record<string, unknown>;
+	return typeof reservation.runId === "string" && reservation.runId.length > 0
+		&& typeof reservation.taskId === "string" && reservation.taskId.length > 0
+		&& isNonNegativeFiniteOrMissing(reservation.costUsd)
+		&& isNonNegativeFiniteOrMissing(reservation.turns)
+		&& isNonNegativeFiniteOrMissing(reservation.input)
+		&& typeof reservation.updatedAt === "string";
+};
+const isStore = (value: unknown): value is AgentRunStore => {
+	if (!value || typeof value !== "object") return false;
+	const store = value as AgentRunStore;
+	return store.version === 1
+		&& Array.isArray(store.runs)
+		&& store.runs.every(isRunShape)
+		&& (store.reservations === undefined || (Array.isArray(store.reservations) && store.reservations.every(isReservationShape)));
+};
 
 function registryPath(fluxDir: string): string {
 	return join(fluxDir, "runtime", "runs.json");
@@ -371,14 +401,14 @@ function applyAbsoluteSnapshot(run: AgentRunRecord, snapshot: AgentRunSnapshot, 
 function updateRun(
 	fluxDir: string,
 	runId: string,
-	update: (run: AgentRunRecord, now: string) => void,
+	update: (run: AgentRunRecord, now: string, store: AgentRunStore) => void,
 ): AgentRunRecord {
 	assertSafeOpaqueId(runId, "runId");
 	return updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
 		const run = store.runs.find(item => item.id === runId);
 		if (!run) throw new Error(`Agent run not found: ${runId}`);
 		const now = new Date().toISOString();
-		update(run, now);
+		update(run, now, store);
 		run.updatedAt = now;
 		return structuredClone(normalizeRunRecord(run));
 	});
@@ -387,6 +417,8 @@ function updateRun(
 export interface AgentRunRegistrationLimits {
 	/** 在同一个 parent task 下原子限制 active Run 数，避免 check-then-register 竞态。 */
 	parentMaxParallel?: number;
+	/** 注册 parent usage reservation，后续绝对快照在同一锁内更新 reservation。 */
+	parentBudget?: AgentRunParentBudget;
 }
 
 export function registerAgentRun(
@@ -440,6 +472,9 @@ export function registerAgentRun(
 			heartbeatAt: now,
 		};
 		store.runs.push(record);
+		if (input.taskId && hasParentBudget(limits.parentBudget)) {
+			ensureReservations(store).push({ runId: id, taskId: input.taskId, costUsd: 0, turns: 0, input: 0, updatedAt: now });
+		}
 		return structuredClone(record);
 	});
 }
@@ -476,12 +511,106 @@ export function markAgentRunRunning(
 	});
 }
 
-/** 原子写入一个 active Run 的完整在线快照；terminal Run 一律拒绝。 */
-export function updateAgentRunSnapshot(fluxDir: string, runId: string, snapshot: AgentRunSnapshot): AgentRunRecord {
-	return updateRun(fluxDir, runId, (run, now) => {
+/**
+ * 在同一个 runs.json 更新锁内计算父 Task 聚合预算并写入在线快照。
+ *
+ * 先前 runner 的“写快照→再 listAgentRuns 检查”存在 check-then-act 窗口：
+ * 两个并发 child 都可能先完成一次 provider 调用，再同时看到旧聚合值。
+ * 这里把候选绝对快照和聚合检查放进同一事务；若候选值使父预算耗尽，
+ * 仍保留真实 usage，并把当前 Run 标记为 stop_requested，交给 runner 终止，
+ * 从而不丢失超限前最后一份事实，也不把它伪装成成功。
+ */
+export function updateAgentRunSnapshot(
+	fluxDir: string,
+	runId: string,
+	snapshot: AgentRunSnapshot,
+	parentBudget: AgentRunParentBudget = {},
+): AgentRunRecord {
+	return updateRun(fluxDir, runId, (run, now, store) => {
 		if (!ACTIVE.has(run.status)) throw new Error(`Terminal Agent run cannot receive online updates: ${runId} is ${run.status}`);
 		applyAbsoluteSnapshot(run, snapshot, now);
+		const limits = [parentBudget.maxCostUsd, parentBudget.maxTurns, parentBudget.maxInputTokens];
+		if (limits.every(value => value === undefined)) return;
+		const invalidLimit = parentBudget.maxCostUsd !== undefined
+			&& (!Number.isFinite(parentBudget.maxCostUsd) || parentBudget.maxCostUsd <= 0)
+			? "parent maxCostUsd must be a finite positive number"
+			: parentBudget.maxTurns !== undefined
+				&& (!Number.isInteger(parentBudget.maxTurns) || parentBudget.maxTurns < 1)
+				? "parent maxTurns must be a positive integer"
+				: parentBudget.maxInputTokens !== undefined
+					&& (!Number.isInteger(parentBudget.maxInputTokens) || parentBudget.maxInputTokens < 1)
+					? "parent maxInputTokens must be a positive integer"
+					: undefined;
+		if (invalidLimit) {
+			markRunParentBudgetExhausted(run, invalidLimit, now);
+			return;
+		}
+		if (!run.taskId) return;
+		const executionUsage = run.executionId ? getTaskExecution(fluxDir, run.executionId)?.usage : undefined;
+		syncBudgetReservation(store, run, now);
+		const totals = storeRunUsageForTask(run, store, executionUsage);
+		const exceeded = parentBudget.maxCostUsd !== undefined && totals.cost >= parentBudget.maxCostUsd
+			? `parent task budget exhausted: $${totals.cost.toFixed(6)} >= $${parentBudget.maxCostUsd.toFixed(6)}`
+			: parentBudget.maxTurns !== undefined && totals.turns >= parentBudget.maxTurns
+				? `parent task turn budget exhausted: ${totals.turns} >= ${parentBudget.maxTurns}`
+				: parentBudget.maxInputTokens !== undefined && totals.input >= parentBudget.maxInputTokens
+					? `parent task input budget exhausted: ${totals.input} >= ${parentBudget.maxInputTokens}`
+					: undefined;
+		if (exceeded) markRunParentBudgetExhausted(run, exceeded, now);
 	});
+}
+
+function hasParentBudget(parentBudget: AgentRunParentBudget | undefined): boolean {
+	return parentBudget !== undefined
+		&& [parentBudget.maxCostUsd, parentBudget.maxTurns, parentBudget.maxInputTokens].some(value => value !== undefined);
+}
+
+function ensureReservations(store: AgentRunStore): AgentRunBudgetReservation[] {
+	store.reservations ??= [];
+	return store.reservations;
+}
+
+function syncBudgetReservation(store: AgentRunStore, run: AgentRunRecord, now: string): void {
+	if (!run.taskId) return;
+	const reservations = ensureReservations(store);
+	const reservation = reservations.find(item => item.runId === run.id);
+	if (reservation) {
+		reservation.costUsd = Number.isFinite(run.costUsd) ? run.costUsd : 0;
+		reservation.turns = Number.isFinite(run.turns) ? run.turns : 0;
+		reservation.input = Number.isFinite(run.input) ? run.input : 0;
+		reservation.updatedAt = now;
+	}
+}
+
+function storeRunUsageForTask(
+	current: AgentRunRecord,
+	store: AgentRunStore,
+	executionUsage?: { input: number; costUsd: number },
+): { cost: number; turns: number; input: number } {
+	const reservations = new Map(ensureReservations(store).filter(item => item.taskId === current.taskId).map(item => [item.runId, item]));
+	const totals = store.runs
+		.filter(run => run.taskId === current.taskId)
+		.reduce((sum, run) => {
+			const reservation = reservations.get(run.id);
+			return {
+				cost: sum.cost + (reservation ? reservation.costUsd : Number.isFinite(run.costUsd) ? run.costUsd : 0),
+				turns: sum.turns + (reservation ? reservation.turns : Number.isFinite(run.turns) ? run.turns : 0),
+				input: sum.input + (reservation ? reservation.input : Number.isFinite(run.input) ? run.input : 0),
+			};
+		}, { cost: executionUsage?.costUsd ?? 0, turns: 0, input: executionUsage?.input ?? 0 });
+	return totals;
+}
+
+function markRunParentBudgetExhausted(run: AgentRunRecord, reason: string, now: string): void {
+	if (TERMINAL.has(run.status)) return;
+	run.status = "stop_requested";
+	run.phase = "stopping";
+	run.error = reason;
+	run.lastActivityAt = now;
+	run.lastActivityType = "parent_budget_exhausted";
+	run.lastActivitySummary = reason;
+	appendRecentRunEvent(run, { at: now, type: "parent_budget_exhausted", phase: "stopping", summary: reason });
+	run.heartbeatAt = now;
 }
 
 /** 语义别名：调用方可按“在线进度”理解绝对快照 API。 */
@@ -575,7 +704,7 @@ export function finishAgentRun(
 	runId: string,
 	input: FinishAgentRunInput,
 ): AgentRunRecord {
-	return updateRun(fluxDir, runId, (run, now) => {
+	return updateRun(fluxDir, runId, (run, now, store) => {
 		if (TERMINAL.has(run.status)) {
 			throw new Error(`Historical Agent run is immutable: ${runId} is ${run.status}`);
 		}
@@ -600,6 +729,7 @@ export function finishAgentRun(
 			providerError: input.providerError,
 		};
 		applyAbsoluteSnapshot(run, snapshot, now);
+		syncBudgetReservation(store, run, now);
 		run.status = input.status;
 		run.phase = "terminal";
 		run.error = input.error;
@@ -651,6 +781,7 @@ export function reconcileStaleAgentRuns(
 			run.lastActivityAt = timestamp;
 			run.lastActivityType = "heartbeat_expired";
 			run.lastActivitySummary = run.error;
+			appendRecentRunEvent(run, { at: timestamp, type: "heartbeat_expired", phase: "terminal", summary: run.error });
 			run.updatedAt = timestamp;
 			run.heartbeatAt = timestamp;
 			run.finishedAt = timestamp;

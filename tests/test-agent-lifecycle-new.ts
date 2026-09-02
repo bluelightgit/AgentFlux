@@ -28,6 +28,22 @@ async function main(): Promise<void> {
 		const result = await runAgent({ cwd: root, agent: { ...template, name: record.name }, task: "short task", sessionId: "test", telemetry, prefixLayout: true, persistent: false, invocationOverride });
 		finishEphemeralRecord(record, result.exitCode, result.usage.cost, telemetry, "test");
 		check(result.exitCode === 0 && record.status === "done" && record.callCount === 1, "单次运行后进入终态");
+		let terminalFinishAttempts = 0;
+		const terminalConvergenceRunId = "terminal-convergence-run";
+		const terminalConvergence = await runAgent({
+			cwd: root, agent: { ...template, name: "terminal-convergence" }, task: "preserve business result",
+			sessionId: "test", prefixLayout: true, persistent: false, runId: terminalConvergenceRunId, invocationOverride,
+			runRegistry: {
+				finish: (fluxDir, runId, input) => {
+					terminalFinishAttempts++;
+					if (terminalFinishAttempts < 3) throw new Error("injected terminal write failure");
+					return finishAgentRun(fluxDir, runId, input);
+				},
+			},
+		});
+		check(terminalFinishAttempts === 3 && terminalConvergence.exitCode === 0 && !terminalConvergence.errorMessage
+			&& getAgentRun(join(root, ".agentflux"), terminalConvergenceRunId)?.status === "completed",
+		"terminal Registry 短暂写失败时重试并保留业务成功结果");
 		// 运行过程实时回调：mock CLI 的 message_end 文本块应实时上报
 		const progressEvents: Array<{ type: string; text: string }> = [];
 		await runAgent({ cwd: root, agent: { ...template, name: "progress-watch" }, task: "progress", sessionId: "test", prefixLayout: true, persistent: false, invocationOverride, onProgress: event => progressEvents.push(event) });
@@ -124,6 +140,33 @@ async function main(): Promise<void> {
 		const concurrencyC = runAgent({ ...parentConcurrencyBase, agent: { ...template, name: "parent-concurrency-c" }, task: "concurrency c" });
 		const concurrencyResults = await Promise.all([concurrencyA, concurrencyB, concurrencyC]);
 		check(concurrencyResults.filter(result => result.exitCode === 75 && result.errorMessage?.includes("parent concurrency")).length === 1, "父 Task 并发预算拒绝超出 active Run 的新 child");
+
+		// 聚合 usage 检查必须和绝对快照在同一 Registry 锁内完成，避免两个 child
+		// 同时完成 message_end 时都先通过旧聚合值检查。
+		const atomicBudgetFluxDir = join(root, "atomic-parent-budget");
+		for (const id of ["atomic-budget-a", "atomic-budget-b"]) {
+			registerAgentRun(atomicBudgetFluxDir, {
+				id, taskId: "atomic-budget-task", executionId: "atomic-budget-execution", sessionId: "test",
+				agent: id, role: "implementer", currentTask: "atomic aggregate budget", kind: "ephemeral",
+			}, { parentBudget: { maxCostUsd: 0.02, maxTurns: 3, maxInputTokens: 20 } });
+			markAgentRunRunning(atomicBudgetFluxDir, id, process.pid, 1);
+		}
+		const atomicSnapshot = {
+			phase: "running" as const, turns: 1, input: 10, output: 1, cacheRead: 0, cacheWrite: 0,
+			contextTokens: 11, costUsd: 0.012, lastActivityAt: new Date().toISOString(),
+			lastActivityType: "message_end", lastActivitySummary: "atomic usage",
+		};
+		const atomicFirst = updateAgentRunSnapshot(atomicBudgetFluxDir, "atomic-budget-a", atomicSnapshot, { maxCostUsd: 0.02, maxTurns: 3, maxInputTokens: 20 });
+		const atomicSecond = updateAgentRunSnapshot(atomicBudgetFluxDir, "atomic-budget-b", atomicSnapshot, { maxCostUsd: 0.02, maxTurns: 3, maxInputTokens: 20 });
+		const atomicStore = JSON.parse(readFileSync(join(atomicBudgetFluxDir, "runtime", "runs.json"), "utf8"));
+		check(atomicFirst.status === "running" && atomicSecond.status === "stop_requested"
+			&& atomicSecond.error?.includes("parent task budget") === true
+			&& getAgentRun(atomicBudgetFluxDir, "atomic-budget-b")?.costUsd === 0.012
+			&& atomicStore.reservations?.length === 2
+			&& atomicStore.reservations.every((reservation: any) => reservation.taskId === "atomic-budget-task"),
+		"父 Task 成本/usage 聚合检查与快照原子执行并保留超限前最后事实");
+		finishAgentRun(atomicBudgetFluxDir, "atomic-budget-a", { status: "completed", ...atomicSnapshot });
+		finishAgentRun(atomicBudgetFluxDir, "atomic-budget-b", { status: "failed", ...atomicSnapshot, error: atomicSecond.error });
 
 		// heartbeat 写失败只产生有界诊断；不能污染业务 error 或终止健康 child。
 		let heartbeatAttempts = 0;
