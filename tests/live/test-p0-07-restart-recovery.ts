@@ -159,6 +159,7 @@ async function main(): Promise<void> {
 	let recoveryResult: PiResult | undefined;
 	let mainTermination: ProcessTerminationEvidence | undefined;
 	let runTermination: ProcessTerminationEvidence | undefined;
+	let orphan: any;
 	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	try {
 		mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
@@ -181,19 +182,25 @@ async function main(): Promise<void> {
 			"1) action=create，name=restart-live，role=implementer，scope=project。",
 			"2) action=run，agent=restart-live，background=false，task=必须调用 bash 执行 node -e \"setTimeout(() => {}, 120000)\"，保持运行，不要提前结束。",
 		].join("\n"), 150_000);
-		let orphan: any;
 		const activeDeadline = Date.now() + 75_000;
 		while (Date.now() < activeDeadline) {
 			const runs = readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"))?.runs ?? [];
-			orphan = runs.find((run: any) => run.agent === "restart-live" && ACTIVE.has(run.status) && run.pid && run.phase !== "starting");
+			orphan = runs.find((run: any) => {
+				const longToolStarted = run.recentEvents?.some((event: any) =>
+					event.type === "tool_start" && String(event.summary ?? "").includes("120000"));
+				return run.agent === "restart-live" && ACTIVE.has(run.status) && run.pid && run.phase !== "starting" && longToolStarted;
+			});
 			if (orphan) break;
 			await sleep(250);
 		}
-		if (!orphan) throw new Error("restart fixture did not expose an active persistent Run");
+		if (!orphan) throw new Error("restart fixture did not expose an active persistent Run executing the expected long tool");
 		const orphanRunId = orphan.id;
 		const firstPid = first.child.pid;
 		const orphanPid = typeof orphan.pid === "number" ? orphan.pid : undefined;
-		if (!isProcessAlive(firstPid) || !isProcessAlive(orphanPid)) {
+		const orphanLongToolStarted = Boolean(orphan.recentEvents?.some((event: any) =>
+			event.type === "tool_start" && String(event.summary ?? "").includes("120000")));
+		const orphanAliveBeforeKill = isProcessAlive(orphanPid);
+		if (!isProcessAlive(firstPid) || !orphanAliveBeforeKill) {
 			throw new Error(`restart fixture lost the live Pi/Run before kill: mainPid=${firstPid} runPid=${orphanPid}`);
 		}
 		// Kill Pi A without /T first so its child Run remains an orphan long enough
@@ -240,10 +247,12 @@ async function main(): Promise<void> {
 			&& recoveredExecution?.status === "failed"
 			&& recoveredExecution?.outcome?.error === recoveredRun.error;
 		const passed = Boolean(orphanRunId)
+			&& orphanLongToolStarted
+			&& orphanAliveBeforeKill
 			&& ACTIVE.has(beforeRecovery?.status)
 			&& beforeRecovery?.pid === orphanPid
 			&& mainTermination?.aliveBefore === true && mainTermination.terminated
-			&& runTermination?.terminated === true
+			&& runTermination?.aliveBefore === true && runTermination.terminated === true
 			&& firstResult.status !== 124 && !firstResult.timedOut
 			&& recoveryResult.status === 0 && !recoveryResult.timedOut && marker && recovered;
 		const evidence = {
@@ -260,6 +269,7 @@ async function main(): Promise<void> {
 			wallClockMs: Date.now() - startedAt,
 			firstPi: { pid: first.child.pid, exitCode: firstResult.status, signal: firstResult.signal, timedOut: firstResult.timedOut, stdoutTail: firstResult.stdout.slice(-5000), stderrTail: firstResult.stderr.slice(-3000), processTreeTermination: mainTermination, childRunTermination: runTermination },
 			recoveryPi: { pid: recoveryResult.status === 0 ? recovery.child.pid : recovery.child.pid, exitCode: recoveryResult.status, signal: recoveryResult.signal, timedOut: recoveryResult.timedOut, marker, stdoutTail: recoveryResult.stdout.slice(-5000), stderrTail: recoveryResult.stderr.slice(-3000) },
+			orphanReadyForKill: { runId: orphanRunId, pid: orphanPid, longToolStarted: orphanLongToolStarted, aliveBeforeKill: orphanAliveBeforeKill, recentEvents: orphan.recentEvents?.slice(-5) },
 			orphanBeforeRecovery: beforeRecovery,
 			recoveredRun,
 			recoveredAgent,
@@ -291,6 +301,7 @@ async function main(): Promise<void> {
 			wallClockMs: Date.now() - startedAt,
 			firstPi: firstResult ? { pid: first?.child.pid, exitCode: firstResult.status, signal: firstResult.signal, timedOut: firstResult.timedOut, stdoutTail: firstResult.stdout.slice(-5000), stderrTail: firstResult.stderr.slice(-3000) } : { pid: first?.child.pid },
 			recoveryPi: recoveryResult ? { pid: recovery?.child.pid, exitCode: recoveryResult.status, signal: recoveryResult.signal, timedOut: recoveryResult.timedOut } : undefined,
+			orphanReadyForKill: orphan ? { runId: orphan.id, pid: orphan.pid, longToolStarted: Boolean(orphan.recentEvents?.some((event: any) => event.type === "tool_start" && String(event.summary ?? "").includes("120000"))), aliveBeforeKill: isProcessAlive(typeof orphan.pid === "number" ? orphan.pid : undefined), recentEvents: orphan.recentEvents?.slice(-5) } : undefined,
 			processTreeTermination: mainTermination,
 			childRunTermination: runTermination,
 			passed: false,
