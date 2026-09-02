@@ -192,7 +192,10 @@ async function main(): Promise<void> {
 		setupFixture(workflowRoot, config, {
 			max_cost_per_task: 1,
 			max_iterations: 4,
-			max_turns_per_task: 16,
+			// The real planner may need several bounded turns to inspect its runtime
+			// contract before returning the intentionally minimal one-node DAG. Keep
+			// this finite, but leave room for the node and quality-gate child runs.
+			max_turns_per_task: 32,
 			max_input_tokens_per_task: 100_000,
 			max_parallel_agents: 2,
 			max_wall_clock_seconds: null,
