@@ -73,7 +73,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-最近 `npm run verify`、typecheck 和 production build 均通过；P0-05/P0-07 及 Workflow planner/quality-gate/deadline 的 production-dist 报告位于 `.agentflux/test-results/`（telemetry、controls、workflow-deadline、fanout、long-run、provider-overload、restart-recovery、task-lineage、package-boundary、soak）。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+最近 `npm run verify`、typecheck 和 production build 均通过；P0-05/P0-07 及 Workflow planner/quality-gate/deadline 的 production-dist 报告位于 `.agentflux/test-results/`（telemetry、controls、workflow-deadline、fanout、long-run、provider-overload、restart-recovery、task-lineage、package-boundary、bound-resume、soak）。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 

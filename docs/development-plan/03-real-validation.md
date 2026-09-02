@@ -6,10 +6,10 @@
 
 ## P0-07 独立审计补证（当前收口项）
 
-- **状态**：进行中
-- **背景**：P0-07 核心实现与首轮 production-dist 闭环已归档，但独立审计要求所有报告绑定同一当前提交，并补齐 provider overload/retry、Pi 重启/孤儿 Run、资源/包边界、真实 Task continue/retry 与长期 soak 证据后才能结项。
+- **状态**：证据已完成，待独立审计
+- **背景**：P0-07 核心实现与首轮 production-dist 闭环已归档；独立审计要求的同一当前提交、provider overload/retry、Pi 重启/孤儿 Run、资源/包边界、绑定 Agent、checkpoint resume、真实 Task continue/retry 与长期 soak 证据现已齐备，仍须由独立 auditor 复核后结项。
 - **验收**：每个报告记录精确 `sourceCommit`、`changedFiles`、profile/provider/model/thinking、build、PID、Task/Execution/Run 谱系、usage/cost、health、关键事件和失败原因；失败证据保留，不能以自然语言替代持久事实。
-- **当前补证入口**：`test:live:p0-07-provider-overload`（真实 503→planner retry）、`test:live:p0-07-restart-recovery`（双 Pi 强制退出→孤儿 Run 回收）、`test:live:p0-07-task-lineage`（真实 `flux_task` continue/retry）、`test:live:p0-07-package-boundary`（npm 包无源码且从解包 dist 启动）、`test:live:p0-07-bound-resume`（绑定 Agent shared/fresh 与真实 checkpoint resume）和 `test:live:p0-07-soak`（三轮 fresh Pi、Run/registry 边界）；此前 controls、fanout、long、workflow-deadline 报告也必须在同一最终提交重跑。
+- **当前补证入口**：`test:live:p0-07-provider-overload`（真实 503→planner retry）、`test:live:p0-07-restart-recovery`（双 Pi 强制退出→孤儿 Run 回收）、`test:live:p0-07-task-lineage`（真实 `flux_task` continue/retry）、`test:live:p0-07-package-boundary`（npm 包无源码且从解包 dist 启动）、`test:live:p0-07-bound-resume`（绑定 Agent shared/fresh 与真实 checkpoint resume）和 `test:live:p0-07-soak`（三轮 fresh Pi、Run/registry 边界）；controls、fanout、long、workflow-deadline 及 telemetry 报告已在当前最终提交重跑并通过。
 - **实现补强**：Run Registry 在 runs.json 锁内维护按 Run 的父 usage reservation/聚合门禁；终态写入失败有界重试并保留业务结果；Main session_start 主动回收无存活 PID 的 stale Run 与孤儿 Agent。
 - **约束**：验证使用 `tests/live/live-test-config.json` 的 profile；测试代码不得绑定具体模型名称；工作区/进程门禁只作为 Host 策略，不声称 OS sandbox。
 
@@ -18,7 +18,7 @@
 - **状态**：部分完成（P0-01/P0-04 核心链路已验证）
 - **范围**：动态角色、绑定 Agent、同一 Agent 多角色、`shared/fresh`、依赖/并行、planner 在线阶段/健康、显式 deadline、质量门、重试、取消和 checkpoint resume。
 - **已验证**：`.agentflux/test-results/p0-07-workflow-deadline-latest.json` 覆盖本轮 dist 的 Main→真实 planner→DAG implementer→真实 quality gate→Task/Execution/checkpoint terminal，以及独立 Pi 的显式 deadline timeout；P0-07 controls/fan-out/long reports 另覆盖 control、parallel 和 no-deadline 长运行。
-- **剩余**：并行写隔离和 Community/Message V2 真实流程仍按 P2-02/P2-05 独立推进；绑定 Agent 的 shared/fresh、真实 checkpoint resume 与 continue/retry 由 P0-07 补证入口覆盖。
+- **剩余**：并行写隔离和 Community/Message V2 真实流程仍按 P2-02/P2-05 独立推进；绑定 Agent 的 shared/fresh、真实 checkpoint resume 与 continue/retry 已由当前 P0-07 补证报告覆盖。
 - **验收**：全新 Pi 加载本轮 `dist/extension/entry.js` 与 `dist/extension/subagent-entry.js`；运行中可读到 planner/节点的非零进度、成本、liveness/progress 与 health；无显式 deadline 不会被固定时长终止，显式 deadline 精确收敛；Task、Execution、Run、Workflow、成本和失败原因一致。
 
 ## P2-02 Community 与 Message V2
@@ -31,19 +31,19 @@
 
 - **状态**：部分完成（P0-05/P0-07 核心链路已验证）
 - **范围**：在已归档的 P0-05 在线遥测与显式 model failure 恢复基线上，继续验证真实 provider overload、无进展和疑似循环提示、部分成功、stop/steer/retry、显式 deadline、进程树清理、Pi 重启和孤儿回收。2026-09-02 的 production-dist telemetry/recovery 已覆盖非零在线 usage/cost、health/tool phase、heartbeat、终态一致性和 unavailable model recovery；P0-07 的双 Pi 控制、四 Agent fan-out、超过旧 600 秒的无 deadline 长时，以及 `p0-07-workflow-deadline-latest.json` 的显式 deadline timeout 已分别由对应报告覆盖。
-- **剩余**：provider overload 下的真实 planner retry、Pi 重启/孤儿回收和长时资源边界仍需独立验证。
+- **剩余**：P0-07 补证已覆盖真实 provider overload/retry 与 Pi 重启/孤儿回收；更广的资源容量、进程树和并行写隔离仍按 P1/P2 规划推进。
 - **验收**：真实 overload、长等待、取消和恢复期间持续看到 liveness、progress、health、成本与具体 provider 错误；告警不误写终态，部分结果、新 Run 谱系和进程终止证据完整。
 
 ## P2-04 真实 Task continue/retry
 
-- **状态**：部分完成
+- **状态**：已验证（待 P0-07 独立审计总复核）
 - **范围**：外部 dogfood 监督器和 live fixture 实际调用 `flux_task` continue/retry，而不是只写 operation 字段。
 - **验收**：新 Task/Execution 的 parentTaskId/parentExecutionId 正确；请求 operation 与实际一致；历史不变。
 
 ## P2-05 长时运行与发布包
 
-- **状态**：部分完成（P0-07 长时、fan-out、显式 deadline 已覆盖）
-- **范围**：多轮会话、超过旧 600 秒限制的无 deadline Run、并行 fan-out 聚合预算、健康告警、cache、在线/终态成本一致性、GC、registry 增长、Windows 进程树、并行写隔离、无源码 npm 包和明确 PID 停止。P0-07 的长时与 fan-out 先行证据分别见 `.agentflux/test-results/p0-07-long-latest.json` 和 `.agentflux/test-results/p0-07-fanout-latest.json`，显式短 deadline 证据见 `.agentflux/test-results/p0-07-workflow-deadline-latest.json`；本项仍需长期 soak、资源/包和并行写隔离验收。
+- **状态**：部分完成（P0-07 长时、fan-out、显式 deadline、package 和三轮 soak 已覆盖）
+- **范围**：多轮会话、超过旧 600 秒限制的无 deadline Run、并行 fan-out 聚合预算、健康告警、cache、在线/终态成本一致性、GC、registry 增长、Windows 进程树、并行写隔离、无源码 npm 包和明确 PID 停止。当前证据见 `.agentflux/test-results/p0-07-long-latest.json`、`p0-07-fanout-latest.json`、`p0-07-workflow-deadline-latest.json`、`p0-07-package-boundary-latest.json` 和 `p0-07-soak-latest.json`；本项仍需 P1-07 并行写隔离及更广资源容量验收。
 - **验收**：至少一个全新 production Pi Run 在无显式 deadline 下持续超过旧 600 秒并正常完成，期间 waiting/stall/context 等 health 只提示不终止；另以显式短 deadline 验证 `timed_out`；父 Task 聚合预算可强制停止新模型调用且保留部分结果；资源增长受边界约束；新 Pi 加载正确 dist；报告含 iteration、commit、模型、thinking、成本、PID、status/health、关键进展和失败原因。
 
 ## 真实验证统一要求
