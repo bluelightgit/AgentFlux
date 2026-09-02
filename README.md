@@ -67,6 +67,7 @@ AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-restart-recovery
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-task-lineage
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-package-boundary
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-soak
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-bound-resume
 npm run dogfood:restart
 ```
 

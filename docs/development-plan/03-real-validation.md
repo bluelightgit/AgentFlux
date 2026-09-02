@@ -9,7 +9,7 @@
 - **状态**：进行中
 - **背景**：P0-07 核心实现与首轮 production-dist 闭环已归档，但独立审计要求所有报告绑定同一当前提交，并补齐 provider overload/retry、Pi 重启/孤儿 Run、资源/包边界、真实 Task continue/retry 与长期 soak 证据后才能结项。
 - **验收**：每个报告记录精确 `sourceCommit`、`changedFiles`、profile/provider/model/thinking、build、PID、Task/Execution/Run 谱系、usage/cost、health、关键事件和失败原因；失败证据保留，不能以自然语言替代持久事实。
-- **当前补证入口**：`test:live:p0-07-provider-overload`（真实 503→planner retry）、`test:live:p0-07-restart-recovery`（双 Pi 强制退出→孤儿 Run 回收）、`test:live:p0-07-task-lineage`（真实 `flux_task` continue/retry）、`test:live:p0-07-package-boundary`（npm 包无源码且从解包 dist 启动）和 `test:live:p0-07-soak`（三轮 fresh Pi、Run/registry 边界）；此前 controls、fanout、long、workflow-deadline 报告也必须在同一最终提交重跑。
+- **当前补证入口**：`test:live:p0-07-provider-overload`（真实 503→planner retry）、`test:live:p0-07-restart-recovery`（双 Pi 强制退出→孤儿 Run 回收）、`test:live:p0-07-task-lineage`（真实 `flux_task` continue/retry）、`test:live:p0-07-package-boundary`（npm 包无源码且从解包 dist 启动）、`test:live:p0-07-bound-resume`（绑定 Agent shared/fresh 与真实 checkpoint resume）和 `test:live:p0-07-soak`（三轮 fresh Pi、Run/registry 边界）；此前 controls、fanout、long、workflow-deadline 报告也必须在同一最终提交重跑。
 - **实现补强**：Run Registry 在 runs.json 锁内维护按 Run 的父 usage reservation/聚合门禁；终态写入失败有界重试并保留业务结果；Main session_start 主动回收无存活 PID 的 stale Run 与孤儿 Agent。
 - **约束**：验证使用 `tests/live/live-test-config.json` 的 profile；测试代码不得绑定具体模型名称；工作区/进程门禁只作为 Host 策略，不声称 OS sandbox。
 
@@ -18,7 +18,7 @@
 - **状态**：部分完成（P0-01/P0-04 核心链路已验证）
 - **范围**：动态角色、绑定 Agent、同一 Agent 多角色、`shared/fresh`、依赖/并行、planner 在线阶段/健康、显式 deadline、质量门、重试、取消和 checkpoint resume。
 - **已验证**：`.agentflux/test-results/p0-07-workflow-deadline-latest.json` 覆盖本轮 dist 的 Main→真实 planner→DAG implementer→真实 quality gate→Task/Execution/checkpoint terminal，以及独立 Pi 的显式 deadline timeout；P0-07 controls/fan-out/long reports 另覆盖 control、parallel 和 no-deadline 长运行。
-- **剩余**：绑定 Agent 的 shared/fresh、真实 checkpoint resume 与 continue/retry 仍需独立报告，不能由本报告替代。
+- **剩余**：并行写隔离和 Community/Message V2 真实流程仍按 P2-02/P2-05 独立推进；绑定 Agent 的 shared/fresh、真实 checkpoint resume 与 continue/retry 由 P0-07 补证入口覆盖。
 - **验收**：全新 Pi 加载本轮 `dist/extension/entry.js` 与 `dist/extension/subagent-entry.js`；运行中可读到 planner/节点的非零进度、成本、liveness/progress 与 health；无显式 deadline 不会被固定时长终止，显式 deadline 精确收敛；Task、Execution、Run、Workflow、成本和失败原因一致。
 
 ## P2-02 Community 与 Message V2

@@ -423,7 +423,12 @@ export async function executeDAG(
 	const enableGate = opts.enableQualityGate ?? true;
 	const wallStart = Date.now();
 	const configuredWallClockMs = normalizeOptionalDurationMs(opts.maxWallClockMs, "DAG maxWallClockMs");
-	const deadline = configuredWallClockMs === undefined ? undefined : wallStart + configuredWallClockMs;
+	const deadline = opts.deadlineAt === undefined
+		? configuredWallClockMs === undefined ? undefined : wallStart + configuredWallClockMs
+		: (() => {
+			if (!Number.isFinite(opts.deadlineAt)) throw new Error("DAG deadlineAt must be finite");
+			return opts.deadlineAt;
+		})();
 	const taskResults = new Map<string, TaskExecutionResult>();
 	const completed = new Set<string>();
 	const failed = new Set<string>();

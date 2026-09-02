@@ -51,6 +51,23 @@ try { parsePlannerTaskDAG("not json", "fallback"); }
 catch { unsafePlannerOutputRejected = true; }
 check("planner repair remains fail-closed without JSON", unsafePlannerOutputRejected, "rejected");
 check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_000, 150_000, 100_000) === 50_000, `${boundedNodeTimeout(600_000, 150_000, 100_000)}ms`);
+const inheritedDeadlineRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-inherited-deadline-"));
+try {
+	const inheritedDeadlineResult = await executeDAG(
+		{ description: "inherited absolute deadline", nodes: [node("not-started")] },
+		{
+			cwd: inheritedDeadlineRoot,
+			fluxDir: join(inheritedDeadlineRoot, ".agentflux"),
+			modelsConfig: { models: {}, roles: {} },
+			telemetry: new TelemetryWriter(join(inheritedDeadlineRoot, ".agentflux")),
+			prefixLayout: false,
+			sessionId: "pi-session",
+			deadlineAt: Date.now() - 1,
+			maxWallClockMs: null,
+		},
+	);
+	check("DAG enforces inherited absolute deadline without a relative timeout", inheritedDeadlineResult.status === "timed_out" && inheritedDeadlineResult.completedNodes.length === 0, inheritedDeadlineResult.status);
+} finally { rmSync(inheritedDeadlineRoot, { recursive: true, force: true }); }
 
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
