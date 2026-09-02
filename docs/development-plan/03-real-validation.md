@@ -6,13 +6,13 @@
 
 ## P0-07 独立审计返工（当前收口项）
 
-- **状态**：四项返工已实现，并在当前 production-dist 复跑中通过，等待最终同步门禁与独立审计复核（2026-09-02）。
+- **状态**：四项返工已实现，并在当前 production-dist 复跑与最终同步门禁中通过，等待独立审计复核（2026-09-02）。
 - **确定性门禁**：当前树的 `npm run verify`、`npm run typecheck`、`npm run build`、`git diff --check` 均通过；Agent lifecycle 105、Message V2/cache 39、DAG 35、RPC inbox 22 及其余 unit 套件通过。
 - **阻断 1 已修复**：`reconcileRecoveredTask` 先以同一 Task/Execution 的 active Run、持久化 owner PID 和 active-context 精确 scope 做父级存活保护，再以 Run Registry recovery fence 与 `updateTaskStatus` 协调收敛；确定性套件覆盖 live sibling 与 live Main/Workflow owner，当前 restart production 场景也证明 Pi A 已真实终止后，孤儿 Run、TaskExecution、Task 和 Agent 一致回收。
 - **阻断 2 已修复**：`executeDAG` 记录节点/批次/质量门的绝对 deadline 耗尽并返回 `timed_out`；入口以 `timeout` outcome 同步写 Task/Execution。`p0-07-workflow-deadline-latest.json` 的父 deadline 场景核对 planner、node、Task、Execution 的同一 `deadlineAt`，节点、DAG、Task、Execution 均为 `timed_out`，无假成功 marker；正常 planner→node→judge 场景仍通过。
 - **阻断 3 已修复并复跑**：restart fixture 在回收前确认目标 Run 与 Pi A PID 存活，使用明确的 process-tree termination evidence 验证 Pi A 和目标 child 已终止，并拒绝 harness timeout；当前 `p0-07-restart-recovery-latest.json` 记录 `passed=true`、`recovered=true`、`heartbeat_expired`、Task/Execution failed、Agent idle 及匹配错误。
 - **阻断 4 已修复并复跑**：`p0-07-controls-latest.json` 不再从空 delivery 推导拒绝；它持久化 post-stop `flux_agent` steer 的实际 tool call、`isError=true` tool result（`Agent is not running`）和零相关 delivery，同时保留正常 steer ACK/`STEER_SEEN` 与定向 stop/cancel 事实。
-- **当前真实证据合同**：上述三个报告均使用本轮 `dist/extension/entry.js` 与 `subagent-entry.js`，报告记录生成时的精确 HEAD、`changedFiles=[]`、profile/provider/model/thinking、Pi PID/exit code、Task/Execution/Run、usage/cost、关键事件和失败原因；失败报告仍保留在 `.agentflux/test-results/`，不能只修改布尔值。最终文档提交后需再次同步执行这些报告并核对 sourceCommit。
+- **当前真实证据合同**：上述三个报告均使用最终同步后的 `dist/extension/entry.js` 与 `subagent-entry.js`，报告记录生成时的精确 HEAD、`changedFiles=[]`、profile/provider/model/thinking、Pi PID/exit code、Task/Execution/Run、usage/cost、关键事件和失败原因，且 sourceCommit 与最终 HEAD 一致；失败报告仍保留在 `.agentflux/test-results/`，不能只修改布尔值。
 - **既有有效证据**：provider overload/retry、超过旧 600 秒的无 deadline Run、四 Agent fan-out、绑定 Agent shared/fresh、checkpoint resume、真实 continue/retry lineage、package boundary 和三轮 soak 的历史结果仍保留；它们不能替代本轮四项边界证据。
 - **约束**：工作区/进程门禁只作为 Host 策略，不声称 OS sandbox。
 
@@ -21,7 +21,7 @@
 - **状态**：部分完成（P0-01/P0-04 核心链路已验证）
 - **范围**：动态角色、绑定 Agent、同一 Agent 多角色、`shared/fresh`、依赖/并行、planner 在线阶段/健康、显式 deadline、质量门、重试、取消和 checkpoint resume。
 - **已验证**：`.agentflux/test-results/p0-07-workflow-deadline-latest.json` 覆盖本轮 dist 的 Main→真实 planner→DAG implementer→真实 quality gate→Task/Execution/checkpoint terminal，以及独立 Pi 的显式 deadline timeout；P0-07 controls/fan-out/long reports 另覆盖 control、parallel 和 no-deadline 长运行。
-- **剩余**：P0-07 四项返工的确定性与 current production-dist 证据已通过，仍需最终同步门禁和独立审计后归档；并行写隔离和 Community/Message V2 真实流程仍按 P2-02/P2-05 独立推进。
+- **剩余**：P0-07 四项返工的确定性、current production-dist 证据和最终同步门禁已通过，仍需独立审计后归档；并行写隔离和 Community/Message V2 真实流程仍按 P2-02/P2-05 独立推进。
 - **验收**：全新 Pi 加载本轮 `dist/extension/entry.js` 与 `dist/extension/subagent-entry.js`；运行中可读到 planner/节点的非零进度、成本、liveness/progress 与 health；无显式 deadline 不会被固定时长终止，显式 deadline 精确收敛；Task、Execution、Run、Workflow、成本和失败原因一致。
 
 ## P2-02 Community 与 Message V2
