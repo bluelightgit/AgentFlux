@@ -71,7 +71,7 @@ try {
 
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
-import { interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";
+import { checkQualityGate, interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";
 import type { QualityGateResult } from "../src/workflows/quality-gate";
 
 const minimalGate = (over: Partial<QualityGateResult>): QualityGateResult => ({
@@ -84,6 +84,12 @@ check("judge clear failure retries the node", judgeAction(minimalGate({ status: 
 check("judge timeout retries the judge, not the node", judgeAction(minimalGate({ status: "indeterminate", passed: false, feedback: "Quality gate judge timed out" })) === "retry_judge", "retry_judge");
 const timedOutGate = interpretQualityGateJudgeExecution({ output: "", exitCode: 124, timedOut: true, errorMessage: "explicit deadline after 1000ms" }, ["output contains marker"]);
 check("indeterminate quality gate remains failed closed", timedOutGate.status === "indeterminate" && timedOutGate.passed === false && timedOutGate.criteriaResults.length === 0, timedOutGate.feedback);
+const expiredQualityGate = await checkQualityGate("candidate output", ["output contains marker"], {
+	cwd: inheritedDeadlineRoot, deadlineAt: Date.now() - 1, timeoutMs: null,
+});
+check("quality gate honors an expired inherited absolute deadline without spawning a judge",
+	expiredQualityGate.status === "indeterminate" && expiredQualityGate.passed === false
+		&& /timed out/.test(expiredQualityGate.feedback), expiredQualityGate.feedback);
 const firstDAGRunId = createDAGRunId("execution-one", "review");
 const secondDAGRunId = createDAGRunId("execution-one", "review");
 check(

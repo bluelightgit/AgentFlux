@@ -16,8 +16,9 @@ import { readJsonStore, updateJsonStore } from "../core/json-store";
 import type { PricingTable } from "../core/pricing";
 import { assertSafePathSegment } from "../core/safe-path";
 import type { AgentRecord, AgentScope, AgentStatus, ThinkingLevel } from "../core/types";
-import { listAgentRuns, type AgentRunRecord } from "../core/run-registry";
+import { getAgentRun, listAgentRuns, type AgentRunRecord } from "../core/run-registry";
 import { MessageBus, type SendMessageV2Result } from "../core/message-bus";
+import { readAgentRunStop } from "./agent-run-control";
 import type { RunHealthConfig } from "../core/run-health";
 import type { TelemetryWriter } from "../telemetry/events";
 import { runAgent, type AgentRunResult, type AgentTemplate } from "./agent-runner";
@@ -39,6 +40,8 @@ export interface AgentRunContext {
 	defaultModel?: string;
 	defaultProvider?: string;
 	timeoutMs?: number | null;
+	/** 继承父执行的绝对 deadline；优先于 timeoutMs。 */
+	deadlineAt?: number;
 	maxCostUsd?: number;
 	parentMaxCostUsd?: number;
 	parentMaxTurns?: number;
@@ -170,29 +173,52 @@ export function enqueueAgentInstruction(
 ): QueuedAgentInstruction | undefined {
 	if (!task.trim()) throw new Error("queued Agent instruction cannot be empty");
 	const record = findSingle(context.cwd, selector, context.sessionId);
-	const run = listAgentRuns(join(context.cwd, ".agentflux"), { agent: record.name, activeOnly: true })[0];
+	const fluxDir = join(context.cwd, ".agentflux");
+	const run = listAgentRuns(fluxDir, { agent: record.name, activeOnly: true })
+		.find(candidate => candidate.status === "starting" || candidate.status === "running");
 	if (!run) return undefined;
-	const bus = new MessageBus(join(context.cwd, ".agentflux"), { maxPendingPerRecipient: 20 });
-	const message = bus.sendDirect("main", record.name, "steer", task.trim(), {
-		priority,
-		correlationId: run.id,
-		taskId: context.taskId ?? run.taskId,
-		senderInstanceId: `main:${context.sessionId}`,
-	});
-	const pending = bus.peek(record.name, { limit: 100 })
-		.filter(item => item.envelope.correlationId === run.id && ["pending", "delivered"].includes(item.delivery.status)).length;
+	const bus = new MessageBus(fluxDir, { maxPendingPerRecipient: 20 });
+	const acceptsInstruction = (): boolean => {
+		try {
+			const current = getAgentRun(fluxDir, run.id);
+			return current?.id === run.id
+				&& (current.status === "starting" || current.status === "running")
+				&& !readAgentRunStop(context.cwd, run.id);
+		} catch {
+			// Registry/control uncertainty must not turn into a new delivery.
+			return false;
+		}
+	};
+	if (!acceptsInstruction()) return undefined;
+	let message: SendMessageV2Result;
+	try {
+		message = bus.sendDirectGuarded("main", record.name, "steer", task.trim(), {
+			priority,
+			correlationId: run.id,
+			taskId: context.taskId ?? run.taskId,
+			senderInstanceId: `main:${context.sessionId}`,
+		}, () => {
+			if (!acceptsInstruction()) throw new Error(`Agent run is no longer accepting instructions: ${run.id}`);
+		});
+	} catch (error) {
+		// A stop may win the fence race while send() is waiting for Message V2's
+		// mutex.  Treat that as a rejected queue operation, not as a new Run input;
+		// preserve unrelated backpressure/storage errors for the caller.
+		if (!acceptsInstruction()) return undefined;
+		throw error;
+	}
+	if (!acceptsInstruction()) {
+		try { bus.reject(record.name, message.envelope.id, "run stopped before queued instruction was accepted"); } catch { /* stop/recovery may already have finalized it */ }
+		return undefined;
+	}
+	const pending = bus.peek(record.name, { limit: 100, correlationId: run.id, includeUncorrelated: false })
+		.filter(item => ["pending", "delivered"].includes(item.delivery.status)).length;
 	return { agent: record, run, message, pending };
 }
 
 /** 停止某个具体 Run 时拒绝其尚未消费的 steer，避免旧指令污染下一次 Run。 */
 export function rejectQueuedAgentInstructions(cwd: string, run: AgentRunRecord, reason = "run stopped"): number {
-	const bus = new MessageBus(join(cwd, ".agentflux"));
-	let rejected = 0;
-	for (const item of bus.peek(run.agent, { limit: 100 })) {
-		if (item.envelope.correlationId !== run.id || !["pending", "delivered"].includes(item.delivery.status)) continue;
-		try { bus.reject(run.agent, item.envelope.id, reason); rejected++; } catch { /* 并发 ACK/过期时以最终 delivery 为准 */ }
-	}
-	return rejected;
+	return new MessageBus(join(cwd, ".agentflux")).rejectByCorrelation(run.agent, run.id, reason);
 }
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -419,6 +445,7 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			sessionDir: sessionDir ?? join(context.cwd, ".agentflux", "runtime", "sessions"),
 			pricing: context.pricing,
 			timeoutMs: context.timeoutMs,
+			deadlineAt: context.deadlineAt,
 			maxCostUsd: context.maxCostUsd,
 			parentMaxCostUsd: context.parentMaxCostUsd,
 			parentMaxTurns: context.parentMaxTurns,

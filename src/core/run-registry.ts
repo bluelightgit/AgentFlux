@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readJsonStore, updateJsonStore } from "./json-store";
 import { assertSafeOpaqueId } from "./safe-path";
 import { isProcessAlive } from "./fs-lock";
-import { getTaskExecution } from "./task-registry";
+import { getTask, getTaskExecution, updateTaskStatus } from "./task-registry";
 import type { AgentRunHealth } from "./run-health";
 export type { AgentRunHealth } from "./run-health";
 
@@ -153,6 +153,8 @@ interface AgentRunStore {
 
 const TERMINAL = new Set<AgentRunStatus>(["completed", "failed", "cancelled", "timed_out"]);
 const ACTIVE = new Set<AgentRunStatus>(["starting", "running", "stop_requested"]);
+const TASK_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
+const HEARTBEAT_RECOVERY_ERROR = "runtime heartbeat expired before terminal convergence";
 const USAGE_FIELDS = ["turns", "input", "output", "cacheRead", "cacheWrite", "contextTokens", "costUsd"] as const;
 
 const createStore = (): AgentRunStore => ({ version: 1, runs: [], reservations: [] });
@@ -755,6 +757,35 @@ export function getAgentRun(fluxDir: string, runId: string): AgentRunRecord | un
 	return run ? normalizeRunRecord(run) : undefined;
 }
 
+/**
+ * 将因 dead-PID 恢复而失败的 Run 关联到同一 Task/Execution 的终态。
+ * 只处理明确带 heartbeat_expired 证据的 Run，并且不改写任何已经终态的
+ * Task/Execution；这样重启恢复不会按 Agent 名称误伤另一个仍存活的 Main。
+ */
+function reconcileRecoveredTask(fluxDir: string, run: AgentRunRecord): void {
+	if (!run.taskId || run.error !== HEARTBEAT_RECOVERY_ERROR
+		|| !run.recentEvents?.some(event => event.type === "heartbeat_expired")) return;
+	const task = getTask(fluxDir, run.taskId);
+	if (!task || TASK_TERMINAL.has(task.status)) return;
+	const executionId = run.executionId ?? task.executionId;
+	const execution = getTaskExecution(fluxDir, executionId);
+	if (!execution || execution.taskId !== task.id || TASK_TERMINAL.has(execution.status)) return;
+	const priorUsage = execution.usage;
+	updateTaskStatus(fluxDir, task.id, "failed", {
+		executionId,
+		costUsd: Math.max(Number.isFinite(execution.costUsd) ? execution.costUsd : 0, run.costUsd),
+		usage: {
+			input: Math.max(priorUsage?.input ?? 0, run.input),
+			output: Math.max(priorUsage?.output ?? 0, run.output),
+			cacheRead: Math.max(priorUsage?.cacheRead ?? 0, run.cacheRead),
+			cacheWrite: Math.max(priorUsage?.cacheWrite ?? 0, run.cacheWrite),
+			costUsd: Math.max(priorUsage?.costUsd ?? 0, run.costUsd),
+			model: run.model ?? priorUsage?.model,
+		},
+		outcome: { status: "failure", error: HEARTBEAT_RECOVERY_ERROR },
+	});
+}
+
 export function reconcileStaleAgentRuns(
 	fluxDir: string,
 	options: { now?: Date; staleAfterMs?: number } = {},
@@ -764,12 +795,21 @@ export function reconcileStaleAgentRuns(
 	const staleAfterMs = options.staleAfterMs ?? 30_000;
 	if (!Number.isFinite(staleAfterMs) || staleAfterMs < 1_000) throw new Error("Run Registry staleAfterMs must be at least 1000");
 	if (!existsSync(registryPath(fluxDir))) return [];
-	return updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
-		const reconciled: AgentRunRecord[] = [];
+	const recoveredCandidates: AgentRunRecord[] = [];
+	const reconciled = updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
+		const newlyReconciled: AgentRunRecord[] = [];
 		for (const rawRun of store.runs) {
-			if (TERMINAL.has(rawRun.status)) continue;
 			const run = rawRun;
 			ensureMutableRunDefaults(run);
+			// A previous startup may have converged the Run but lost the separate
+			// Task-store write. Retry only this explicit recovery evidence on every
+			// later startup; ordinary historical failures are never touched.
+			if (TERMINAL.has(run.status)) {
+				if (run.error === HEARTBEAT_RECOVERY_ERROR && run.recentEvents?.some(event => event.type === "heartbeat_expired")) {
+					recoveredCandidates.push(structuredClone(normalizeRunRecord(run)));
+				}
+				continue;
+			}
 			const heartbeatMs = Date.parse(run.heartbeatAt);
 			if (Number.isFinite(heartbeatMs) && nowMs - heartbeatMs <= staleAfterMs) continue;
 			// 心跳超时但进程仍存活：可能是长操作或心跳写失败，不能误标为残留。
@@ -777,7 +817,7 @@ export function reconcileStaleAgentRuns(
 			const timestamp = nowDate.toISOString();
 			run.status = "failed";
 			run.phase = "terminal";
-			run.error = "runtime heartbeat expired before terminal convergence";
+			run.error = HEARTBEAT_RECOVERY_ERROR;
 			run.lastActivityAt = timestamp;
 			run.lastActivityType = "heartbeat_expired";
 			run.lastActivitySummary = run.error;
@@ -786,10 +826,24 @@ export function reconcileStaleAgentRuns(
 			run.heartbeatAt = timestamp;
 			run.finishedAt = timestamp;
 			run.pid = undefined;
-			reconciled.push(structuredClone(normalizeRunRecord(run)));
+			const recovered = structuredClone(normalizeRunRecord(run));
+			newlyReconciled.push(recovered);
+			recoveredCandidates.push(recovered);
 		}
-		return reconciled;
+		return newlyReconciled;
 	});
+	// Do not hold runs.json's lock while updating tasks.json.  The candidate list
+	// is durable and is retried on the next startup if this independent store is
+	// temporarily unavailable.
+	for (const run of recoveredCandidates) {
+		try { reconcileRecoveredTask(fluxDir, run); }
+		catch (error) {
+			// Surface the failure to session_start/GC while retaining the failed Run;
+			// a later recovery pass can safely retry the exact same task/execution.
+			throw new Error(`orphan Task recovery failed for Run ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return reconciled;
 }
 
 /** 仅供 UI/测试读取，避免把 terminal 判定逻辑复制到调用方。 */

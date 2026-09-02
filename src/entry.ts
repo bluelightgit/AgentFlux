@@ -17,7 +17,6 @@ import { formatActiveContext, pruneStaleActiveContext, readActiveContext, regist
 import { loadPricing, type PricingTable } from "./core/pricing";
 import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
 import { resolvePathInsideExistingRoot } from "./core/safe-path";
-import { remainingDuration } from "./core/deadline";
 import { listAgentRuns, markAgentRunStopRequested, reconcileStaleAgentRuns, type AgentRunRecord } from "./core/run-registry";
 import { parseAgentFluxTaskEnvelope, type AgentFluxTaskEnvelope } from "./core/task-envelope";
 import { formatTasks, getTask, listTasks, registerTask, resolveTask, updateTaskMetadata, updateTaskStatus, type TaskStatus } from "./core/task-registry";
@@ -205,9 +204,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
 		const run = activeAgentRun(agentName);
 		if (run) {
-			const rejected = rejectQueuedAgentInstructions(runtime.cwd, run, "run stopped before queued instruction was consumed");
+			// Fence the Run before sweeping its queue.  enqueueAgentInstruction uses
+			// the same durable stop request plus a post-send status check, so either
+			// side winning the race leaves no accepted delivery behind.
 			requestAgentRunStop(runtime.cwd, run.id, `main:${sessionId}`);
 			try { markAgentRunStopRequested(runtime.fluxDir, run.id); } catch { /* 已经在终止/收敛时由 runner 完成 */ }
+			const rejected = rejectQueuedAgentInstructions(runtime.cwd, run, "run stopped before queued instruction was consumed");
 			persistentControllers.get(agentName)?.abort();
 			return { run, stale: false, rejected };
 		}
@@ -360,15 +362,18 @@ export default function agentFlux(pi: ExtensionAPI) {
 		const maxWallClockSeconds = runtime.config.budget.max_wall_clock_seconds;
 		const parentPlan = ensureImplicitPlan();
 		const parentDeadlineMs = parentPlan?.deadlineAt ? Date.parse(parentPlan.deadlineAt) : undefined;
-		const remainingParentMs = remainingDuration(parentDeadlineMs);
 		return {
 			cwd: runtime.cwd, modelsConfig: runtime.modelsConfig, telemetry: telemetry ?? undefined, pricing: runtime.pricing,
 			sessionId, taskId: parentPlan?.taskId, executionId: parentPlan?.executionId,
 			sharedSkills: runtime.sharedSkills, prefixLayout: runtime.config.cache.prefix_layout === "static_first",
 			defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider,
-			timeoutMs: remainingParentMs === undefined
+			// Keep the parent wall-clock contract absolute.  A child may receive a
+			// remaining duration for its watchdog, but runAgent must retain this
+			// timestamp across retries and nested Workflow boundaries.
+			deadlineAt: parentDeadlineMs,
+			timeoutMs: parentDeadlineMs === undefined
 				? (maxWallClockSeconds == null ? undefined : maxWallClockSeconds * 1000)
-				: Math.max(1, remainingParentMs),
+				: undefined,
 			maxCostUsd, parentMaxCostUsd: parentPlan?.budget.maxCostUsd ?? runtime.config.budget.max_cost_per_task,
 			parentMaxTurns: parentPlan?.budget.maxTurns ?? runtime.config.budget.max_turns_per_task,
 			parentMaxInputTokens: parentPlan?.budget.maxInputTokens ?? runtime.config.budget.max_input_tokens_per_task,
@@ -419,7 +424,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 						progressFreshnessMs: ageMs(run?.lastProgressAt),
 						deadlineAt: run?.deadlineAt,
 						healthWarningCount: run?.healthWarningCount,
-						queuedMessages: run ? new MessageBus(agentFluxDir).peek(agent.name, { limit: 100 }).filter(item => ["pending", "delivered"].includes(item.delivery.status)).length : 0,
+						queuedMessages: run ? new MessageBus(agentFluxDir).peek(agent.name, { limit: 100, correlationId: run.id, includeUncorrelated: false }).filter(item => ["pending", "delivered"].includes(item.delivery.status)).length : 0,
 						activity: run?.lastActivitySummary,
 						error: runError,
 						modelError: run?.modelError,
@@ -463,9 +468,24 @@ export default function agentFlux(pi: ExtensionAPI) {
 		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string } = {},
 	): Promise<DAGExecutionResult> {
 		if (!runtime || !telemetry) throw new Error("AgentFlux is not initialized");
-		const planDeadlineMs = plan.deadlineAt && Number.isFinite(Date.parse(plan.deadlineAt))
-			? Math.max(1, remainingDuration(Date.parse(plan.deadlineAt)) ?? 0)
-			: plan.budget.maxWallClockMs;
+		// flux_workflow can be called with a freshly constructed plan when no
+		// implicit Main plan exists. Materialize the deadline exactly once here,
+		// before planner execution, and persist it so every downstream phase uses
+		// the same absolute parent clock.
+		if (plan.deadlineAt === undefined && plan.budget.maxWallClockMs !== undefined) {
+			plan = { ...plan, deadlineAt: new Date(Date.now() + plan.budget.maxWallClockMs).toISOString() };
+		}
+		registerTask(runtime.fluxDir, sessionId, plan, "running");
+		const planDeadlineAt = plan.deadlineAt === undefined
+			? undefined
+			: (() => {
+				const value = Date.parse(plan.deadlineAt);
+				if (!Number.isFinite(value)) throw new Error(`Task deadlineAt is invalid: ${plan.deadlineAt}`);
+				return value;
+			})();
+		// If startPlan has not materialized a deadline, retain the relative budget
+		// only as a fallback. Once an absolute deadline exists it is the sole clock.
+		const planTimeoutMs = planDeadlineAt === undefined ? plan.budget.maxWallClockMs : undefined;
 		const resumeExecutionId = plan.operation === "resume"
 			? plan.parentExecutionId ?? plan.parentTaskId
 			: undefined;
@@ -481,7 +501,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.executionId);
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: planDeadlineMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		if (plan.operation === "resume") throw new Error(`Workflow checkpoint is unavailable for ${plan.parentTaskId ?? "the selected task"}`);
 		let action = request.action ?? "run";
@@ -511,7 +531,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
 			updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "workflow", id: definition.id, version: definition.version } });
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: planDeadlineMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		const previous = action === "modify"
 			? getWorkflowDefinition(runtime.fluxDir, selector ?? "")
@@ -538,7 +558,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					`Current executable DAG:\n${JSON.stringify(previous.dag, null, 2)}`,
 				].join("\n")
 				: plan.task;
-			dag = await generateTaskDAG(planningTask, { cwd: runtime.cwd, model: planner.model, provider: planner.provider, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, thinking: planner.thinking, models: runtime.modelsConfig.models, modelsConfig: runtime.modelsConfig, pricing: runtime.pricing, telemetry, sessionId, prefixLayout: runtime.config.cache.prefix_layout === "static_first", signal, maxCostUsd: plan.budget.maxCostUsd, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, timeoutMs: planDeadlineMs, health: runtime.config.health, taskId: plan.taskId, executionId: plan.executionId });
+			dag = await generateTaskDAG(planningTask, { cwd: runtime.cwd, model: planner.model, provider: planner.provider, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, thinking: planner.thinking, models: runtime.modelsConfig.models, modelsConfig: runtime.modelsConfig, pricing: runtime.pricing, telemetry, sessionId, prefixLayout: runtime.config.cache.prefix_layout === "static_first", signal, maxCostUsd: plan.budget.maxCostUsd, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, deadlineAt: planDeadlineAt, timeoutMs: planTimeoutMs, health: runtime.config.health, taskId: plan.taskId, executionId: plan.executionId });
 			mkdirSync(runsDir, { recursive: true });
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.taskId);
 			mkdirSync(runDir, { recursive: true });
@@ -556,7 +576,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "subagent", origin: "fresh", status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
 			throw error;
 		}
-		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, maxWallClockMs: planDeadlineMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
@@ -568,8 +588,16 @@ export default function agentFlux(pi: ExtensionAPI) {
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
 		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig), mainModel: ctx.model?.id, mainProvider: ctx.model?.provider };
+		let reconciled: AgentRunRecord[] = [];
 		try {
-			const reconciled = reconcileStaleAgentRuns(fluxDir);
+			reconciled = reconcileStaleAgentRuns(fluxDir);
+		} catch (error) {
+			// Run/Task recovery uses separate durable stores.  A Task-store write
+			// failure must not suppress the independent Agent idle reconciliation;
+			// the exact failed Run is retried on the next startup.
+			notify(ctx, `Run recovery incomplete: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`, "warning");
+		}
+		try {
 			const activeAgentNames = new Set(listAgentRuns(fluxDir, { activeOnly: true }).map(run => run.agent));
 			for (const agent of listAgents(ctx.cwd, sessionId)) {
 				if (agent.status !== "running" || activeAgentNames.has(agent.name)) continue;
@@ -577,7 +605,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			}
 			if (reconciled.length > 0) notify(ctx, `Reconciled ${reconciled.length} stale Agent Run(s) after restart.`, "warning");
 		} catch (error) {
-			notify(ctx, `Run recovery unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`, "warning");
+			notify(ctx, `Agent recovery unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`, "warning");
 		}
 		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.community_stall_threshold ?? 3 });
 		setDagLogSink(ctx.hasUI ? null : console.error);
@@ -728,7 +756,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const record = findAgents(runtime.cwd, params.agent, sessionId)[0];
 				if (!record) throw new Error(`Agent not found: ${params.agent}`);
 				const run = latestAgentRun(record.name);
-				const pending = new MessageBus(runtime.fluxDir).peek(record.name, { limit: 100 });
+				const pending = run
+					? new MessageBus(runtime.fluxDir).peek(record.name, { limit: 100, correlationId: run.id, includeUncorrelated: false })
+					: [];
 				const transcript = readAgentLastMessages(runtime.cwd, record, Math.max(1, Math.min(20, Math.floor(params.last ?? 5))));
 				const text = formatAgentInspection(record, run, pending, transcript);
 				return { content: [{ type: "text", text }], details: { ok: true, agent: record, run, pending, transcript } };

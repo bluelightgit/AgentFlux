@@ -19,7 +19,7 @@ import { createRequire } from "node:module";
 import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
 import type { TelemetryWriter } from "../telemetry/events";
-import { normalizeOptionalDurationMs } from "../core/deadline";
+import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
 
 export type QualityGateStatus = "passed" | "failed" | "indeterminate";
 
@@ -34,6 +34,10 @@ export interface QualityGateResult {
 	gateModel: string | null;
 	gateInputTokens: number;
 	gateOutputTokens: number;
+	/** Absolute inherited deadline used for this judge attempt, when present. */
+	deadlineAt?: number;
+	/** Effective watchdog duration at attempt start, after applying the parent deadline. */
+	judgeTimeoutMs?: number;
 }
 
 export interface QualityGateJudgement {
@@ -161,6 +165,8 @@ export async function checkQualityGate(
 		pricing?: PricingTable;
 		telemetry?: TelemetryWriter;
 		sessionId?: string;
+		/** Absolute inherited deadline; evaluated at the start of every judge attempt. */
+		deadlineAt?: number;
 		timeoutMs?: number | null;
 		signal?: AbortSignal;
 	},
@@ -169,11 +175,29 @@ export async function checkQualityGate(
 	if (opts.signal?.aborted) {
 		return interpretQualityGateJudgeExecution({ output: "", exitCode: 130, errorMessage: "cancelled before quality gate" }, criteria);
 	}
-	const gateTimeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "quality gate timeoutMs");
+	const configuredTimeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "quality gate timeoutMs");
+	if (opts.deadlineAt !== undefined && (!Number.isFinite(opts.deadlineAt) || opts.deadlineAt < 0)) {
+		throw new Error("quality gate deadlineAt must be a finite non-negative timestamp");
+	}
+	const remainingDeadlineMs = remainingDuration(opts.deadlineAt);
+	const gateTimeoutMs = configuredTimeoutMs === undefined
+		? remainingDeadlineMs
+		: remainingDeadlineMs === undefined ? configuredTimeoutMs : Math.min(configuredTimeoutMs, remainingDeadlineMs);
+	const finishGate = (execution: QualityGateJudgeExecution): QualityGateResult => ({
+		...interpretQualityGateJudgeExecution(execution, criteria),
+		deadlineAt: opts.deadlineAt,
+		judgeTimeoutMs: gateTimeoutMs,
+	});
+	if (gateTimeoutMs !== undefined && gateTimeoutMs <= 0) {
+		return finishGate({
+			output: "", exitCode: 124, timedOut: true,
+			errorMessage: "quality gate absolute deadline exhausted before judge start",
+		});
+	}
 	if (!output.trim()) {
-		return interpretQualityGateJudgeExecution({
+		return finishGate({
 			output: "", exitCode: 0, errorMessage: "agent output is empty",
-		}, criteria);
+		});
 	}
 
 	const criteriaText = criteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
@@ -334,7 +358,7 @@ Respond with ONLY the JSON, no other text.`;
 
 	if (timedOut && stderrBuf.trim()) errorMessage = `${errorMessage ?? "Quality gate judge timed out"}; stderr: ${stderrBuf.trim().slice(0, 500)}`;
 	if (!errorMessage && exitCode !== 0 && stderrBuf.trim()) errorMessage = stderrBuf.trim().slice(0, 500);
-	return interpretQualityGateJudgeExecution({
+	return finishGate({
 		output: gateOutput,
 		exitCode,
 		timedOut,
@@ -343,7 +367,7 @@ Respond with ONLY the JSON, no other text.`;
 		gateModel,
 		gateInputTokens,
 		gateOutputTokens,
-	}, criteria);
+	});
 }
 
 /** 格式化质量门结果 */

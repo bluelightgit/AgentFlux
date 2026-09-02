@@ -1,6 +1,6 @@
 # P0-07 Agent 运行控制、健康监控与聚合预算
 
-状态：已完成（2026-09-02）
+状态：核心实现归档；2026-09-02 独立验收未通过，返工见当前 `docs/development-plan/03-real-validation.md`
 
 ## 目标摘要
 
@@ -25,4 +25,6 @@
 - `AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-07-long`：`.agentflux/test-results/p0-07-long-latest.json` `passed=true`，Run 无 `deadlineAt`，实际 `runDurationMs=641630`（超过旧 600 秒），期间 `healthWarningCount=122`，未被告警误杀并最终 completed。
 - `AGENTFLUX_LIVE_BUILT=1 AGENTFLUX_LIVE_PROFILE=local D:/Nodejs/npm.cmd run test:live:p0-07-workflow-deadline`：`.agentflux/test-results/p0-07-workflow-deadline-latest.json` `passed=true`，全新 production-dist Pi 真实完成 Main→planner→implementer→quality-gate；judge 返回明确 `status=passed` 和逐项 criteria，另一个全新 Pi 以显式 deadline 运行长 bash，Run 记录 timeout event、explicit deadline、`timed_out` 和 PID 清理。报告中的 provider/model/thinking 来自 profile 解析结果，而非测试代码常量。
 
-P0-07 完成后，后续任务以 `docs/development-plan/` 中仍未闭合的 P0-02/P0-03/P0-06 和 P1/P2 规划为准。
+## 独立验收结论
+
+2026-09-02 在同一提交复跑完整门禁后，额外反例确认三项未闭合契约：generated Workflow 会在 planner 后重置父 deadline；`stop_requested` Run 仍可接收 steer 且消息可能进入后续 Run；restart recovery 报告中的 orphan Run 已 failed，但父 Task 仍为 running。因此本归档只保留已实现内容与既有证据，不能作为 P0-07 整体通过结论；返工和重新验收唯一在当前规划中维护。

@@ -139,13 +139,20 @@ async function main(): Promise<void> {
 		const recoveredRun = runs.find((run: any) => run.id === orphanRunId);
 		const agents = readJson(join(fixtureRoot, ".agentflux", "runtime", "agents.json"))?.agents ?? [];
 		const recoveredAgent = agents.find((agent: any) => agent.name === "restart-live");
-		const tasks = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json"))?.tasks ?? [];
+		const taskStore = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json")) ?? {};
+		const tasks = taskStore.tasks ?? [];
+		const executions = taskStore.executions ?? [];
+		const recoveredTask = tasks.find((task: any) => task.id === recoveredRun?.taskId);
+		const recoveredExecution = executions.find((execution: any) => execution.id === recoveredRun?.executionId);
 		const marker = `${recoveryResult.stdout}\n${recoveryResult.stderr}`.includes("P0_07_RESTART_RECOVERY_OK");
 		const recovered = recoveredRun?.status === "failed"
 			&& recoveredRun.pid === undefined
 			&& recoveredRun.error === "runtime heartbeat expired before terminal convergence"
 			&& recoveredRun.recentEvents?.some((event: any) => event.type === "heartbeat_expired")
-			&& recoveredAgent?.status === "idle";
+			&& recoveredAgent?.status === "idle"
+			&& recoveredTask?.status === "failed"
+			&& recoveredExecution?.status === "failed"
+			&& recoveredExecution?.outcome?.error === recoveredRun.error;
 		const passed = Boolean(orphanRunId) && ACTIVE.has(beforeRecovery?.status) && recoveryResult.status === 0 && marker && recovered;
 		const evidence = {
 			updatedAt: new Date().toISOString(),
@@ -165,6 +172,9 @@ async function main(): Promise<void> {
 			recoveredRun,
 			recoveredAgent,
 			tasks,
+			executions,
+			recoveredTask,
+			recoveredExecution,
 			orphanRunId,
 			recovered,
 			passed,

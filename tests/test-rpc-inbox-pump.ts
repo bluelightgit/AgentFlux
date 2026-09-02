@@ -85,6 +85,17 @@ async function main() {
 				&& bus.getDelivery(steerMessage.envelope.id, "desktop-b")?.status === "acknowledged",
 			bus.getDelivery(steerMessage.envelope.id, "desktop-b")?.status ?? "missing");
 
+		const oldRunSteer = bus.sendDirect("main", "desktop-scoped", "steer", "old Run steer", { correlationId: "old-physical-run" });
+		const scopedPump = new RpcInboxPump({
+			fluxDir, recipient: "desktop-scoped", runId: "new-physical-run", isIdle: () => false,
+			sendUserMessage: () => {},
+		});
+		const scopedCount = await scopedPump.tick(new Date("2026-07-16T12:01:01.000Z"));
+		check("RPC pump never consumes a steer correlated to another physical Run",
+			scopedCount === 0 && bus.getDelivery(oldRunSteer.envelope.id, "desktop-scoped")?.status === "pending",
+			`count=${scopedCount} status=${bus.getDelivery(oldRunSteer.envelope.id, "desktop-scoped")?.status}`);
+		bus.reject("desktop-scoped", oldRunSteer.envelope.id, "test cleanup");
+
 		const followCalls: Array<string | undefined> = [];
 		const followMessage = bus.sendDirect("main", "desktop-c", "task_update", "after the current task, run tests");
 		const followPump = new RpcInboxPump({

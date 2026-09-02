@@ -127,10 +127,14 @@ export class MessageBus {
 		}
 	}
 
-	send(input: SendMessageV2Input): SendMessageV2Result {
+	send(input: SendMessageV2Input, guard?: () => void): SendMessageV2Result {
 		this.validateSend(input);
 		const recipients = [...new Set(input.recipients)].sort();
 		return this.withMutex(() => {
+			// A caller may provide a durable run/control fence.  Evaluate it while
+			// holding the Message V2 mutex so a stop request can fence a send before
+			// the envelope becomes observable to poll().
+			guard?.();
 			const dedupeIndex = this.readJson<Record<string, string>>(join(this.root, "_dedupe.json"), {});
 			const dedupeHash = input.dedupeKey
 				? createHash("sha256").update(`${input.from}\0${input.dedupeKey}`).digest("hex") : undefined;
@@ -196,6 +200,18 @@ export class MessageBus {
 		return this.send({ ...metadata, from, recipients: [to], channel: { type: "direct", id: to }, type, content });
 	}
 
+	/** Direct send with a run/control fence evaluated inside the Message V2 mutex. */
+	sendDirectGuarded(
+		from: string,
+		to: string,
+		type: string,
+		content: string,
+		metadata: Omit<Partial<SendMessageV2Input>, "from" | "recipients" | "channel" | "type" | "content"> = {},
+		guard: () => void,
+	): SendMessageV2Result {
+		return this.send({ ...metadata, from, recipients: [to], channel: { type: "direct", id: to }, type, content }, guard);
+	}
+
 	sendBroadcast(from: string, type: string, content: string, metadata: Omit<Partial<SendMessageV2Input>, "from" | "recipients" | "channel" | "type" | "content"> = {}): SendMessageV2Result {
 		const board = new SharedBoard(this.fluxDir);
 		const recipients = board.listAgents().map(agent => agent.name).filter(name => name !== from);
@@ -211,7 +227,15 @@ export class MessageBus {
 		return this.send({ ...metadata, from, recipients, channel: { type: "group", id: groupId }, type, content });
 	}
 
-	poll(recipient: string, options: { limit?: number; now?: Date } = {}): DeliveredMessageV2[] {
+	poll(recipient: string, options: {
+		limit?: number;
+		now?: Date;
+		/** Restrict correlated messages to one physical Run; uncorrelated mail remains eligible by default. */
+		correlationId?: string;
+		includeUncorrelated?: boolean;
+		/** Optional acceptance fence evaluated while the Message V2 mutex is held. */
+		accept?: (envelope: MessageEnvelopeV2, delivery: MessageDeliveryV2) => boolean;
+	} = {}): DeliveredMessageV2[] {
 		this.validateAgentName(recipient, "recipient");
 		const now = options.now ?? new Date();
 		const limit = Math.max(1, Math.min(100, options.limit ?? 20));
@@ -230,6 +254,10 @@ export class MessageBus {
 					this.writeJsonAtomic(this.deliveryPath(delivery.messageId, recipient), delivery);
 					continue;
 				}
+				if (options.correlationId !== undefined
+					&& envelope.correlationId !== options.correlationId
+					&& !(options.includeUncorrelated !== false && envelope.correlationId === undefined)) continue;
+				if (options.accept && !options.accept(envelope, delivery)) continue;
 				if (delivery.status === "delivered") {
 					const deliveredAt = delivery.deliveredAt ? Date.parse(delivery.deliveredAt) : 0;
 					if (now.getTime() - deliveredAt < this.options.redeliveryAfterMs) continue;
@@ -261,7 +289,7 @@ export class MessageBus {
 	}
 
 	/** Read an inbox without changing delivery state. */
-	peek(recipient: string, options: { limit?: number; includeTerminal?: boolean } = {}): DeliveredMessageV2[] {
+	peek(recipient: string, options: { limit?: number; includeTerminal?: boolean; correlationId?: string; includeUncorrelated?: boolean } = {}): DeliveredMessageV2[] {
 		this.validateAgentName(recipient, "recipient");
 		const dir = this.recipientDir(recipient);
 		if (!existsSync(dir)) return [];
@@ -273,6 +301,9 @@ export class MessageBus {
 			.filter(delivery => options.includeTerminal || ["pending", "delivered"].includes(delivery.status))
 			.map(delivery => ({ delivery, envelope: this.getEnvelope(delivery.messageId) }))
 			.filter((item): item is DeliveredMessageV2 => !!item.envelope)
+			.filter(item => options.correlationId === undefined
+				|| item.envelope.correlationId === options.correlationId
+				|| (options.includeUncorrelated !== false && item.envelope.correlationId === undefined))
 			.sort((a, b) =>
 				PRIORITY_WEIGHT[b.envelope.priority] - PRIORITY_WEIGHT[a.envelope.priority]
 				|| a.envelope.createdAt.localeCompare(b.envelope.createdAt))
@@ -281,6 +312,29 @@ export class MessageBus {
 
 	acknowledge(recipient: string, messageId: string, now = new Date()): MessageDeliveryV2 {
 		return this.finishDelivery(recipient, messageId, "acknowledged", now);
+	}
+
+	/** Reject all outstanding deliveries belonging to one physical Run. */
+	rejectByCorrelation(recipient: string, correlationId: string, reason: string, now = new Date()): number {
+		this.validateAgentName(recipient, "recipient");
+		if (!correlationId.trim()) throw new Error("correlationId is required");
+		return this.withMutex(() => {
+			const dir = this.recipientDir(recipient);
+			if (!existsSync(dir)) return 0;
+			let rejected = 0;
+			for (const file of readdirSync(dir).filter(file => file.endsWith(".json"))) {
+				const delivery = this.readJson<MessageDeliveryV2 | null>(join(dir, file), null);
+				if (!delivery || !["pending", "delivered"].includes(delivery.status)) continue;
+				const envelope = this.getEnvelope(delivery.messageId);
+				if (!envelope || envelope.correlationId !== correlationId) continue;
+				delivery.status = "rejected";
+				delivery.rejectedAt = now.toISOString();
+				delivery.rejectionReason = reason.slice(0, 500) || "rejected";
+				this.writeJsonAtomic(this.deliveryPath(delivery.messageId, recipient), delivery);
+				rejected++;
+			}
+			return rejected;
+		});
 	}
 
 	reject(recipient: string, messageId: string, reason: string, now = new Date()): MessageDeliveryV2 {

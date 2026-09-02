@@ -196,6 +196,19 @@ async function main() {
 			runtimeContract.passed && runtimeContract.sentTo.includes("worker-a")
 				&& runtimeContract.unacknowledgedInbox.length === 0,
 			JSON.stringify(runtimeContract));
+		const staleRunMessage = bus.sendDirect("planner", "runtime-sender", "steer", "stale physical Run instruction", {
+			correlationId: "runtime-sender-old-run",
+		});
+		const isolatedPoll = runtime.execute({ action: "poll" }) as any[];
+		let crossRunAckRejected = false;
+		try { runtime.execute({ action: "ack", messageId: staleRunMessage.envelope.id }); }
+		catch (error) { crossRunAckRejected = /another Run/.test(error instanceof Error ? error.message : String(error)); }
+		check("Message V2 poll and ACK are isolated by the physical Run correlation",
+			!isolatedPoll.some(item => item.envelope.id === staleRunMessage.envelope.id)
+				&& bus.getDelivery(staleRunMessage.envelope.id, "runtime-sender")?.status === "pending"
+				&& crossRunAckRejected,
+			`poll=${isolatedPoll.length} delivery=${bus.getDelivery(staleRunMessage.envelope.id, "runtime-sender")?.status}`);
+		bus.reject("runtime-sender", staleRunMessage.envelope.id, "test cleanup");
 
 		const agent = (name: string): AgentTemplate => ({ name, description: "test", systemPrompt: "", tools: [] });
 		const successMessage = bus.sendDirect("planner", "runner-ok", "question", "Acknowledge after successful processing");

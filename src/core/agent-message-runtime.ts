@@ -51,9 +51,22 @@ export class AgentMessageRuntime {
 			let result: unknown;
 			if (input.action === "send") result = this.send(input);
 			else if (input.action === "poll") {
-				result = this.bus.poll(this.identity.agent, { limit: input.limit });
+				// Correlated mail belongs to one physical Run.  Keep legacy/general
+				// uncorrelated mail eligible, but never let a later Run consume an
+				// earlier Run's steer or handoff.
+				result = this.bus.poll(this.identity.agent, {
+					limit: input.limit,
+					correlationId: this.identity.runId,
+					includeUncorrelated: true,
+					accept: envelope => envelope.type !== "steer" || envelope.correlationId === this.identity.runId,
+				});
 			} else if (input.action === "ack") {
 				if (!input.messageId) throw new Error("ack requires messageId");
+				const envelope = this.bus.getEnvelope(input.messageId);
+				if (!envelope) throw new Error(`message ${input.messageId} not found`);
+				if (envelope.correlationId !== undefined && envelope.correlationId !== this.identity.runId) {
+					throw new Error(`message ${input.messageId} belongs to another Run`);
+				}
 				result = this.bus.acknowledge(this.identity.agent, input.messageId);
 			} else {
 				result = {

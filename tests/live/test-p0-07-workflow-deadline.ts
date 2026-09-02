@@ -20,6 +20,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-workflow-deadline-${process.pid}`);
 const workflowRoot = join(fixtureRoot, "workflow");
+const propagationRoot = join(fixtureRoot, "propagation");
 const deadlineRoot = join(fixtureRoot, "deadline");
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-workflow-deadline-latest.json");
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
@@ -178,6 +179,7 @@ async function main(): Promise<void> {
 		reportPath, workflow: {}, deadline: {}, passed: false,
 	};
 	let workflowPi: PiHandle | undefined;
+	let propagationPi: PiHandle | undefined;
 	let deadlinePi: PiHandle | undefined;
 	try {
 		if (process.env.AGENTFLUX_LIVE_BUILT !== "1") throw new Error("built Workflow/deadline live test requires AGENTFLUX_LIVE_BUILT=1");
@@ -253,6 +255,67 @@ async function main(): Promise<void> {
 			factsConsistent: Boolean(workflowFactsConsistent),
 		};
 
+		setupFixture(propagationRoot, config, {
+			max_cost_per_task: 1,
+			max_iterations: 4,
+			max_turns_per_task: 16,
+			max_input_tokens_per_task: 100_000,
+			max_parallel_agents: 1,
+			max_wall_clock_seconds: 30,
+		}, { qualityGate: true });
+		const propagationPrompt = [
+			"Use AgentFlux Workflow and do not perform the work directly in Main.",
+			"Create and execute a brand-new one-node implementer Workflow. The node must read the first line of README.md and respond with exactly PARENT_DEADLINE_PROPAGATION_NODE_OK. Set one acceptance criterion requiring that marker, then wait for the real quality gate and DAG result.",
+			"After the Workflow returns, output PARENT_DEADLINE_PROPAGATION_MAIN_OK only if its result is terminal (passed or timed_out); do not claim success from an unfinished run.",
+		].join("\n");
+		writeFileSync(join(propagationRoot, "README.md"), "# Parent deadline propagation fixture\\n");
+		const propagationSnapshots: any[] = [];
+		propagationPi = launch(propagationRoot, join(propagationRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, propagationPrompt, 240_000);
+		const propagationResult = await waitForPi(propagationRoot, propagationPi, propagationSnapshots, 240_000);
+		const propagationRuns = readRuns(propagationRoot);
+		const propagationStore = readJson(join(propagationRoot, ".agentflux", "runtime", "tasks.json")) ?? { tasks: [], executions: [] };
+		const propagationTask = latestRun(propagationStore.tasks ?? [], task => task.resource?.type === "workflow");
+		const propagationExecution = propagationTask ? (propagationStore.executions ?? []).find((item: any) => item.id === propagationTask.executionId) : undefined;
+		const propagationParentDeadline = propagationTask?.deadlineAt ? Date.parse(propagationTask.deadlineAt) : NaN;
+		const propagationPhaseRuns = propagationRuns.filter(run => run.taskId === propagationTask?.id);
+		const propagationPlanner = propagationPhaseRuns.find(run => run.agent === "dag-planner");
+		const propagationNodeRuns = propagationPhaseRuns.filter(run => run.agent?.startsWith("dag-") && run.agent !== "dag-planner");
+		const propagationCheckpoint = propagationTask?.executionId
+			? safeRead(join(propagationRoot, ".agentflux", "runtime", "runs", propagationTask.executionId, "checkpoint.json"))
+			: undefined;
+		const propagationGate = (propagationCheckpoint?.taskResults ?? [])
+			.map((entry: any) => entry?.[1]?.gateResult)
+			.find((gate: any) => gate && Array.isArray(gate.criteriaResults));
+		const propagationDeadlinesMatch = Number.isFinite(propagationParentDeadline)
+			&& propagationPhaseRuns.length > 0
+			&& propagationPhaseRuns.every(run => Date.parse(String(run.deadlineAt ?? "")) === propagationParentDeadline)
+			&& (!propagationGate || propagationGate.deadlineAt === propagationParentDeadline);
+		const propagationMarker = propagationResult.stdout.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK") || propagationResult.stderr.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK");
+		const propagationTerminal = propagationTask && propagationExecution
+			&& ["completed", "failed", "cancelled", "timed_out"].includes(propagationTask.status)
+			&& propagationExecution.status === propagationTask.status;
+		const propagationNoFalseCompletion = !(propagationTask?.status === "completed" && Number.isFinite(propagationParentDeadline)
+			&& Date.parse(propagationTask.updatedAt) > propagationParentDeadline);
+		evidence.parentDeadlinePropagation = {
+			main: { pid: propagationResult.pid, exitCode: propagationResult.exitCode, timedOut: propagationResult.timedOut },
+			marker: propagationMarker,
+			parentDeadlineAt: propagationTask?.deadlineAt,
+			planner: propagationPlanner,
+			nodeRuns: propagationNodeRuns,
+			qualityGate: propagationGate,
+			checkpoint: propagationCheckpoint ? { status: propagationCheckpoint.status, completed: propagationCheckpoint.completed, failed: propagationCheckpoint.failed } : undefined,
+			task: propagationTask,
+			execution: propagationExecution,
+			deadlinesMatch: Boolean(propagationDeadlinesMatch),
+			terminal: Boolean(propagationTerminal),
+			noFalseCompletion: propagationNoFalseCompletion,
+			snapshotCount: propagationSnapshots.length,
+			snapshots: propagationSnapshots,
+			factsConsistent: Boolean(propagationDeadlinesMatch && propagationTerminal && propagationNoFalseCompletion),
+			stdoutTail: propagationResult.stdout.slice(-5000),
+			stderrTail: propagationResult.stderr.slice(-4000),
+		};
+
 		setupFixture(deadlineRoot, config, {
 			max_cost_per_task: 1,
 			max_iterations: 2,
@@ -294,6 +357,8 @@ async function main(): Promise<void> {
 		evidence.wallClockMs = Date.now() - startedAt;
 		evidence.passed = workflowResult.exitCode === 0 && !workflowResult.timedOut
 			&& workflowMarker && workflowPassedMarker && plannerCompleted && qualityGate && workflowFactsConsistent
+			&& propagationResult.exitCode === 0 && !propagationResult.timedOut
+			&& propagationMarker && evidence.parentDeadlinePropagation.factsConsistent
 			&& deadlineResult.exitCode === 0 && !deadlineResult.timedOut && deadlineMarker && deadlineFactsConsistent;
 		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		if (!evidence.passed) throw new Error(`built Workflow/planner/quality-gate/deadline live evidence failed; report=${reportPath}`);
@@ -305,6 +370,7 @@ async function main(): Promise<void> {
 		throw error;
 	} finally {
 		if (workflowPi) killTree(workflowPi.child.pid);
+		if (propagationPi) killTree(propagationPi.child.pid);
 		if (deadlinePi) killTree(deadlinePi.child.pid);
 		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 		catch (error) { console.warn(`Workflow/deadline fixture cleanup deferred: ${String(error)}`); }

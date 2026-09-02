@@ -17,6 +17,7 @@ import { TelemetryWriter } from "./telemetry/events";
 import type { FluxRuntimeState } from "./core/types";
 import { evaluateCapabilityToolCall, evaluateLockFileToolCall, type EffectiveCapabilityPolicy } from "./core/capability-policy";
 import { RpcInboxPump } from "./extension/rpc-inbox-pump";
+import { readAgentRunStop } from "./agents/agent-run-control";
 import { SharedBoard } from "./core/shared-board";
 
 export default function (pi: ExtensionAPI) {
@@ -67,6 +68,9 @@ export default function (pi: ExtensionAPI) {
 				priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("normal"), Type.Literal("high"), Type.Literal("critical")])),
 			}),
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx: any) {
+				if (readAgentRunStop(controlCwd || ctx.cwd, runId)) {
+					throw new Error(`Agent Run ${runId} is stopping; message action rejected`);
+				}
 				const runtime = new AgentMessageRuntime(join(controlCwd || ctx.cwd, ".agentflux"), {
 					agent: agentName, instanceId, runId, taskId: process.env.AGENTFLUX_TASK_ID || undefined,
 				}, communicationPolicy, record => telemetry?.writeMessageProtocol({
@@ -127,6 +131,8 @@ export default function (pi: ExtensionAPI) {
 							runtimePid: process.pid,
 						}, instanceId);
 					},
+					runId,
+					isRunAccepting: () => !readAgentRunStop(controlCwd || ctx.cwd, runId),
 					onAudit: audit => telemetry?.writeMessageProtocol({
 						sessionId,
 						runId,

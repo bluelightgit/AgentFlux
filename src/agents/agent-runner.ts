@@ -157,7 +157,9 @@ export async function runAgentsParallel(
 		persistent?: boolean;
 		sessionIds?: Map<string, string>;   // per-label session ID (team-workflow 用)
 		sessionDir?: string;                // 自定义 session 目录
-		timeoutMs?: number | null;           // 可选显式 deadline；省略/null 不因 wall-clock 终止
+		timeoutMs?: number | null;           // 可选相对 deadline；省略/null 不因 wall-clock 终止
+		/** 父级传入的绝对 deadline；优先于 timeoutMs，避免跨批次重置时钟。 */
+		deadlineAt?: number;
 		maxRetries?: number;                // 重试次数 (默认 1)
 		lockFiles?: Record<string, string[]>;  // per-label 文件锁: {label: [file paths]}
 		signal?: AbortSignal;               // 调用方取消时终止所有子进程
@@ -251,6 +253,7 @@ export async function runAgentsParallel(
 				persistentSessionId: common.persistent ? `flux-${t.label ?? t.agent.name}-${sid}` : undefined,
 				sessionDir: common.sessionDir,
 				timeoutMs: common.timeoutMs,
+				deadlineAt: common.deadlineAt,
 				maxRetries: common.maxRetries ?? 1,
 				model: t.model,
 				provider: t.provider,
@@ -511,13 +514,21 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * 读取 agent 的 inbox + 群组消息, 拼接到 task 前面
  * 让 agent 能看到其他 agent 的反馈, 不需要主 agent 桥接
  */
-function prependInboxMessages(task: string, agentName: string, cwd: string): { task: string; v2MessageIds: string[] } {
+function prependInboxMessages(task: string, agentName: string, cwd: string, runId: string): { task: string; v2MessageIds: string[] } {
 	try {
 		const fluxDir = join(cwd, ".agentflux");
 		const board = new SharedBoard(fluxDir);
 		const unread = board.getUnreadMessages(agentName);
 		const groupInbox = board.getGroupInbox(agentName);
-		const v2Messages = new MessageBus(fluxDir).poll(agentName, { limit: 20 });
+		const v2Messages = new MessageBus(fluxDir).poll(agentName, {
+			limit: 20,
+			correlationId: runId,
+			includeUncorrelated: true,
+			// A stop control written before this poll fences startup injection too;
+			// uncorrelated steer is legacy residue and must not cross Run boundaries.
+			accept: envelope => !readAgentRunStop(cwd, runId)
+				&& (envelope.type !== "steer" || envelope.correlationId === runId),
+		});
 
 		// 收集所有群组中的最新消息 (只取最后 5 条 per group)
 		const groupMsgs: string[] = [];
@@ -739,7 +750,9 @@ export async function runAgent(opts: {
 	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
 	sessionDir?: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-	timeoutMs?: number | null; // 可选显式 deadline；未设置时不因模型执行 wall-clock 自动终止
+	timeoutMs?: number | null; // 可选相对 deadline；未设置时不因模型执行 wall-clock 自动终止
+	/** 绝对 deadline，供 planner/DAG/judge 继承同一父级时钟。 */
+	deadlineAt?: number;
 	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
 	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
 	// 模型降级 (opt-in, 默认关): 模型不可用时自动切换低一档模型重试
@@ -789,9 +802,17 @@ export async function runAgent(opts: {
 	const lockFiles = opts.lockFiles?.map(file => resolve(workspaceCwd, file));
 	const runStartedAt = Date.now();
 	const timeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "Agent run timeoutMs");
+	if (opts.deadlineAt !== undefined && (!Number.isFinite(opts.deadlineAt) || opts.deadlineAt < 0)) {
+		throw new Error("Agent run deadlineAt must be a finite non-negative timestamp");
+	}
 	const maxRetries = opts.maxRetries ?? 0;
 	const retryDelayMs = opts.retryDelayMs ?? 2000;
-	const deadline = timeoutMs === undefined ? undefined : runStartedAt + timeoutMs;
+	// An inherited absolute deadline is authoritative. Never recreate it from
+	// the remaining duration at a later planner/node/retry boundary.
+	const deadline = opts.deadlineAt ?? (timeoutMs === undefined ? undefined : runStartedAt + timeoutMs);
+	const deadlineLabel = timeoutMs === undefined
+		? (deadline === undefined ? "none" : "absolute deadline")
+		: `${timeoutMs / 1000}s`;
 	const processRunId = opts.runId ?? `subagent-${randomUUID()}`;
 	const runRegistry = opts.runRegistry ?? {};
 	const registerRun = runRegistry.register ?? registerAgentRun;
@@ -961,7 +982,7 @@ export async function runAgent(opts: {
 	if (opts.liveTeamCommunication && prefixLayout && communicationPolicy.enabled && communicationPolicy.actions.includes("poll")) {
 		scopedTask = `${scopedTask}\n\n=== Live team communication ===\nAfter completing substantive work and before your final response, call flux_agent_message with action=poll. Process relevant operator or peer updates and acknowledge every message you consumed.\n=== End live team communication ===`;
 	}
-	const inboxInjection = prependInboxMessages(scopedTask, agent.name, cwd);
+	const inboxInjection = prependInboxMessages(scopedTask, agent.name, cwd, processRunId);
 	const taskWithInbox = inboxInjection.task;
 	if (opts.persistent) {
 		registerRuntimeAgentInBoard(
@@ -1224,7 +1245,7 @@ export async function runAgent(opts: {
 				errorMessage: "explicit deadline exhausted before child start", retryCount: Math.max(0, attemptCount - 1),
 			};
 			lastResult.exitCode = 124;
-			lastResult.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : timeoutMs / 1000}s) exhausted across retries/fallbacks`;
+			lastResult.errorMessage = `explicit deadline (${deadlineLabel}) exhausted across retries/fallbacks`;
 			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: lastResult.errorMessage });
 			break;
 		}
@@ -1525,7 +1546,7 @@ export async function runAgent(opts: {
 					if (buffer.trim()) processLine(buffer);
 					const resolvedCode = forcedExitCode ?? (code ?? (signal ? 130 : 1));
 					if (resolvedCode === 124 && !result.errorMessage) {
-						result.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : `${timeoutMs / 1000}s`}) exhausted`;
+						result.errorMessage = `explicit deadline (${deadlineLabel}) exhausted`;
 					}
 					activeRunSnapshot(result.usage, {
 						phase: result.errorMessage ? "error" : "running",
@@ -1627,11 +1648,11 @@ export async function runAgent(opts: {
 			const remainingBeforeRetry = remainingDuration(deadline);
 			if (remainingBeforeRetry !== undefined && remainingBeforeRetry <= delay) {
 				result.exitCode = 124;
-				result.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : timeoutMs / 1000}s) exhausted before retry`;
+				result.errorMessage = `explicit deadline (${deadlineLabel}) exhausted before retry`;
 				activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: result.errorMessage, model, provider });
 				break;
 			}
-			const reason = isTimeout ? `timeout (${timeoutMs === undefined ? "explicit deadline" : `${timeoutMs / 1000}s`})` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : providerCompatibilityErr ? `provider compatibility: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
+			const reason = isTimeout ? `timeout (${deadlineLabel})` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : providerCompatibilityErr ? `provider compatibility: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
 			const retrySummary = `${reason}, retry ${retryCount + 1}/${maxRetries} after ${delay}ms`;
 			console.error(`[flux subagent] ${agent.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries} in ${delay}ms...`);
 			activeRunSnapshot(undefined, { phase: "backoff", lastActivityType: "retry_backoff", lastActivitySummary: retrySummary, model, provider });
@@ -1782,6 +1803,15 @@ export async function runAgent(opts: {
 	}
 	if (!terminalized) {
 		console.error(`[flux run-registry] ${agent.name}/${processRunId} terminal convergence unavailable; business result preserved as ${terminalInput.status}`);
+	}
+	// A physical Run is immutable after terminalization.  Any unconsumed
+	// correlated instruction belongs to that Run only and must not be visible to
+	// a later Run of the same Agent; lease redelivery is not a cross-Run retry
+	// mechanism.
+	try {
+		new MessageBus(fluxDir).rejectByCorrelation(agent.name, processRunId, "run terminated before instruction was consumed");
+	} catch (error) {
+		reportRegistryFailure("terminal message rejection", error);
 	}
 	clearAgentRunStop(cwd, processRunId);
 

@@ -169,6 +169,8 @@ export async function generateTaskDAG(
 		maxCostUsd?: number;
 		parentMaxTurns?: number;
 		parentMaxInputTokens?: number;
+		/** Absolute parent deadline; takes precedence over timeoutMs. */
+		deadlineAt?: number;
 		timeoutMs?: number | null;
 		health?: RunHealthConfig;
 		taskId?: string;
@@ -235,6 +237,7 @@ Rules:
 		parentMaxCostUsd: opts.maxCostUsd,
 		parentMaxTurns: opts.parentMaxTurns,
 		parentMaxInputTokens: opts.parentMaxInputTokens,
+		deadlineAt: opts.deadlineAt,
 		health: opts.health,
 		taskId: opts.taskId,
 		executionId: opts.executionId,
@@ -600,7 +603,12 @@ export async function executeDAG(
 		// 并行执行就绪任务 (用 allSettled 防止单个节点 throw 导致整批丢失)
 		const remainingBudget = opts.maxCostUsd === undefined ? undefined : Math.max(0, opts.maxCostUsd - totalCost);
 		const perNodeBudget = remainingBudget === undefined ? undefined : remainingBudget / ready.length;
-		const batchTimeoutMs = boundedNodeTimeout(opts.timeoutMs, deadline);
+		// An inherited absolute deadline is already checked by the loop and must
+		// remain the sole parent clock. Do not turn its current remainder into a
+		// fresh relative timeout, which would make every node start a new clock.
+		const batchTimeoutMs = deadline === undefined
+			? boundedNodeTimeout(opts.timeoutMs, undefined)
+			: normalizeOptionalDurationMs(opts.timeoutMs, "DAG node timeout");
 		if (batchTimeoutMs !== undefined && batchTimeoutMs <= 0) {
 			status = "timed_out";
 			break;
@@ -837,7 +845,8 @@ async function executeNodeWithGate(
 				prefixLayout: opts.prefixLayout,
 				defaultModel: opts.defaultModel,
 				defaultProvider: opts.defaultProvider,
-				timeoutMs: remainingDuration(nodeDeadline),
+				deadlineAt: nodeDeadline,
+				timeoutMs: undefined,
 				maxCostUsd: remainingNodeCost,
 				parentMaxCostUsd: opts.maxCostUsd,
 				parentMaxTurns: opts.parentMaxTurns,
@@ -861,7 +870,8 @@ async function executeNodeWithGate(
 				provider: agentDef.provider,
 				pricing: opts.pricing,
 				thinking: agentDef.thinking,
-				timeoutMs: remainingDuration(nodeDeadline), // 所有重试/降级共享节点总时限
+				deadlineAt: nodeDeadline,
+				timeoutMs: undefined, // nodeDeadline 是所有重试/降级共享的绝对时限
 				maxRetries: 1,                        // 底层自动重试 1 次
 				retryDelayMs: 3000,
 				persistent: opts.persistent ?? true,
@@ -928,14 +938,13 @@ async function executeNodeWithGate(
 			const gateCfg = opts.qualityGate;
 			const gateModel = gateCfg?.model ?? result.model ?? agentDef.model ?? "";
 			const gateProvider = gateCfg?.provider ?? (gateModel ? models[gateModel]?.provider ?? agentDef.provider : agentDef.provider);
-			const gateTimeoutMs = boundedNodeTimeout(gateCfg?.timeoutMs, nodeDeadline);
 			let gateAttempts = 0;
 			for (;;) {
 				gateAttempts++;
 				lastGateResult = await checkQualityGate(
 					result.output,
 					node.acceptanceCriteria,
-					{ cwd: opts.cwd, model: gateModel, provider: gateProvider, pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId, signal: opts.signal, timeoutMs: gateTimeoutMs },
+					{ cwd: opts.cwd, model: gateModel, provider: gateProvider, pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId, signal: opts.signal, deadlineAt: nodeDeadline, timeoutMs: gateCfg?.timeoutMs },
 				);
 				totalNodeCost += lastGateResult.gateCost;
 

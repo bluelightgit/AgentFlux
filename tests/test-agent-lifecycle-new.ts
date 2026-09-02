@@ -7,7 +7,8 @@ import { createAgent, deleteAgent, deleteSessionAgents, enqueueAgentInstruction,
 import { TelemetryWriter } from "../src/telemetry/events";
 import { MessageBus } from "../src/core/message-bus";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
-import { finishAgentRun, getAgentRun, heartbeatAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns, updateAgentRunSnapshot } from "../src/core/run-registry";
+import { finishAgentRun, getAgentRun, heartbeatAgentRun, markAgentRunRunning, markAgentRunStopRequested, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns, updateAgentRunSnapshot } from "../src/core/run-registry";
+import { getTask, getTaskExecution, registerTask } from "../src/core/task-registry";
 
 let passed = 0;
 function check(value: unknown, message: string): void { if (!value) throw new Error(message); passed++; console.log(`✓ ${message}`); }
@@ -318,6 +319,23 @@ async function main(): Promise<void> {
 		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
 		check(getAgentRun(join(root, ".agentflux"), "dead-heartbeat-run")?.status === "failed",
 			"心跳超时且进程已消失时收敛为失败");
+		const orphanTaskId = "orphan-parent-task";
+		const orphanExecutionId = "orphan-parent-execution";
+		registerTask(join(root, ".agentflux"), "test", {
+			taskId: orphanTaskId, executionId: orphanExecutionId, task: "orphan parent", selectedBy: "user", operation: "new",
+			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
+		});
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "orphan-parent-run", sessionId: "test", agent: "orphan-parent-agent", role: "implementer",
+			currentTask: "orphan parent", kind: "persistent", taskId: orphanTaskId, executionId: orphanExecutionId,
+		});
+		markAgentRunRunning(join(root, ".agentflux"), "orphan-parent-run", 99999999, 1);
+		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		const recoveredTask = getTask(join(root, ".agentflux"), orphanTaskId);
+		const recoveredExecution = getTaskExecution(join(root, ".agentflux"), orphanExecutionId);
+		check(recoveredTask?.status === "failed" && recoveredExecution?.status === "failed"
+			&& recoveredExecution.outcome?.error?.includes("heartbeat expired") === true,
+			"orphan Run recovery terminalizes its Task and TaskExecution with the failure reason");
 		const turnLimited = await runAgent({
 			cwd: root, agent: { ...template, name: "turn-limited" }, task: "bounded",
 			sessionId: "test", prefixLayout: true, maxTurns: 1, invocationOverride,
@@ -468,6 +486,17 @@ async function main(): Promise<void> {
 		check(rejectQueuedAgentInstructions(root, getAgentRun(join(root, ".agentflux"), queuedRunId)!, "test stop") === 2
 			&& new MessageBus(join(root, ".agentflux")).peek(queuedAgent.name, { limit: 20 }).every(item => item.delivery.status === "rejected"), "停止具体 Run 时拒绝其未消费指令");
 		finishAgentRun(join(root, ".agentflux"), queuedRunId, { status: "cancelled" });
+		resetAgentStatus(root, queuedAgent.name, "idle");
+		const fencedRunId = "queued-agent-fenced-run";
+		registerAgentRun(join(root, ".agentflux"), { id: fencedRunId, sessionId: "persistent", agent: queuedAgent.name, role: queuedAgent.role, currentTask: "fenced task", kind: "persistent" });
+		markAgentRunRunning(join(root, ".agentflux"), fencedRunId, process.pid, 1);
+		resetAgentStatus(root, queuedAgent.name, "running");
+		markAgentRunStopRequested(join(root, ".agentflux"), fencedRunId);
+		check(enqueueAgentInstruction(queuedAgent.name, "must not queue after stop", { cwd: root, sessionId: "persistent" }) === undefined,
+			"stop_requested Run fail-closed rejects new steer instructions");
+		check(new MessageBus(join(root, ".agentflux")).peek(queuedAgent.name, { limit: 20, correlationId: fencedRunId, includeUncorrelated: false }).length === 0,
+			"stop fence does not leave a delivery for a later Run");
+		finishAgentRun(join(root, ".agentflux"), fencedRunId, { status: "cancelled" });
 		resetAgentStatus(root, queuedAgent.name, "idle");
 		// GC: 最新 k 个保留，更早的删除
 		createAgent(root, { name: "gc-a", modelsConfig: { models: {} } });

@@ -223,8 +223,9 @@ async function main(): Promise<void> {
 			"必须严格按顺序实际调用 AgentFlux flux_agent 工具，不要调用其他工具。",
 			"1) action=inspect，agent=control-live，last=3。",
 			"2) action=stop，agent=control-live。",
-			"3) action=inspect，agent=control-live，last=3。",
-			"三次调用后只输出 P0_07_CONTROLS_OK。",
+			"3) stop 返回后立即 action=steer，agent=control-live，task=STOP_RACE_MUST_BE_REJECTED；这次调用必须失败关闭，不能接受或排队。",
+			"4) action=inspect，agent=control-live，last=3。",
+			"四次调用后只输出 P0_07_CONTROLS_OK。",
 		].join("\n"), config, 120_000);
 		const stopOperatorResult = await stopOperatorPi.result;
 		const mainResult = await mainPi.result;
@@ -236,15 +237,22 @@ async function main(): Promise<void> {
 		const agents = readJson(join(fixtureRoot, ".agentflux", "runtime", "agents.json"));
 		const agent = (agents?.agents ?? []).find((item: any) => item.name === "control-live");
 		steerDeliveries = deliveriesForRun(steerRunId);
+		const stopSteerDeliveries = listControlDeliveries().filter(item => {
+			const envelope = item?.messageId
+				? readJson(join(fixtureRoot, ".agentflux", "shared", "messages-v2", "envelopes", `${item.messageId}.json`))
+				: undefined;
+			return envelope?.correlationId === stopRun?.id && envelope?.type === "steer";
+		});
 		const terminal = stopRun && !ACTIVE.has(stopRun.status);
 		const stopObserved = stopRun?.recentEvents?.some((event: any) => event.type === "stop_requested") ?? false;
 		const noDeadline = steerRun?.deadlineAt === undefined && stopRun?.deadlineAt === undefined;
 		const steerAcked = steerDeliveries.some(item => item.status === "acknowledged");
+		const stopSteerRejected = stopSteerDeliveries.length === 0;
 		const stopMarker = stopOperatorResult.stdout.includes("P0_07_CONTROLS_OK") || stopOperatorResult.stderr.includes("P0_07_CONTROLS_OK");
 		const steerMarker = steerOperatorResult.stdout.includes("P0_07_STEER_SENT") || steerOperatorResult.stderr.includes("P0_07_STEER_SENT");
 		const passed = steerOperatorResult.exitCode === 0 && stopOperatorResult.exitCode === 0 && mainResult.exitCode === 0
 			&& steerMarker && stopMarker && steerConsumed && steerAcked && steerRun?.status === "completed"
-			&& Boolean(terminal) && stopRun?.status === "cancelled" && stopObserved && noDeadline;
+			&& Boolean(terminal) && stopRun?.status === "cancelled" && stopObserved && noDeadline && stopSteerRejected;
 		const evidence = {
 			updatedAt: new Date().toISOString(),
 			branch,
@@ -264,6 +272,8 @@ async function main(): Promise<void> {
 			stopMarker,
 			steerConsumed,
 			steerAcked,
+			stopSteerRejected,
+			stopSteerDeliveries,
 			passed,
 			activeRunBeforeControl: activeRun,
 			steerRun: steerRun ? {

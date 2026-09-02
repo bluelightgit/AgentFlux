@@ -37,6 +37,10 @@ export interface RpcInboxPumpOptions {
 	onHeartbeat?: (now: Date) => void;
 	/** 注入后等待 agent_start / 轮次结束的超时（默认 60s）；超时重置批次，消息保留重投。 */
 	agentStartTimeoutMs?: number;
+	/** Physical Run correlation; prevents a later Run from consuming old steer mail. */
+	runId?: string;
+	/** Durable stop fence checked while poll holds the Message V2 mutex. */
+	isRunAccepting?: () => boolean;
 }
 
 interface ActiveBatch {
@@ -109,7 +113,14 @@ export class RpcInboxPump {
 		this.ticking = true;
 		this.stats.lastTickAt = now.toISOString();
 		try {
-			const messages = this.bus.poll(this.options.recipient, { limit: this.batchSize, now });
+			const messages = this.bus.poll(this.options.recipient, {
+				limit: this.batchSize,
+				now,
+				correlationId: this.options.runId,
+				includeUncorrelated: true,
+				accept: (envelope, _delivery) => (envelope.type !== "steer" || envelope.correlationId === this.options.runId)
+					&& (this.options.isRunAccepting?.() ?? true),
+			});
 			if (messages.length === 0) return 0;
 			const mode = this.selectMode(messages);
 			const messageIds = messages.map(item => item.envelope.id);

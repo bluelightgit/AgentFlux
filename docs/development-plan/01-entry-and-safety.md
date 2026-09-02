@@ -27,4 +27,4 @@
 
 ## 完成前置条件
 
-P0-01/P0-04、P0-05、P0-07 的核心实现已归档；P0-07 独立审计补证报告已在当前提交齐备，仍由 `03-real-validation.md` 跟踪并等待 auditor，不改变已完成的 Core 契约。当前按 P0-06 继续闭合 Message V2 单一路径；P0-02/P0-03 仍是独立的入口与安全边界任务。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。
+P0-01/P0-04、P0-05 的核心实现已归档；P0-07 独立审计未通过，父绝对 deadline、stop/steer 竞态和 orphan 父 Task/Execution 收敛由 `03-real-validation.md` 作为当前返工项跟踪。P0-06 group 单一路径、P0-02/P0-03 仍是独立入口与安全边界任务；其中 stop 后消息不得污染后续 Run 必须与 P0-06 的 Message V2 单一路径保持同一事实源。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。
