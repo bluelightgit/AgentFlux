@@ -115,7 +115,7 @@ function launch(config: ReturnType<typeof loadLiveConfig>, extensionEntry: strin
 		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
 		"--no-skills", "--tools", "flux_agent", "--session-dir", join(fixtureRoot, "sessions"), "--session-id", sessionId,
 		...config.cliArgs(config.mainModel), prompt,
-	], { cwd: fixtureRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: config.env });
+	], { cwd: fixtureRoot, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], detached: true, env: config.env });
 	let stdout = "";
 	let stderr = "";
 	child.stdout?.on("data", value => { stdout += value.toString(); });

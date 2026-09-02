@@ -1315,7 +1315,11 @@ export async function runAgent(opts: {
 					cwd: workspaceCwd,
 					shell: false,
 					stdio: ["ignore", "pipe", "pipe"],
-					detached: process.platform !== "win32",
+					// Keep each Run in its own process group on every host. On Windows this
+					// prevents an abrupt parent-Pi termination from implicitly killing the
+					// child Run before restart recovery can observe its stale heartbeat;
+					// explicit stop/deadline paths still taskkill this Run with /T.
+					detached: true,
 					windowsHide: true,
 					env: {
 						...process.env,
