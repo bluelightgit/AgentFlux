@@ -8,7 +8,7 @@
 
 - **状态**：四项返工已实现，并在当前 production-dist 复跑与最终同步门禁中通过，等待独立审计复核（2026-09-02）。
 - **确定性门禁**：当前树的 `npm run verify`、`npm run typecheck`、`npm run build`、`git diff --check` 均通过；Agent lifecycle 105、Message V2/cache 39、DAG 35、RPC inbox 22 及其余 unit 套件通过。
-- **最新同步证据**：提交 `a7573a0acc3be2c5fc86995057c06bc17d7c0792` 的 production-dist controls、Workflow/deadline 和 restart-recovery 报告均为 `passed=true`、`sourceCommit` 匹配、`changedFiles=[]`；Workflow fixture 为真实 planner、implementer 和 quality gate 使用有限的 32 轮父 Task 上限，并将 timeout 场景的父 deadline 设为 90 秒，避免 planner 预算耗尽或尚未启动节点就误判 timeout 链路。
+- **最新同步证据**：当前 HEAD 对应的 production-dist controls、Workflow/deadline 和 restart-recovery 报告均为 `passed=true`、`sourceCommit` 与 HEAD 匹配、`changedFiles=[]`；Workflow fixture 为真实 planner、implementer 和 quality gate 使用有限的 32 轮父 Task 上限，并将 timeout 场景的父 deadline 设为 90 秒，避免 planner 预算耗尽或尚未启动节点就误判 timeout 链路。
 - **阻断 1 已修复**：`reconcileRecoveredTask` 先以同一 Task/Execution 的 active Run、持久化 owner PID 和 active-context 精确 scope 做父级存活保护，再以 Run Registry recovery fence 与 `updateTaskStatus` 协调收敛；确定性套件覆盖 live sibling 与 live Main/Workflow owner，当前 restart production 场景也证明 Pi A 已真实终止后，孤儿 Run、TaskExecution、Task 和 Agent 一致回收。
 - **阻断 2 已修复**：`executeDAG` 记录节点/批次/质量门的绝对 deadline 耗尽并返回 `timed_out`；入口以 `timeout` outcome 同步写 Task/Execution。`p0-07-workflow-deadline-latest.json` 的父 deadline 场景核对 planner、node、Task、Execution 的同一 `deadlineAt`，节点、DAG、Task、Execution 均为 `timed_out`，无假成功 marker；正常 planner→node→judge 场景仍通过。
 - **阻断 3 已修复并复跑**：restart fixture 在回收前确认目标 Run 与 Pi A PID 存活，使用明确的 process-tree termination evidence 验证 Pi A 和目标 child 已终止，并拒绝 harness timeout；当前 `p0-07-restart-recovery-latest.json` 记录 `passed=true`、`recovered=true`、`heartbeat_expired`、Task/Execution failed、Agent idle 及匹配错误。
