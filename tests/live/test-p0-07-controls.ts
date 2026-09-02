@@ -190,6 +190,9 @@ async function main(): Promise<void> {
 	let mainPi: PiHandle | undefined;
 	let steerOperatorPi: PiHandle | undefined;
 	let stopOperatorPi: PiHandle | undefined;
+	let mainResult: PiResult | undefined;
+	let steerOperatorResult: PiResult | undefined;
+	let stopOperatorResult: PiResult | undefined;
 	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	if (process.env.AGENTFLUX_LIVE_BUILT !== "1") throw new Error("P0-07 controls live test requires AGENTFLUX_LIVE_BUILT=1");
 	if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js"))) throw new Error("production dist entry is missing; run npm run build first");
@@ -251,7 +254,7 @@ async function main(): Promise<void> {
 			"2) action=steer，agent=control-live，task=收到 operator steer；请只回复 STEER_SEEN，然后结束当前 Run。",
 			"两次调用后只输出 P0_07_STEER_SENT。",
 		].join("\n"), config, 120_000);
-		const steerOperatorResult = await steerOperatorPi.result;
+		steerOperatorResult = await steerOperatorPi.result;
 
 		let steerRun: any;
 		let steerDeliveries: any[] = [];
@@ -296,8 +299,8 @@ async function main(): Promise<void> {
 			"4) action=inspect，agent=control-live，last=3。",
 			"四次调用后只输出 P0_07_CONTROLS_OK。",
 		].join("\n"), config, 120_000);
-		const stopOperatorResult = await stopOperatorPi.result;
-		const mainResult = await mainPi.result;
+		stopOperatorResult = await stopOperatorPi.result;
+		mainResult = await mainPi.result;
 		await sleep(1_000);
 
 		const runs = readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"));
@@ -385,6 +388,45 @@ async function main(): Promise<void> {
 			throw new Error(`P0-07 controls live evidence failed; report=${reportPath}`);
 		}
 		console.log(JSON.stringify(evidence, null, 2));
+	} catch (error) {
+		// Never leave a previous successful report in place when a fresh control
+		// attempt fails before reaching the final assertions.
+		const postStopSteer = postStopSteerEvidence(stopOperatorResult?.stdout ?? "");
+		const failureEvidence = {
+			updatedAt: new Date().toISOString(),
+			branch,
+			sourceCommit,
+			changedFiles,
+			profile: config.profileName,
+			configPath: config.configPath,
+			provider: config.providerId,
+			model: config.mainModel,
+			thinking: config.thinking,
+			builtExtension: true,
+			wallClockMs: Date.now() - startedAt,
+			main: mainResult ? { pid: mainResult.pid, exitCode: mainResult.exitCode, timedOut: mainResult.timedOut } : { pid: mainPi?.child.pid },
+			steerOperator: steerOperatorResult ? { pid: steerOperatorResult.pid, exitCode: steerOperatorResult.exitCode, timedOut: steerOperatorResult.timedOut } : { pid: steerOperatorPi?.child.pid },
+			stopOperator: stopOperatorResult ? { pid: stopOperatorResult.pid, exitCode: stopOperatorResult.exitCode, timedOut: stopOperatorResult.timedOut } : { pid: stopOperatorPi?.child.pid },
+			postStopSteerAttempted: postStopSteer.attempted,
+			postStopSteerToolCall: postStopSteer.call,
+			postStopSteerToolResult: postStopSteer.result,
+			postStopSteerRejected: postStopSteer.rejected,
+			observedRuns: readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"))?.runs ?? [],
+			stdoutTail: {
+				main: mainResult?.stdout.slice(-5000),
+				steerOperator: steerOperatorResult?.stdout.slice(-4000),
+				stopOperator: stopOperatorResult?.stdout.slice(-4000),
+			},
+			stderrTail: {
+				main: mainResult?.stderr.slice(-3000),
+				steerOperator: steerOperatorResult?.stderr.slice(-2000),
+				stopOperator: stopOperatorResult?.stderr.slice(-2000),
+			},
+			passed: false,
+			error: String(error instanceof Error ? error.message : error),
+		};
+		try { writeFileSync(reportPath, JSON.stringify(failureEvidence, null, 2)); } catch {}
+		throw error;
 	} finally {
 		if (mainPi) stopTree(mainPi.child);
 		if (steerOperatorPi) stopTree(steerOperatorPi.child);
