@@ -227,9 +227,10 @@ async function main(): Promise<void> {
 			"3) 成功后只输出 CHECKPOINT_RESUME_OK。",
 		].join("\n"), 180_000);
 		const checkpointResumeResult = await checkpointResumePi.result;
-		const finalTasks = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json"))?.tasks ?? [];
+		const finalTaskStore = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json")) ?? {};
+		const finalTasks = finalTaskStore.tasks ?? [];
 		const resumeTask = taskFor(finalTasks, "checkpoint-live", "resume");
-		const resumeExecution = resumeTask?.executionId ? (readJson(join(fixtureRoot, ".agentflux", "runtime", "executions.json"))?.executions ?? []).find((execution: any) => execution.id === resumeTask.executionId) : undefined;
+		const resumeExecution = resumeTask?.executionId ? (finalTaskStore.executions ?? []).find((execution: any) => execution.id === resumeTask.executionId) : undefined;
 		const resumeCheckpoint = resumeTask?.executionId ? readJson(join(fixtureRoot, ".agentflux", "runtime", "runs", resumeTask.executionId, "checkpoint.json")) : undefined;
 		const finalRuns = resumeTask ? (readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"))?.runs ?? []).filter((run: any) => run.taskId === resumeTask.id) : [];
 		const resumedNodeRun = finalRuns.find((run: any) => run.status === "completed" && String(run.lastProgressSummary ?? "").includes("CHECKPOINT_RESUME_NODE_OK"));
