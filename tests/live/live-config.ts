@@ -1,44 +1,26 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
- * Live 测试的可配置 Provider 加载。
+ * Live 验证的模型/provider 配置。
  *
- * 默认（不设置任何环境变量）使用当前 pi 内置
- * octopus-completions provider 和本机 auth.json 凭据；如需兼容旧环境可显式传入 provider id。
+ * 测试场景到 profile 的映射位于 live-test-config.json。默认 local profile
+ * 优先使用当前 Pi 的 PI_PROVIDER/PI_MODEL/PI_THINKING；配置文件只提供
+ * 本地默认值。需要切换 provider 或角色模型时，使用 AGENTFLUX_LIVE_PROFILE
+ * 或对应的 AGENTFLUX_LIVE_* 环境变量，不修改测试代码。
  *
- * 设置 AGENTFLUX_LIVE_BASE_URL 后，会把 provider 定义按 pi models.json
- * 的 providers 段结构写入临时 agent 目录（PI_CODING_AGENT_DIR 重定向），
- * pi 子进程即可使用任意 OpenAI 兼容 / Anthropic 兼容端点：
- *
- *   AGENTFLUX_LIVE_PROVIDER_ID   provider id（默认 agentflux-ci）
- *   AGENTFLUX_LIVE_BASE_URL      baseUrl（如 https://api.example.com/v1）
- *   AGENTFLUX_LIVE_API           api 类型：openai-completions（默认）
- *                                / anthropic / openai-responses 等
- *   AGENTFLUX_LIVE_API_KEY       API key（可省略，改用 --api-key 时同源）
- *   AGENTFLUX_LIVE_MODEL_PRO     高能力模型名（默认 deepseek-v4-pro）
- *   AGENTFLUX_LIVE_MODEL_FLASH   低能力模型名（默认 deepseek-v4-flash）
- *   AGENTFLUX_LIVE_THINKING      thinking 等级（默认 off：
- *                                off|minimal|low|medium|high|xhigh|max）
- *
- * 结构对应 pi models.json（docs/models.md）：
- *
- *   {
- *     "providers": {
- *       "<id>": {
- *         "baseUrl": "...",
- *         "api": "openai-completions",
- *         "apiKey": "...",
- *         "models": [{ "id": "..." }, ...]
- *       }
- *     }
- *   }
+ * 自定义兼容 provider 可设置 AGENTFLUX_LIVE_BASE_URL、
+ * AGENTFLUX_LIVE_API、AGENTFLUX_LIVE_API_KEY，并选择 environment profile。
  */
 export interface LiveConfig {
+	profileName: string;
+	configPath: string;
 	providerId: string;
-	modelPro: string;
-	modelFlash: string;
+	mainModel: string;
+	plannerModel: string;
+	workerModel: string;
+	judgeModel: string;
 	thinking: string;
 	/** spawn pi 时追加的 provider/model/thinking/api-key CLI 参数 */
 	cliArgs(model: string): string[];
@@ -49,57 +31,159 @@ export interface LiveConfig {
 	cleanup(): void;
 }
 
-export function loadLiveConfig(): LiveConfig {
+type Setting = string | {
+	value?: string;
+	env?: string;
+	fallback?: string;
+};
+
+type LiveProfile = {
+	provider?: Setting;
+	mainModel?: Setting;
+	plannerModel?: Setting;
+	workerModel?: Setting;
+	judgeModel?: Setting;
+	thinking?: Setting;
+};
+
+type LiveTestFile = {
+	version?: number;
+	defaultProfile?: string;
+	profiles?: Record<string, LiveProfile>;
+	tests?: Record<string, string>;
+};
+
+const CONFIG_PATH = resolve(import.meta.dirname, "live-test-config.json");
+const MODEL_ENV_OVERRIDES: Record<keyof Pick<LiveConfig, "providerId" | "mainModel" | "plannerModel" | "workerModel" | "judgeModel">, string> = {
+	providerId: "AGENTFLUX_LIVE_PROVIDER_ID",
+	mainModel: "AGENTFLUX_LIVE_MODEL",
+	plannerModel: "AGENTFLUX_LIVE_PLANNER_MODEL",
+	workerModel: "AGENTFLUX_LIVE_WORKER_MODEL",
+	judgeModel: "AGENTFLUX_LIVE_JUDGE_MODEL",
+};
+
+function readConfig(): LiveTestFile {
+	const path = process.env.AGENTFLUX_LIVE_CONFIG?.trim() || CONFIG_PATH;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		throw new Error(`无法读取 live test config ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!parsed || typeof parsed !== "object") throw new Error(`live test config must be an object: ${path}`);
+	const config = parsed as LiveTestFile;
+	if (config.version !== undefined && config.version !== 1) throw new Error(`unsupported live test config version: ${String(config.version)}`);
+	if (!config.profiles || typeof config.profiles !== "object") throw new Error(`live test config has no profiles: ${path}`);
+	return config;
+}
+
+function settingValue(setting: Setting | undefined, env: NodeJS.ProcessEnv): string | undefined {
+	if (typeof setting === "string") return setting.trim() || undefined;
+	if (!setting || typeof setting !== "object") return undefined;
+	if (setting.env) {
+		const fromEnv = env[setting.env]?.trim();
+		if (fromEnv) return fromEnv;
+	}
+	const value = setting.value?.trim();
+	if (value) return value;
+	return setting.fallback?.trim() || undefined;
+}
+
+function requiredSetting(name: string, value: string | undefined, profileName: string): string {
+	if (value) return value;
+	throw new Error(`live test profile '${profileName}' has no ${name}; configure it in live-test-config.json or environment`);
+}
+
+function uniqueModels(...models: string[]): string[] {
+	return [...new Set(models)];
+}
+
+export function loadLiveConfig(testName = process.env.AGENTFLUX_LIVE_TEST?.trim() || "default"): LiveConfig {
+	const file = readConfig();
+	const profileName = process.env.AGENTFLUX_LIVE_PROFILE?.trim()
+		|| file.tests?.[testName]
+		|| file.defaultProfile
+		|| "local";
+	const profile = file.profiles?.[profileName];
+	if (!profile) throw new Error(`unknown live test profile '${profileName}' for test '${testName}'`);
+
 	const baseUrl = process.env.AGENTFLUX_LIVE_BASE_URL?.trim();
-	const providerId = process.env.AGENTFLUX_LIVE_PROVIDER_ID?.trim() || (baseUrl ? "agentflux-ci" : "octopus-completions");
-	const api = process.env.AGENTFLUX_LIVE_API?.trim() || "openai-completions";
-	const apiKey = process.env.AGENTFLUX_LIVE_API_KEY?.trim();
-	const modelPro = process.env.AGENTFLUX_LIVE_MODEL_PRO?.trim() || "deepseek-v4-pro";
-	const modelFlash = process.env.AGENTFLUX_LIVE_MODEL_FLASH?.trim() || "deepseek-v4-flash";
-	const thinking = process.env.AGENTFLUX_LIVE_THINKING?.trim() || "off";
+	const env = process.env;
+	const profileValue = (key: keyof LiveProfile): string | undefined => settingValue(profile[key], env);
+	const providerId = requiredSetting(
+		"provider",
+		(env[MODEL_ENV_OVERRIDES.providerId]?.trim() || (baseUrl ? "agentflux-ci" : undefined) || profileValue("provider")),
+		profileName,
+	);
+	const mainModel = requiredSetting(
+		"mainModel",
+		env[MODEL_ENV_OVERRIDES.mainModel]?.trim() || profileValue("mainModel"),
+		profileName,
+	);
+	const plannerModel = requiredSetting(
+		"plannerModel",
+		env[MODEL_ENV_OVERRIDES.plannerModel]?.trim() || profileValue("plannerModel") || mainModel,
+		profileName,
+	);
+	const workerModel = requiredSetting(
+		"workerModel",
+		env[MODEL_ENV_OVERRIDES.workerModel]?.trim() || profileValue("workerModel") || mainModel,
+		profileName,
+	);
+	const judgeModel = requiredSetting(
+		"judgeModel",
+		env[MODEL_ENV_OVERRIDES.judgeModel]?.trim() || profileValue("judgeModel") || plannerModel,
+		profileName,
+	);
+	const thinking = requiredSetting(
+		"thinking",
+		env.AGENTFLUX_LIVE_THINKING?.trim() || profileValue("thinking") || env.PI_THINKING?.trim() || "off",
+		profileName,
+	);
 
 	let agentDir: string | undefined;
-	let env = process.env;
+	let childEnv = env;
 	if (baseUrl) {
 		agentDir = mkdtempSync(join(tmpdir(), "agentflux-live-"));
+		const api = process.env.AGENTFLUX_LIVE_API?.trim() || "openai-completions";
+		const apiKey = process.env.AGENTFLUX_LIVE_API_KEY?.trim();
 		const provider: Record<string, unknown> = {
 			baseUrl,
 			api,
-			models: [{ id: modelPro }, { id: modelFlash }],
+			models: uniqueModels(mainModel, plannerModel, workerModel, judgeModel).map(id => ({ id })),
 		};
 		if (apiKey) provider.apiKey = apiKey;
 		writeFileSync(join(agentDir, "models.json"), JSON.stringify({ providers: { [providerId]: provider } }, null, 2));
-		env = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+		childEnv = { ...env, PI_CODING_AGENT_DIR: agentDir };
 	}
 
-	const cliArgs = (model: string): string[] => {
-		const args = ["--provider", providerId, "--model", model, "--thinking", thinking];
-		if (apiKey) args.push("--api-key", apiKey);
-		return args;
-	};
-
-	const fluxModelsJson = (): object => ({
-		models: {
-			[modelPro]: { provider: providerId, contextWindow: 1_000_000 },
-			[modelFlash]: { provider: providerId, contextWindow: 1_000_000 },
-		},
-		roles: {
-			planner: { model: modelPro, thinking, tools: ["read", "grep", "find", "ls"] },
-			implementer: { model: modelFlash, thinking, tools: ["read", "grep", "find", "ls"] },
-			reviewer: { model: modelFlash, thinking, tools: ["read", "grep", "find", "ls"] },
-			tester: { model: modelFlash, thinking, tools: ["read", "grep", "find", "ls"] },
-		},
-		sharedSkills: [],
-	});
-
-	return {
+	const config: LiveConfig = {
+		profileName,
+		configPath: process.env.AGENTFLUX_LIVE_CONFIG?.trim() || CONFIG_PATH,
 		providerId,
-		modelPro,
-		modelFlash,
+		mainModel,
+		plannerModel,
+		workerModel,
+		judgeModel,
 		thinking,
-		cliArgs,
-		env,
-		fluxModelsJson,
+		cliArgs: (model: string): string[] => {
+			const args = ["--provider", providerId, "--model", model, "--thinking", thinking];
+			const apiKey = process.env.AGENTFLUX_LIVE_API_KEY?.trim();
+			if (apiKey) args.push("--api-key", apiKey);
+			return args;
+		},
+		env: childEnv,
+		fluxModelsJson: () => ({
+			models: Object.fromEntries(uniqueModels(config.mainModel, config.plannerModel, config.workerModel, config.judgeModel).map(model => [model, { provider: config.providerId, contextWindow: 1_000_000 }])),
+			roles: {
+				planner: { model: config.plannerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
+				implementer: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
+				reviewer: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
+				tester: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
+			},
+			sharedSkills: [],
+		}),
 		cleanup: () => { if (agentDir) rmSync(agentDir, { recursive: true, force: true }); },
 	};
+	return config;
 }

@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { loadLiveConfig } from "./live-config";
@@ -29,6 +29,11 @@ interface PiHandle {
 	result: Promise<PiResult>;
 }
 
+function git(args: string[]): string {
+	try { return execFileSync("git", args, { cwd: sourceRoot, encoding: "utf8", windowsHide: true }).trimEnd(); }
+	catch { return ""; }
+}
+
 function readJson(path: string): any | undefined {
 	if (!existsSync(path)) return undefined;
 	try { return JSON.parse(readFileSync(path, "utf-8")); } catch { return undefined; }
@@ -50,7 +55,7 @@ function stopTree(child: ChildProcess): void {
 function launch(label: string, extensionEntry: string, prompt: string, config: ReturnType<typeof loadLiveConfig>, timeoutMs: number): PiHandle {
 	const args = [
 		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
-		"--no-skills", "--tools", "read,grep,find,ls,flux_agent", ...config.cliArgs(config.modelFlash), prompt,
+		"--no-skills", "--tools", "read,grep,find,ls,flux_agent", ...config.cliArgs(config.mainModel), prompt,
 	];
 	const child = spawn(process.execPath, args, {
 		cwd: fixtureRoot,
@@ -107,8 +112,12 @@ function runContainsText(run: any | undefined, text: string): boolean {
 }
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig();
+	const config = loadLiveConfig("p0-07-controls");
 	const startedAt = Date.now();
+	const sourceCommit = git(["rev-parse", "HEAD"]);
+	const branch = git(["branch", "--show-current"]);
+	const changedFiles = git(["status", "--porcelain", "--untracked-files=all"])
+		.split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line);
 	let mainPi: PiHandle | undefined;
 	let steerOperatorPi: PiHandle | undefined;
 	let stopOperatorPi: PiHandle | undefined;
@@ -238,8 +247,13 @@ async function main(): Promise<void> {
 			&& Boolean(terminal) && stopRun?.status === "cancelled" && stopObserved && noDeadline;
 		const evidence = {
 			updatedAt: new Date().toISOString(),
+			branch,
+			sourceCommit,
+			changedFiles,
+			profile: config.profileName,
+			configPath: config.configPath,
 			provider: config.providerId,
-			model: config.modelFlash,
+			model: config.mainModel,
 			thinking: config.thinking,
 			builtExtension: true,
 			main: { pid: mainResult.pid, exitCode: mainResult.exitCode, timedOut: mainResult.timedOut },

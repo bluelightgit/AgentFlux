@@ -4,8 +4,8 @@ import { join, resolve } from "node:path";
 import { loadLiveConfig, type LiveConfig } from "./live-config";
 
 const sourceRoot = resolve(import.meta.dirname, "../..");
-const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `core-deepseek-${process.pid}`);
-const reportPath = join(sourceRoot, ".agentflux", "test-results", "core-deepseek-latest.json");
+const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `core-live-${process.pid}`);
+const reportPath = join(sourceRoot, ".agentflux", "test-results", "core-live-latest.json");
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 
 function setup(config: LiveConfig): void {
@@ -51,7 +51,7 @@ async function run(config: LiveConfig, label: string, model: string, prompt: str
 	return {
 		label,
 		model,
-		thinking: "off",
+		thinking: config.thinking,
 		pid: child.pid,
 		exitCode,
 		wallClockMs: Date.now() - started,
@@ -85,13 +85,13 @@ async function run(config: LiveConfig, label: string, model: string, prompt: str
 }
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig(); setup(config); const evidence: Record<string, unknown>[] = []; writeReport("running", evidence);
+	const config = loadLiveConfig("core"); setup(config); const evidence: Record<string, unknown>[] = []; writeReport("running", evidence);
 	const selectedCases = new Set((process.env.AGENTFLUX_LIVE_CASES ?? "direct,team,workflow,community").split(",").map(value => value.trim()).filter(Boolean));
 	try {
-		if (selectedCases.has("direct")) { const direct = await run(config, "natural-direct", config.modelPro, "回答精确文本 NATURAL_DIRECT_OK。这是一个单一且无需读取文件的小任务。", ["NATURAL_DIRECT_OK"], ["\"toolName\":\"flux_team\"", "\"toolName\":\"flux_workflow\"", "\"toolName\":\"flux_issue\""]); evidence.push(direct); writeReport("running", evidence); console.log(JSON.stringify(direct)); }
-		if (selectedCases.has("team")) { const team = await run(config, "natural-team", config.modelFlash, "必须实际调用 flux_team，并行启动代码审查者和测试专家两个 Agent，分别独立检查 README.md 第一行是否准确描述项目；等待两个 Agent 完成、汇总意见后以 NATURAL_TEAM_OK 结束。", ["flux_team", "NATURAL_TEAM_OK"]); evidence.push(team); writeReport("running", evidence); console.log(JSON.stringify(team)); }
-		if (selectedCases.has("workflow")) { const workflow = await run(config, "natural-workflow", config.modelPro, "执行固定三职责只读流程，节点不可合并。规划职责定义 README.md 第一行应等于 '# AgentFlux live fixture'，产物需包含 PLAN_READY；执行职责依赖规划产物，读取文件并给出判断，产物需包含 EXEC_PASS；独立审查职责依赖前两份产物，复核后产物需包含 REVIEW_PASS。每个节点的验收只检查是否包含对应标记，不限制其他解释文字。不修改文件，全部通过后以 NATURAL_WORKFLOW_OK 结束。", ["flux_workflow", "[DAG Execution: PASSED]", "NATURAL_WORKFLOW_OK"]); evidence.push(workflow); writeReport("running", evidence); console.log(JSON.stringify(workflow)); }
-		if (selectedCases.has("community")) { const community = await run(config, "natural-community", config.modelPro, "职责和检查范围尚未确定。请建立一个公开协作事项，形成 README 审计的认领范围，记录意见，提交认领结果并在完成后关闭事项；最后以 NATURAL_COMMUNITY_OK 结束。", ["flux_issue", "resolved", "NATURAL_COMMUNITY_OK"]); evidence.push(community); writeReport("running", evidence); console.log(JSON.stringify(community)); }
+		if (selectedCases.has("direct")) { const direct = await run(config, "natural-direct", config.mainModel, "回答精确文本 NATURAL_DIRECT_OK。这是一个单一且无需读取文件的小任务。", ["NATURAL_DIRECT_OK"], ["\"toolName\":\"flux_team\"", "\"toolName\":\"flux_workflow\"", "\"toolName\":\"flux_issue\""]); evidence.push(direct); writeReport("running", evidence); console.log(JSON.stringify(direct)); }
+		if (selectedCases.has("team")) { const team = await run(config, "natural-team", config.workerModel, "必须实际调用 flux_team，并行启动代码审查者和测试专家两个 Agent，分别独立检查 README.md 第一行是否准确描述项目；等待两个 Agent 完成、汇总意见后以 NATURAL_TEAM_OK 结束。", ["flux_team", "NATURAL_TEAM_OK"]); evidence.push(team); writeReport("running", evidence); console.log(JSON.stringify(team)); }
+		if (selectedCases.has("workflow")) { const workflow = await run(config, "natural-workflow", config.plannerModel, "执行固定三职责只读流程，节点不可合并。规划职责定义 README.md 第一行应等于 '# AgentFlux live fixture'，产物需包含 PLAN_READY；执行职责依赖规划产物，读取文件并给出判断，产物需包含 EXEC_PASS；独立审查职责依赖前两份产物，复核后产物需包含 REVIEW_PASS。每个节点的验收只检查是否包含对应标记，不限制其他解释文字。不修改文件，全部通过后以 NATURAL_WORKFLOW_OK 结束。", ["flux_workflow", "[DAG Execution: PASSED]", "NATURAL_WORKFLOW_OK"]); evidence.push(workflow); writeReport("running", evidence); console.log(JSON.stringify(workflow)); }
+		if (selectedCases.has("community")) { const community = await run(config, "natural-community", config.mainModel, "职责和检查范围尚未确定。请建立一个公开协作事项，形成 README 审计的认领范围，记录意见，提交认领结果并在完成后关闭事项；最后以 NATURAL_COMMUNITY_OK 结束。", ["flux_issue", "resolved", "NATURAL_COMMUNITY_OK"]); evidence.push(community); writeReport("running", evidence); console.log(JSON.stringify(community)); }
 		writeReport("passed", evidence);
 		process.stdout.write(`${JSON.stringify({ ok: true, evidence }, null, 2)}\n`);
 	} catch (error) {

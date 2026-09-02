@@ -7,10 +7,10 @@ import { loadLiveConfig, type LiveConfig } from "./live-config";
 const root = mkdtempSync(join(tmpdir(), "agentflux-live-history-"));
 const sessionDir = join(root, "sessions");
 const piCli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
-const config = loadLiveConfig();
+const config = loadLiveConfig("history");
 
 function run(prompt: string): string {
-	const result = spawnSync(process.execPath, [piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", resolve("src/entry.ts"), "--no-skills", "--tools", "flux_task", "--session-dir", sessionDir, "--session-id", "history-live", ...config.cliArgs(config.modelPro), prompt], { cwd: root, encoding: "utf-8", timeout: 120_000, windowsHide: true, env: config.env });
+	const result = spawnSync(process.execPath, [piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", resolve("src/entry.ts"), "--no-skills", "--tools", "flux_task", "--session-dir", sessionDir, "--session-id", "history-live", ...config.cliArgs(config.mainModel), prompt], { cwd: root, encoding: "utf-8", timeout: 120_000, windowsHide: true, env: config.env });
 	const output = `${result.stdout}\n${result.stderr}`;
 	if (result.status !== 0) throw new Error(`history live run failed (${result.status})\n${output.slice(-5000)}`);
 	return output;

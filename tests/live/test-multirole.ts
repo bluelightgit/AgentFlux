@@ -6,10 +6,7 @@ import { loadLiveConfig } from "./live-config";
 /**
  * 真实 Pi/Provider 多角色链路：Main 创建一个绑定 planner+reviewer 的 Agent，
  * 再按两个不同 role 顺序运行，最后核对注册表与 Run Registry 的事实。
- * 使用时请显式设置低成本 provider/model，例如：
- * AGENTFLUX_LIVE_PROVIDER_ID=octopus-completions
- * AGENTFLUX_LIVE_MODEL_PRO=deepseek-v4-flash AGENTFLUX_LIVE_MODEL_FLASH=deepseek-v4-flash
- * AGENTFLUX_LIVE_THINKING=off npx tsx tests/live/test-multirole-deepseek.ts
+ * provider、角色模型和 thinking 由 live-test-config.json 与环境变量决定。
  */
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `multirole-${process.pid}`);
@@ -17,7 +14,7 @@ const reportPath = join(sourceRoot, ".agentflux", "test-results", "multirole-lat
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig();
+	const config = loadLiveConfig("multirole");
 	const startedAt = Date.now();
 	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
@@ -42,7 +39,7 @@ async function main(): Promise<void> {
 		: join(fixtureRoot, "src", "entry.ts");
 	const args = [
 		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
-		"--no-skills", "--tools", "read,grep,find,ls,flux_task,flux_agent", ...config.cliArgs(config.modelFlash), prompt,
+		"--no-skills", "--tools", "read,grep,find,ls,flux_task,flux_agent", ...config.cliArgs(config.mainModel), prompt,
 	];
 	let stdout = "";
 	let stderr = "";
@@ -74,7 +71,7 @@ async function main(): Promise<void> {
 		const evidence = {
 			updatedAt: new Date().toISOString(),
 			provider: config.providerId,
-			model: config.modelFlash,
+			model: config.mainModel,
 			thinking: config.thinking,
 			builtExtension: useBuiltExtension,
 			exitCode,

@@ -74,18 +74,18 @@ function setupFixture(root: string, config: ReturnType<typeof loadLiveConfig>, b
 		},
 		pricing: { enable_remote_fetch: false },
 	};
-	if (options.qualityGate) fluxConfig.quality_gate = { model: config.modelPro, timeout_ms: options.qualityGateTimeoutMs ?? 180_000 };
+	if (options.qualityGate) fluxConfig.quality_gate = { model: config.judgeModel, timeout_ms: options.qualityGateTimeoutMs ?? 180_000 };
 	writeFileSync(join(root, ".agentflux", "agentflux.json"), JSON.stringify(fluxConfig, null, 2));
 	const models: any = config.fluxModelsJson();
-	for (const model of [config.modelPro, config.modelFlash]) {
+	for (const model of [config.mainModel, config.plannerModel, config.workerModel, config.judgeModel]) {
 		models.models[model] = {
 			...models.models[model],
 			pricing: { input: 0.00000009, output: 0.00000018, cacheRead: 0.00000002, cacheWrite: 0.00000009 },
 		};
 	}
 	if (options.bash) models.roles.implementer.tools = ["read", "grep", "find", "ls", "bash"];
-	if (options.bash || options.qualityGate) models.roles.implementer = { ...models.roles.implementer, model: config.modelPro, thinking: "off" };
-	if (options.qualityGate) models.roles.planner = { ...models.roles.planner, model: config.modelPro, thinking: "off" };
+	if (options.bash || options.qualityGate) models.roles.implementer = { ...models.roles.implementer, model: config.workerModel, thinking: config.thinking };
+	if (options.qualityGate) models.roles.planner = { ...models.roles.planner, model: config.plannerModel, thinking: config.thinking };
 	writeFileSync(join(root, ".agentflux", "models.json"), JSON.stringify(models, null, 2));
 }
 
@@ -164,7 +164,7 @@ function safeRead(path: string): any | undefined {
 }
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig();
+	const config = loadLiveConfig("p0-07-workflow-deadline");
 	const startedAt = Date.now();
 	const sourceCommit = git(["rev-parse", "HEAD"]);
 	const branch = git(["branch", "--show-current"]);
@@ -172,7 +172,8 @@ async function main(): Promise<void> {
 		.split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line);
 	const evidence: any = {
 		updatedAt: new Date().toISOString(), branch, sourceCommit, changedFiles,
-		provider: config.providerId, model: config.modelPro, plannerModel: config.modelPro,
+		profile: config.profileName, configPath: config.configPath,
+		provider: config.providerId, model: config.mainModel, plannerModel: config.plannerModel,
 		thinking: config.thinking, builtExtension: process.env.AGENTFLUX_LIVE_BUILT === "1",
 		reportPath, workflow: {}, deadline: {}, passed: false,
 	};
@@ -198,7 +199,7 @@ async function main(): Promise<void> {
 			"Wait for the Workflow and quality gate result; output BUILT_WORKFLOW_MAIN_OK only after DAG Execution is PASSED.",
 		].join("\n");
 		const workflowSnapshots: any[] = [];
-		workflowPi = launch(workflowRoot, join(workflowRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.modelPro, config, workflowPrompt, 600_000);
+		workflowPi = launch(workflowRoot, join(workflowRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, workflowPrompt, 600_000);
 		const workflowResult = await waitForPi(workflowRoot, workflowPi, workflowSnapshots, 600_000);
 		const workflowRuns = readRuns(workflowRoot);
 		const workflowStore = readJson(join(workflowRoot, ".agentflux", "runtime", "workflows.json")) ?? { definitions: [] };
@@ -265,7 +266,7 @@ async function main(): Promise<void> {
 			"该调用预期因显式 deadline 超时；返回后只输出 BUILT_DEADLINE_MAIN_OK，不要把子 Agent 失败说成成功。",
 		].join("\n");
 		const deadlineSnapshots: any[] = [];
-		deadlinePi = launch(deadlineRoot, join(deadlineRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,bash,flux_task,flux_agent", config.modelPro, config, deadlinePrompt, 180_000);
+		deadlinePi = launch(deadlineRoot, join(deadlineRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,bash,flux_task,flux_agent", config.mainModel, config, deadlinePrompt, 180_000);
 		const deadlineResult = await waitForPi(deadlineRoot, deadlinePi, deadlineSnapshots, 180_000);
 		const deadlineRuns = readRuns(deadlineRoot);
 		const deadlineRun = latestRun(deadlineRuns, run => run.agent === "explicit-deadline-live");

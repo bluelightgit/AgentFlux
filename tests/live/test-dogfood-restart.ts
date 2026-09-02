@@ -110,8 +110,10 @@ function main(): void {
 		};
 		if (options.provider) env.AGENTFLUX_LIVE_PROVIDER_ID = options.provider;
 		if (options.model) {
-			env.AGENTFLUX_LIVE_MODEL_PRO = options.model;
-			env.AGENTFLUX_LIVE_MODEL_FLASH = options.model;
+			env.AGENTFLUX_LIVE_MODEL = options.model;
+			env.AGENTFLUX_LIVE_PLANNER_MODEL = options.model;
+			env.AGENTFLUX_LIVE_WORKER_MODEL = options.model;
+			env.AGENTFLUX_LIVE_JUDGE_MODEL = options.model;
 		}
 		if (options.thinking) env.AGENTFLUX_LIVE_THINKING = options.thinking;
 		test = spawnSync(npmCommand, npmArgs(["run", "test:live:multirole"]), {

@@ -346,8 +346,8 @@ async function main(): Promise<void> {
 			label: "workspace-worker",
 			workspaceCwd: workspace,
 			lockFiles: ["target.ts"],
-			model: "deepseek-v4-flash",
-			provider: "octopus-completions",
+			model: "configured-worker-model",
+			provider: "configured-provider",
 			thinking: "off",
 		}], {
 			cwd: root, sessionId: "workspace-team", telemetry, prefixLayout: true,
@@ -360,23 +360,23 @@ async function main(): Promise<void> {
 		check(captured.lockFiles.length === 1 && captured.lockFiles[0] === join(workspace, "target.ts"),
 			"相对 lockFiles 以子 Agent 工作区解析为绝对路径");
 		check(captured.argv.includes("--thinking") && captured.argv.includes("off")
-			&& captured.argv.includes("deepseek-v4-flash") && captured.argv.includes("octopus-completions"),
+			&& captured.argv.includes("configured-worker-model") && captured.argv.includes("configured-provider"),
 		"单次运行显式模型、provider 与 thinking 覆盖角色模板");
 		const lowCostRuntime = resolveAgentFluxTeamTaskRuntime(
 			{ executionProfile: "low_cost_test" },
-			{ model: "deepseek-v4-pro", provider: "other", thinking: "xhigh", maxTurns: 20, maxInputTokens: 50_000 },
+			{ model: "requested-expensive-model", provider: "requested-provider", thinking: "xhigh", maxTurns: 20, maxInputTokens: 50_000 },
 			{ model: "default-model", provider: "default-provider", thinking: "high" },
 		);
-		check(lowCostRuntime.model === "deepseek-v4-flash"
-			&& lowCostRuntime.provider === "octopus-completions"
+		check(lowCostRuntime.model === "default-model"
+			&& lowCostRuntime.provider === "default-provider"
 			&& lowCostRuntime.thinking === "off"
 			&& lowCostRuntime.maxTurns === 6
 			&& lowCostRuntime.maxInputTokens === 12_000,
-		"低成本测试档强制 Flash、关闭思考并限制轮次与输入 token");
+		"低成本测试档只收窄 thinking、轮次与输入 token，不绑定 provider/model");
 		const stricterLowCostRuntime = resolveAgentFluxTeamTaskRuntime(
 			{ executionProfile: "low_cost_test" },
 			{ maxTurns: 2, maxInputTokens: 4_000 },
-			{},
+			{ model: "default-model", provider: "default-provider", thinking: "high" },
 		);
 		check(stricterLowCostRuntime.maxTurns === 2 && stricterLowCostRuntime.maxInputTokens === 4_000,
 			"低成本测试档保留调用方更严格的上限");

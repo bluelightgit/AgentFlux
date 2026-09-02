@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "defaultProfile": "local",
+  "profiles": {
+    "local": {
+      "provider": { "value": "openai-codex", "env": "PI_PROVIDER" },
+      "mainModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
+      "plannerModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
+      "workerModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
+      "judgeModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
+      "thinking": { "value": "max", "env": "PI_THINKING" }
+    },
+    "environment": {
+      "provider": { "env": "AGENTFLUX_LIVE_PROVIDER_ID" },
+      "mainModel": { "env": "AGENTFLUX_LIVE_MODEL" },
+      "plannerModel": { "env": "AGENTFLUX_LIVE_PLANNER_MODEL" },
+      "workerModel": { "env": "AGENTFLUX_LIVE_WORKER_MODEL" },
+      "judgeModel": { "env": "AGENTFLUX_LIVE_JUDGE_MODEL" },
+      "thinking": { "env": "AGENTFLUX_LIVE_THINKING", "fallback": "off" }
+    }
+  },
+  "tests": {
+    "core": "local",
+    "history": "local",
+    "workflow-reuse": "local",
+    "workflow-modify": "local",
+    "multirole": "local",
+    "run-telemetry": "local",
+    "p0-07-controls": "local",
+    "p0-07-workflow-deadline": "local",
+    "p0-07-fanout": "local",
+    "p0-07-long": "local"
+  }
+}

@@ -8,7 +8,7 @@ const sourceRoot = resolve(import.meta.dirname, "../..");
 const root = mkdtempSync(join(tmpdir(), "agentflux-live-workflow-reuse-"));
 const sessionDir = join(root, "sessions");
 const piCli = resolve(sourceRoot, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
-const config = loadLiveConfig();
+const config = loadLiveConfig("workflow-reuse");
 
 function run(prompt: string, allowPostExecutionTimeout = false): { output: string; timedOutAfterExecution: boolean } {
 	const result = spawnSync(process.execPath, [
@@ -19,7 +19,7 @@ function run(prompt: string, allowPostExecutionTimeout = false): { output: strin
 		"--tools", "read,grep,find,ls,flux_task,flux_workflow",
 		"--session-dir", sessionDir,
 		"--session-id", "workflow-reuse-live",
-		...config.cliArgs(config.modelPro),
+		...config.cliArgs(config.mainModel),
 		prompt,
 	], {
 		cwd: root,

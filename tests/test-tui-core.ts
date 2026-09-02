@@ -188,12 +188,12 @@ async function main(): Promise<void> {
 		check(notices.some(text => text.includes("AgentFlux tasks")), "TUI 可列出当前 Pi 会话的 Task Registry");
 		// Main 会话 usage 落盘：turn_end 累计 → agent_settled 写入 telemetry 与任务 executions
 		for (const h of pi.hooks.get("before_agent_start") ?? []) await h({ prompt: "report usage", systemPrompt: "base" }, ctx);
-		for (const h of pi.hooks.get("turn_end") ?? []) await h({ turnIndex: 1, message: { role: "assistant", model: "oa/deepseek-v4-flash", usage: { input: 100, output: 20, cacheRead: 80, cacheWrite: 5, totalTokens: 120, cost: { total: 0.0004 } } } }, ctx);
+		for (const h of pi.hooks.get("turn_end") ?? []) await h({ turnIndex: 1, message: { role: "assistant", model: "configured-worker-model", usage: { input: 100, output: 20, cacheRead: 80, cacheWrite: 5, totalTokens: 120, cost: { total: 0.0004 } } } }, ctx);
 		await flux.handler("usage", ctx);
 		check(notices.some(text => text.includes("main usage this session") && text.includes("hit 44%")), "/flux usage 显示 Main 侧 token/缓存命中/成本");
 		for (const h of pi.hooks.get("agent_settled") ?? []) await h({}, ctx);
 		const usageEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line)).filter((event: any) => event.type === "task.execution" && event.usage);
-		check(usageEvents.some((event: any) => event.usage.input === 100 && event.usage.cacheRead === 80 && event.usage.costUsd === 0.0004 && event.usage.model === "oa/deepseek-v4-flash"), "turn_end usage 累计落入 task.execution 事件");
+		check(usageEvents.some((event: any) => event.usage.input === 100 && event.usage.cacheRead === 80 && event.usage.costUsd === 0.0004 && event.usage.model === "configured-worker-model"), "turn_end usage 累计落入 task.execution 事件");
 		const tasksAfterUsage = JSON.parse(readFileSync(join(root, ".agentflux", "runtime", "tasks.json"), "utf-8"));
 		check(tasksAfterUsage.executions.some((execution: any) => execution.usage?.input === 100 && execution.usage.costUsd === 0.0004), "执行记录持久化 Main usage（token/缓存/成本）");
 		await flux.handler("fork last", ctx);

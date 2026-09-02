@@ -12,7 +12,7 @@ npm run build
 pi -e ./dist/extension/entry.js
 ```
 
-发布包携带 production dist，不依赖目标项目源码。需要真实模型调用时，使用本机 pi/provider 凭据或设置 `AGENTFLUX_LIVE_*` 环境变量。
+发布包携带 production dist，不依赖目标项目源码。需要真实模型调用时，使用本机 pi/provider 凭据或设置 `AGENTFLUX_LIVE_*` 环境变量。所有 live 场景的 provider、主模型、planner/worker/judge 模型和 thinking 均由 `tests/live/live-test-config.json` 的 profile 解析；默认 `local` profile 跟随当前 `PI_PROVIDER`、`PI_MODEL`、`PI_THINKING`，没有环境值时才使用配置文件 fallback。
 
 ## 产品能力
 
@@ -65,7 +65,9 @@ AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-long
 npm run dogfood:restart
 ```
 
-最近 `npm run verify`、typecheck 和 production build 均通过；P0-05/P0-07 及 Workflow planner/quality-gate/deadline 的 production-dist 报告位于 `.agentflux/test-results/`（telemetry、controls、workflow-deadline、fanout、long-run）。真实链路测试默认使用低成本模型、`thinking=off`、短提示和受限输入；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
+
+最近 `npm run verify`、typecheck 和 production build 均通过；P0-05/P0-07 及 Workflow planner/quality-gate/deadline 的 production-dist 报告位于 `.agentflux/test-results/`（telemetry、controls、workflow-deadline、fanout、long-run）。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 

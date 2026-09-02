@@ -5,10 +5,10 @@
  * 不通过时返回失败原因, 可用于自动重试.
  *
  * 设计:
- *   - 用便宜模型 (deepseek-v4-flash) 做门检查, 成本极低
+ *   - 使用调用方在 Workflow/质量门配置中选择的 judge 模型
  *   - 输入: subagent 输出 + acceptance criteria 列表
  *   - 输出: { passed, feedback, criteriaMet[] }
- *   - 延迟: 单次 LLM 调用, ~3-5s
+ *   - 延迟: 单次 LLM 调用，受可选显式 timeout/deadline 约束
  */
 
 import { spawn, spawnSync } from "node:child_process";

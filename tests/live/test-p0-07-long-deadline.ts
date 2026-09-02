@@ -51,7 +51,7 @@ function git(args: string[]): string {
 function launch(extensionEntry: string, config: ReturnType<typeof loadLiveConfig>, prompt: string): { child: ChildProcess; result: Promise<PiResult> } {
 	const args = [
 		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
-		"--no-skills", "--tools", "read,grep,find,ls,flux_agent", ...config.cliArgs(config.modelFlash), prompt,
+		"--no-skills", "--tools", "read,grep,find,ls,flux_agent", ...config.cliArgs(config.mainModel), prompt,
 	];
 	const child = spawn(process.execPath, args, {
 		cwd: fixtureRoot,
@@ -93,7 +93,7 @@ function launch(extensionEntry: string, config: ReturnType<typeof loadLiveConfig
 }
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig();
+	const config = loadLiveConfig("p0-07-long");
 	const startedAt = Date.now();
 	const useBuiltExtension = process.env.AGENTFLUX_LIVE_BUILT === "1";
 	const sourceCommit = git(["rev-parse", "HEAD"]);
@@ -112,8 +112,8 @@ async function main(): Promise<void> {
 		cpSync(join(sourceRoot, "dist", "extension"), join(fixtureRoot, "dist", "extension"), { recursive: true });
 		writeFileSync(join(fixtureRoot, "README.md"), "# AgentFlux P0-07 long-run fixture\n");
 		const models: any = config.fluxModelsJson();
-		models.models[config.modelFlash] = {
-			...models.models[config.modelFlash],
+		models.models[config.workerModel] = {
+			...models.models[config.workerModel],
 			pricing: { input: 0.00000009, output: 0.00000018, cacheRead: 0.00000002, cacheWrite: 0.00000009 },
 		};
 		models.roles.implementer.tools = ["read", "grep", "find", "ls", "bash"];
@@ -198,8 +198,10 @@ async function main(): Promise<void> {
 			branch,
 			sourceCommit,
 			changedFiles,
+			profile: config.profileName,
+			configPath: config.configPath,
 			provider: config.providerId,
-			model: config.modelFlash,
+			model: config.workerModel,
 			thinking: config.thinking,
 			builtExtension: useBuiltExtension,
 			extensionEntry: join(fixtureRoot, "dist", "extension", "entry.js"),

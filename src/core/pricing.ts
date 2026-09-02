@@ -173,7 +173,7 @@ function num(v: any): number {
  * 策略: 去掉任意单段前缀 (网关前缀), 生成多级候选
  * 例: oa/glm-5.2 → ["oa/glm-5.2", "glm-5.2"]
  *      z-ai/glm-5.2 → ["z-ai/glm-5.2", "glm-5.2"]
- *      deepseek/deepseek-v4-flash → ["deepseek/deepseek-v4-flash", "deepseek-v4-flash"]
+ *      vendor/model-fast → ["vendor/model-fast", "model-fast"]
  */
 export function generateCandidates(relayName: string): string[] {
 	if (!relayName) return [];

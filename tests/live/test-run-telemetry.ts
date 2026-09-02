@@ -70,7 +70,7 @@ function git(args: string[]): string {
 }
 
 async function main(): Promise<void> {
-	const config = loadLiveConfig();
+	const config = loadLiveConfig("run-telemetry");
 	const startedAt = Date.now();
 	const useBuiltExtension = process.env.AGENTFLUX_LIVE_BUILT === "1";
 	const sourceCommit = git(["rev-parse", "HEAD"]);
@@ -89,8 +89,8 @@ async function main(): Promise<void> {
 		writeFileSync(join(fixtureRoot, "README.md"), "# AgentFlux P0-05 live telemetry fixture\n");
 		const models = config.fluxModelsJson() as any;
 		const unavailableModel = "agentflux-live-model-not-found";
-		models.models[config.modelFlash] = {
-			...models.models[config.modelFlash],
+		models.models[config.workerModel] = {
+			...models.models[config.workerModel],
 			capability: { coding: 0.8, reasoning: 0.8, speed: 0.9, context: 0.8, cost_eff: 0.9 },
 			pricing: {
 				input: 0.00000009,
@@ -135,7 +135,7 @@ async function main(): Promise<void> {
 		const args = [
 			piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
 			"--no-skills", "--tools", "read,grep,find,ls,flux_task,flux_agent,flux_workflow",
-			...config.cliArgs(config.modelFlash), prompt,
+			...config.cliArgs(config.mainModel), prompt,
 		];
 		// AgentFlux 模型发现读取 os.homedir()，而 Pi 自身通过
 		// PI_CODING_AGENT_DIR 继续使用真实凭据。隔离 USERPROFILE 可确保
@@ -206,8 +206,10 @@ async function main(): Promise<void> {
 			branch,
 			sourceCommit,
 			changedFiles,
+			profile: config.profileName,
+			configPath: config.configPath,
 			provider: config.providerId,
-			model: config.modelFlash,
+			model: config.workerModel,
 			thinking: config.thinking,
 			builtExtension: useBuiltExtension,
 			extensionEntry,
@@ -243,13 +245,13 @@ async function main(): Promise<void> {
 			&& (terminal.contextTokens ?? 0) >= maximum("contextTokens")
 			&& (terminal.costUsd ?? 0) >= maximum("costUsd")
 			&& (terminal.costUsd ?? 0) > 0
-			&& terminal.model === config.modelFlash
+			&& terminal.model === config.workerModel
 			&& terminal.provider === config.providerId;
 		const recoveryConsistent = !!recoveryRun
 			&& recoveryRun.status === "completed"
 			&& recoveryRun.phase === "terminal"
 			&& (recoveryRun.attempt ?? 0) >= 2
-			&& recoveryRun.model === config.modelFlash
+			&& recoveryRun.model === config.workerModel
 			&& recoveryRun.provider === config.providerId
 			&& recoveryRun.modelError?.toLowerCase().includes("model") === true
 			&& !recoveryRun.error;

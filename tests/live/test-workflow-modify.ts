@@ -10,7 +10,7 @@ const root = mkdtempSync(join(tmpdir(), "agentflux-live-workflow-modify-"));
 const sessionDir = join(root, "sessions");
 const fluxDir = join(root, ".agentflux");
 const piCli = resolve(sourceRoot, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
-const config = loadLiveConfig();
+const config = loadLiveConfig("workflow-modify");
 
 function run(prompt: string): string {
 	const result = spawnSync(process.execPath, [
@@ -21,7 +21,7 @@ function run(prompt: string): string {
 		"--tools", "read,grep,find,ls,flux_task,flux_workflow",
 		"--session-dir", sessionDir,
 		"--session-id", "workflow-modify-live",
-		...config.cliArgs(config.modelPro),
+		...config.cliArgs(config.mainModel),
 		prompt,
 	], {
 		cwd: root,

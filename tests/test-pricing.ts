@@ -37,7 +37,7 @@ const sampleTable: PricingTable = {
 		"openai/gpt-4": { input: 0.00001, output: 0.00003, cacheRead: 0.000005, cacheWrite: 0, source: "remote" },
 		"openai/gpt-4o": { input: 0.000005, output: 0.000015, cacheRead: 0.0000025, cacheWrite: 0, source: "remote" },
 		"anthropic/claude-3-opus": { input: 0.000015, output: 0.000075, cacheRead: 0.0000075, cacheWrite: 0.000015, source: "remote" },
-		"deepseek/deepseek-v4-flash": { input: 0.0000005, output: 0.0000015, cacheRead: 0.00000025, cacheWrite: 0, source: "remote" },
+		"vendor/model-fast": { input: 0.0000005, output: 0.0000015, cacheRead: 0.00000025, cacheWrite: 0, source: "remote" },
 		"glm-5.2": { input: 0.000002, output: 0.000004, cacheRead: 0.000001, cacheWrite: 0, source: "user" },
 	},
 	avg: UNKNOWN_PRICE,
@@ -90,9 +90,9 @@ check("strips known redistribution prefix (proxy)", () => {
 });
 
 check("handles multi-segment names", () => {
-	const candidates = generateCandidates("deepseek/deepseek-v4-flash");
-	assert.ok(candidates.includes("deepseek-v4-flash"));
-	assert.strictEqual(candidates[0], "deepseek/deepseek-v4-flash");
+	const candidates = generateCandidates("vendor/model-fast");
+	assert.ok(candidates.includes("model-fast"));
+	assert.strictEqual(candidates[0], "vendor/model-fast");
 });
 
 check("does not duplicate candidates", () => {
@@ -123,7 +123,7 @@ check("returns UNKNOWN_PRICE for unknown model", () => {
 });
 
 check("finds via model-part prefix match", () => {
-	const price = lookupPrice(sampleTable, "deepseek/deepseek-v4-flash-coding");
+	const price = lookupPrice(sampleTable, "vendor/model-fast-coding");
 	assert.strictEqual(price.input, 0.0000005);
 });
 
@@ -205,15 +205,15 @@ const localPricingRoot = mkdtempSync(join(tmpdir(), "agentflux-pricing-"));
 try {
 	writeFileSync(join(localPricingRoot, "models.json"), JSON.stringify({
 		models: {
-			"deepseek-v4-flash": {
-				provider: "octopus-anthropic",
+			"configured-worker-model": {
+				provider: "configured-provider",
 				pricing: { input: 9e-8, output: 1.8e-7, cacheRead: 2e-8, cacheWrite: 1e-7 },
 			},
 		},
 	}));
-	const localTable = await loadPricing(localPricingRoot, { ...DEFAULT_PRICING_CONFIG, enable_remote_fetch: false }, "deepseek-v4-flash");
+	const localTable = await loadPricing(localPricingRoot, { ...DEFAULT_PRICING_CONFIG, enable_remote_fetch: false }, "configured-worker-model");
 	check("loads pricing from the canonical nested models.json shape", () => {
-		const price = lookupPrice(localTable, "deepseek-v4-flash");
+		const price = lookupPrice(localTable, "configured-worker-model");
 		assert.strictEqual(price.source, "user");
 		assert.strictEqual(price.input, 9e-8);
 		assert.strictEqual(price.output, 1.8e-7);

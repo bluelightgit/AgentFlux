@@ -77,12 +77,12 @@ check(
 
 const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
 	models: {
-		"deepseek-v4-pro": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
-		"deepseek-v4-flash": { provider: "octopus-anthropic", contextWindow: 1_000_000 },
+		"configured-planner-model": { provider: "configured-provider", contextWindow: 1_000_000 },
+		"configured-worker-model": { provider: "configured-provider", contextWindow: 1_000_000 },
 	},
-	roles: { planner: { model: "deepseek-v4-pro", thinking: "off" } },
+	roles: { planner: { model: "configured-planner-model", thinking: "off" } },
 }, "planner");
-check("DAG planner honors role model/provider configuration", configuredPlanner.model === "deepseek-v4-pro" && configuredPlanner.provider === "octopus-anthropic" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
+check("DAG planner honors role model/provider configuration", configuredPlanner.model === "configured-planner-model" && configuredPlanner.provider === "configured-provider" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
 const inheritedPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
 	models: { "affinity-model": { provider: "other", contextWindow: 128_000 } },
 	roles: {},

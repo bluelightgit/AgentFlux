@@ -22,10 +22,10 @@
 - `npm run build`：通过；production dist 两个入口存在并包含在线 Run 路径。
 - `git diff --check`：通过。
 - production 报告：`.agentflux/test-results/run-telemetry-latest.json`，`passed=true`。
-- 真实配置：`octopus-completions/deepseek-v4-flash`、`thinking=off`、全新 fixture Pi，Main PID 34640。
+- 真实配置：由 `tests/live/live-test-config.json` profile 解析 provider/model/thinking、全新 fixture Pi，Main PID 34640。
 - 在线事实：active Run 在 child PID 31532 存活时达到 turns=1、input=1463、output=157、cacheRead=512、cost=$0.00017017、phase=tool、heartbeat 更新 8 次；在线计数全程单调。
 - 终态事实：completed、turns=3、input=1618、output=315、cacheRead=4864、cost=$0.00029960，Task/Execution/Run 关联完整。
-- 显式故障恢复：`agentflux-live-model-not-found` 首次得到真实 404/model error，同一不可变 Run attempt=2 降级到 `deepseek-v4-flash` 并 completed，保留 `modelError`。
+- 显式故障恢复：合成的 unavailable model 首次得到真实 404/model error，同一不可变 Run attempt=2 降级到 profile 配置的健康 worker model 并 completed，保留 `modelError`。
 - 一次失败的真实尝试因全局 Pi 模型发现扩大候选并遇到 provider overload，最终超时；失败证据保存在 `.agentflux/test-results/run-telemetry-recovery-failure-2026-09-01.json`，后续通过隔离候选修复验证，未删除失败事实。
 
 ## 遗留转移
