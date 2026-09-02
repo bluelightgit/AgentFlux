@@ -263,7 +263,7 @@ async function main(): Promise<void> {
 		setupFixture(propagationRoot, config, {
 			max_cost_per_task: 1,
 			max_iterations: 4,
-			max_turns_per_task: 16,
+			max_turns_per_task: 32,
 			max_input_tokens_per_task: 100_000,
 			max_parallel_agents: 1,
 			max_wall_clock_seconds: 240,
@@ -345,10 +345,12 @@ async function main(): Promise<void> {
 		setupFixture(parentTimeoutRoot, config, {
 			max_cost_per_task: 1,
 			max_iterations: 3,
-			max_turns_per_task: 16,
+			// Leave the real planner enough bounded turns to start the child; the
+			// 90-second parent deadline still expires before the 120-second command.
+			max_turns_per_task: 32,
 			max_input_tokens_per_task: 100_000,
 			max_parallel_agents: 1,
-			max_wall_clock_seconds: 45,
+			max_wall_clock_seconds: 90,
 		}, { bash: true });
 		const parentTimeoutPrompt = [
 			"Use AgentFlux Workflow and do not perform the work directly in Main.",
