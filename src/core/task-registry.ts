@@ -26,6 +26,8 @@ export interface TaskRecord {
 export interface TaskExecutionRecord {
 	id: string;
 	taskId: string;
+	/** PID of the Main/Workflow process that owns this execution while running. */
+	ownerPid?: number;
 	sessionId: string;
 	operation: TaskOperation;
 	parentTaskId?: string;
@@ -139,9 +141,18 @@ export function resolveTask(fluxDir: string, selector: string | undefined, sessi
 	return tasks.find(task => task.id === selector);
 }
 
-export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecutionPlan, status: TaskStatus = "running"): TaskRecord {
+export function registerTask(
+	fluxDir: string,
+	sessionId: string,
+	plan: TaskExecutionPlan,
+	status: TaskStatus = "running",
+	options: { ownerPid?: number } = {},
+): TaskRecord {
 	assertSafeOpaqueId(plan.taskId, "taskId");
 	assertSafeOpaqueId(plan.executionId, "executionId");
+	if (options.ownerPid !== undefined && (!Number.isInteger(options.ownerPid) || options.ownerPid <= 0)) {
+		throw new Error("Task execution ownerPid must be a positive integer");
+	}
 	if (plan.parentTaskId) assertSafeOpaqueId(plan.parentTaskId, "parentTaskId");
 	if (plan.parentExecutionId) assertSafeOpaqueId(plan.parentExecutionId, "parentExecutionId");
 	return updateStore(fluxDir, store => {
@@ -192,6 +203,7 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 			if (TERMINAL_STATUSES.has(execution.status) && execution.status !== status) {
 				throw new Error(`Historical execution is immutable: ${plan.executionId} is ${execution.status}`);
 			}
+			if (execution.ownerPid === undefined && options.ownerPid !== undefined) execution.ownerPid = options.ownerPid;
 			execution.operation = plan.operation;
 			execution.parentTaskId = plan.parentTaskId;
 			execution.parentExecutionId = plan.parentExecutionId;
@@ -204,6 +216,7 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				id: plan.executionId,
 				taskId: plan.taskId,
 				sessionId,
+				ownerPid: options.ownerPid,
 				operation: plan.operation,
 				parentTaskId: plan.parentTaskId,
 				parentExecutionId: plan.parentExecutionId,

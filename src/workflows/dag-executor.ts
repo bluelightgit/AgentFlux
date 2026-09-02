@@ -438,6 +438,7 @@ export async function executeDAG(
 	let totalCost = dag.planningCostUsd ?? 0;
 	let status: DAGExecutionResult["status"] | "running" = "running";
 	let iterationCount = 0;
+	let timeoutObserved = false;
 	const executionId = assertSafeOpaqueId(
 		opts.executionId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
 		"executionId",
@@ -620,6 +621,10 @@ export async function executeDAG(
 				taskResults, unavailableModels, reviewFeedback.get(node.id), perNodeBudget,
 			))
 		);
+		// A node may return just after the global deadline while the parent is
+		// still processing the batch. Preserve the timeout as the Workflow result;
+		// do not let the final "running -> failed" fallback erase it.
+		if (deadline !== undefined && Date.now() >= deadline) timeoutObserved = true;
 
 		const batchResults: Array<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> = [];
 		for (let i = 0; i < batchSettled.length; i++) {
@@ -629,15 +634,20 @@ export async function executeDAG(
 			} else {
 				// executeNodeWithGate threw (spawn error, unexpected exception)
 				const node = ready[i];
-				dagLog(`[flux dag] ${node.id} threw exception: ${s.reason?.message ?? s.reason}`);
+				const exceptionMessage = String(s.reason?.message ?? s.reason);
+				if (/deadline|timed[ -]?out|timeout/i.test(exceptionMessage)) timeoutObserved = true;
+				dagLog(`[flux dag] ${node.id} threw exception: ${exceptionMessage}`);
 				batchResults.push({
-					node, result: { agent: `dag-${node.id}`, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${s.reason?.message ?? s.reason}` },
+					node, result: { agent: `dag-${node.id}`, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${exceptionMessage}` },
 					gateResult: null, retryCount: 0, passed: false, cost: 0,
 				});
 			}
 		}
 
 		for (const { node, result, gateResult, retryCount, passed, cost } of batchResults) {
+			if (result.exitCode === 124 || (gateResult?.status === "indeterminate" && /deadline|timed[ -]?out|timeout/i.test(gateResult.feedback))) {
+				timeoutObserved = true;
+			}
 			totalCost += cost;
 			taskResults.set(node.id, { node, subagentResult: result, gateResult, retryCount, passed });
 			try {
@@ -691,13 +701,17 @@ export async function executeDAG(
 			});
 		}
 
+		if (timeoutObserved && !opts.signal?.aborted) status = "timed_out";
 		saveDagState();
+		if ((status as DAGExecutionResult["status"]) === "timed_out"
+			|| (status as DAGExecutionResult["status"]) === "cancelled"
+			|| (status as DAGExecutionResult["status"]) === "budget_exceeded") break;
 	}
 
 	const wallClockMs = Date.now() - wallStart;
 	const allPassed = failed.size === 0;
-	if (completed.size === dag.nodes.length && failed.size === 0) status = "passed";
-	else if (status === "running") status = "failed";
+	if (completed.size === dag.nodes.length && failed.size === 0 && status === "running") status = "passed";
+	else if (status === "running") status = timeoutObserved && !opts.signal?.aborted ? "timed_out" : "failed";
 	else if (status === "failed" && opts.signal?.aborted) status = "cancelled";
 	if (status === "failed") {
 		for (const node of dag.nodes) {

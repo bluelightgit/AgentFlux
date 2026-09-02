@@ -27,4 +27,4 @@
 
 ## 完成前置条件
 
-P0-01/P0-04、P0-05 的核心实现已归档；P0-07 父绝对 deadline、stop/steer 竞态和 orphan 父 Task/Execution 收敛已返工，并由当前提交的 production-dist controls/Workflow/deadline/restart 报告覆盖，仍需独立审计复核后归档。P0-06 group 单一路径、P0-02/P0-03 仍是独立入口与安全边界任务；其中 stop 后消息不得污染后续 Run 必须与 P0-06 的 Message V2 单一路径保持同一事实源。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。
+P0-01/P0-04、P0-05 的核心实现已归档；P0-07 四项返工已实现并通过确定性回归，当前 production-dist controls、Workflow timeout、restart recovery 需在最终提交上同步复跑，随后仍须独立审计复核后归档。P0-06 group 单一路径、P0-02/P0-03 仍是独立入口与安全边界任务；其中 stop 后消息不得污染后续 Run 必须与 P0-06 的 Message V2 单一路径保持同一事实源。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。

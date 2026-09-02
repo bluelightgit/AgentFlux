@@ -111,6 +111,75 @@ function runContainsText(run: any | undefined, text: string): boolean {
 	return Boolean(run?.recentEvents?.some((event: any) => String(event.summary ?? "").includes(text)));
 }
 
+function parseJsonLines(stdout: string): any[] {
+	return stdout.split(/\r?\n/).flatMap(line => {
+		if (!line.trim()) return [];
+		try { return [JSON.parse(line)]; } catch { return []; }
+	});
+}
+
+function collectNested(value: unknown, predicate: (candidate: any) => boolean, found: any[] = []): any[] {
+	if (!value || typeof value !== "object") return found;
+	if (predicate(value)) found.push(value);
+	if (Array.isArray(value)) {
+		for (const item of value) collectNested(item, predicate, found);
+	} else {
+		for (const item of Object.values(value as Record<string, unknown>)) collectNested(item, predicate, found);
+	}
+	return found;
+}
+
+function toolArguments(call: any): any {
+	if (call?.arguments && typeof call.arguments === "object") return call.arguments;
+	if (typeof call?.arguments === "string") {
+		try { return JSON.parse(call.arguments); } catch { return undefined; }
+	}
+	return undefined;
+}
+
+function compactToolResult(result: any): any {
+	return {
+		role: result?.role,
+		type: result?.type,
+		toolCallId: result?.toolCallId,
+		toolName: result?.toolName,
+		isError: result?.isError,
+		content: result?.content,
+		details: result?.details,
+		timestamp: result?.timestamp,
+	};
+}
+
+function postStopSteerEvidence(stdout: string): {
+	attempted: boolean;
+	call?: any;
+	result?: any;
+	rejected: boolean;
+} {
+	const roots = parseJsonLines(stdout);
+	const calls = roots.flatMap(root => collectNested(root, candidate =>
+		candidate?.type === "toolCall" && candidate?.name === "flux_agent"
+		&& toolArguments(candidate)?.action === "steer"
+		&& toolArguments(candidate)?.agent === "control-live"));
+	const call = calls.at(-1);
+	if (!call) return { attempted: false, rejected: false };
+	const results = roots.flatMap(root => collectNested(root, candidate =>
+		(candidate?.role === "toolResult" || candidate?.type === "toolResult")
+		&& candidate?.toolName === "flux_agent"
+		&& (!call.id || candidate.toolCallId === call.id)));
+	const result = results.at(-1);
+	const resultText = JSON.stringify(result ?? "").toLowerCase();
+	const rejected = Boolean(result
+		&& result.isError === true
+		&& (result.details?.ok === false || /not running|stop_requested|rejected|cannot|stopped|terminal/.test(resultText)));
+	return {
+		attempted: true,
+		call: { type: call.type, id: call.id, name: call.name, arguments: toolArguments(call) },
+		result: result ? compactToolResult(result) : undefined,
+		rejected,
+	};
+}
+
 async function main(): Promise<void> {
 	const config = loadLiveConfig("p0-07-controls");
 	const startedAt = Date.now();
@@ -247,7 +316,11 @@ async function main(): Promise<void> {
 		const stopObserved = stopRun?.recentEvents?.some((event: any) => event.type === "stop_requested") ?? false;
 		const noDeadline = steerRun?.deadlineAt === undefined && stopRun?.deadlineAt === undefined;
 		const steerAcked = steerDeliveries.some(item => item.status === "acknowledged");
-		const stopSteerRejected = stopSteerDeliveries.length === 0;
+		const postStopSteer = postStopSteerEvidence(stopOperatorResult.stdout);
+		// Do not infer rejection from an empty delivery directory: the operator
+		// must have emitted an actual flux_agent steer tool call and received an
+		// explicit error result after stop.
+		const stopSteerRejected = postStopSteer.attempted && postStopSteer.rejected && stopSteerDeliveries.length === 0;
 		const stopMarker = stopOperatorResult.stdout.includes("P0_07_CONTROLS_OK") || stopOperatorResult.stderr.includes("P0_07_CONTROLS_OK");
 		const steerMarker = steerOperatorResult.stdout.includes("P0_07_STEER_SENT") || steerOperatorResult.stderr.includes("P0_07_STEER_SENT");
 		const passed = steerOperatorResult.exitCode === 0 && stopOperatorResult.exitCode === 0 && mainResult.exitCode === 0
@@ -274,6 +347,10 @@ async function main(): Promise<void> {
 			steerAcked,
 			stopSteerRejected,
 			stopSteerDeliveries,
+			postStopSteerAttempted: postStopSteer.attempted,
+			postStopSteerToolCall: postStopSteer.call,
+			postStopSteerToolResult: postStopSteer.result,
+			postStopSteerRejected: postStopSteer.rejected,
 			passed,
 			activeRunBeforeControl: activeRun,
 			steerRun: steerRun ? {

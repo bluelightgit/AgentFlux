@@ -21,6 +21,7 @@ const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-workflow-deadline-${process.pid}`);
 const workflowRoot = join(fixtureRoot, "workflow");
 const propagationRoot = join(fixtureRoot, "propagation");
+const parentTimeoutRoot = join(fixtureRoot, "parent-timeout");
 const deadlineRoot = join(fixtureRoot, "deadline");
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-workflow-deadline-latest.json");
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
@@ -180,6 +181,7 @@ async function main(): Promise<void> {
 	};
 	let workflowPi: PiHandle | undefined;
 	let propagationPi: PiHandle | undefined;
+	let parentTimeoutPi: PiHandle | undefined;
 	let deadlinePi: PiHandle | undefined;
 	try {
 		if (process.env.AGENTFLUX_LIVE_BUILT !== "1") throw new Error("built Workflow/deadline live test requires AGENTFLUX_LIVE_BUILT=1");
@@ -337,6 +339,67 @@ async function main(): Promise<void> {
 			stderrTail: propagationResult.stderr.slice(-4000),
 		};
 
+		setupFixture(parentTimeoutRoot, config, {
+			max_cost_per_task: 1,
+			max_iterations: 3,
+			max_turns_per_task: 16,
+			max_input_tokens_per_task: 100_000,
+			max_parallel_agents: 1,
+			max_wall_clock_seconds: 45,
+		}, { bash: true });
+		const parentTimeoutPrompt = [
+			"Use AgentFlux Workflow and do not perform the work directly in Main.",
+			"Create and execute a brand-new minimal Workflow. Override generic planner guidance: the generated DAG MUST contain exactly one implementer node and no planner, reviewer, tester, or waiting nodes.",
+			"The only implementer node must call bash with node -e \"setTimeout(() => {}, 120000)\" and must not finish before the command ends. Its acceptanceCriteria may contain one output marker, but the inherited parent deadline is expected to interrupt the node before quality-gate completion.",
+			"Wait for the Workflow result. Output PARENT_DEADLINE_TIMEOUT_MAIN_OK only after the result is terminal and its status is TIMED_OUT; never claim success for an unfinished or failed result.",
+		].join("\n");
+		const parentTimeoutSnapshots: any[] = [];
+		parentTimeoutPi = launch(parentTimeoutRoot, join(parentTimeoutRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,bash,flux_task,flux_workflow", config.mainModel, config, parentTimeoutPrompt, 240_000);
+		const parentTimeoutResult = await waitForPi(parentTimeoutRoot, parentTimeoutPi, parentTimeoutSnapshots, 240_000);
+		const parentTimeoutRuns = readRuns(parentTimeoutRoot);
+		const parentTimeoutStore = readJson(join(parentTimeoutRoot, ".agentflux", "runtime", "tasks.json")) ?? { tasks: [], executions: [] };
+		const parentTimeoutTask = latestRun(parentTimeoutStore.tasks ?? [], task => task.resource?.type === "workflow");
+		const parentTimeoutExecution = parentTimeoutTask ? (parentTimeoutStore.executions ?? []).find((item: any) => item.id === parentTimeoutTask.executionId) : undefined;
+		const parentTimeoutDag = parentTimeoutTask?.executionId
+			? safeRead(join(parentTimeoutRoot, ".agentflux", "runtime", "runs", parentTimeoutTask.executionId, "dag.json"))
+			: undefined;
+		const parentTimeoutNodes = Array.isArray(parentTimeoutDag?.nodes) ? parentTimeoutDag.nodes : [];
+		const parentTimeoutNodeRuns = parentTimeoutRuns.filter(run => run.taskId === parentTimeoutTask?.id && run.agent?.startsWith("dag-") && run.agent !== "dag-planner");
+		const parentTimeoutNode = parentTimeoutNodeRuns.find(run => run.status === "timed_out") ?? parentTimeoutNodeRuns[0];
+		const parentTimeoutCheckpoint = parentTimeoutTask?.executionId
+			? safeRead(join(parentTimeoutRoot, ".agentflux", "runtime", "runs", parentTimeoutTask.executionId, "checkpoint.json"))
+			: undefined;
+		const parentTimeoutMarker = `${parentTimeoutResult.stdout}\n${parentTimeoutResult.stderr}`.includes("PARENT_DEADLINE_TIMEOUT_MAIN_OK");
+		const parentTimeoutDagTimedOut = parentTimeoutCheckpoint?.status === "timed_out"
+			|| parentTimeoutTask?.executionId && safeRead(join(parentTimeoutRoot, ".agentflux", "runtime", "runs", parentTimeoutTask.executionId, "dag-state.json"))?.status === "timed_out";
+		const parentTimeoutFactsConsistent = parentTimeoutResult.exitCode === 0
+			&& !parentTimeoutResult.timedOut
+			&& parentTimeoutMarker
+			&& parentTimeoutNodes.length === 1
+			&& parentTimeoutNodes[0]?.role === "implementer"
+			&& parentTimeoutNode?.status === "timed_out"
+			&& parentTimeoutDagTimedOut
+			&& parentTimeoutTask?.status === "timed_out"
+			&& parentTimeoutExecution?.status === "timed_out"
+			&& parentTimeoutExecution?.outcome?.status === "timeout"
+			&& parentTimeoutTask?.status === parentTimeoutExecution?.status;
+		evidence.parentDeadlineTimeout = {
+			main: { pid: parentTimeoutResult.pid, exitCode: parentTimeoutResult.exitCode, timedOut: parentTimeoutResult.timedOut },
+			marker: parentTimeoutMarker,
+			dag: parentTimeoutDag ? { description: parentTimeoutDag.description, nodes: parentTimeoutNodes } : undefined,
+			nodeRuns: parentTimeoutNodeRuns,
+			timedOutNode: parentTimeoutNode,
+			checkpoint: parentTimeoutCheckpoint ? { status: parentTimeoutCheckpoint.status, completed: parentTimeoutCheckpoint.completed, failed: parentTimeoutCheckpoint.failed } : undefined,
+			task: parentTimeoutTask,
+			execution: parentTimeoutExecution,
+			dagTimedOut: Boolean(parentTimeoutDagTimedOut),
+			snapshotCount: parentTimeoutSnapshots.length,
+			snapshots: parentTimeoutSnapshots,
+			factsConsistent: Boolean(parentTimeoutFactsConsistent),
+			stdoutTail: parentTimeoutResult.stdout.slice(-5000),
+			stderrTail: parentTimeoutResult.stderr.slice(-4000),
+		};
+
 		setupFixture(deadlineRoot, config, {
 			max_cost_per_task: 1,
 			max_iterations: 2,
@@ -380,6 +443,7 @@ async function main(): Promise<void> {
 			&& workflowMarker && workflowPassedMarker && plannerCompleted && qualityGate && workflowFactsConsistent
 			&& propagationResult.exitCode === 0 && !propagationResult.timedOut
 			&& propagationMarker && evidence.parentDeadlinePropagation.factsConsistent
+			&& evidence.parentDeadlineTimeout.factsConsistent
 			&& deadlineResult.exitCode === 0 && !deadlineResult.timedOut && deadlineMarker && deadlineFactsConsistent;
 		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		if (!evidence.passed) throw new Error(`built Workflow/planner/quality-gate/deadline live evidence failed; report=${reportPath}`);
@@ -392,6 +456,7 @@ async function main(): Promise<void> {
 	} finally {
 		if (workflowPi) killTree(workflowPi.child.pid);
 		if (propagationPi) killTree(propagationPi.child.pid);
+		if (parentTimeoutPi) killTree(parentTimeoutPi.child.pid);
 		if (deadlinePi) killTree(deadlinePi.child.pid);
 		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
 		catch (error) { console.warn(`Workflow/deadline fixture cleanup deferred: ${String(error)}`); }

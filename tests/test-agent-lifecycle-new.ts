@@ -336,6 +336,50 @@ async function main(): Promise<void> {
 		check(recoveredTask?.status === "failed" && recoveredExecution?.status === "failed"
 			&& recoveredExecution.outcome?.error?.includes("heartbeat expired") === true,
 			"orphan Run recovery terminalizes its Task and TaskExecution with the failure reason");
+
+		// 一个 child 崩溃不能终止仍有 sibling Run 的父执行；父级一旦终态，
+		// 后续 child 注册也必须被 fail-closed fence 拒绝。
+		const liveSiblingTaskId = "orphan-live-sibling-task";
+		const liveSiblingExecutionId = "orphan-live-sibling-execution";
+		registerTask(join(root, ".agentflux"), "test", {
+			taskId: liveSiblingTaskId, executionId: liveSiblingExecutionId, task: "orphan with live sibling", selectedBy: "user", operation: "new",
+			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 2 },
+		});
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "orphan-dead-with-live-sibling", sessionId: "test", agent: "orphan-dead", role: "implementer",
+			currentTask: "dead sibling", kind: "persistent", taskId: liveSiblingTaskId, executionId: liveSiblingExecutionId,
+		});
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "orphan-live-sibling", sessionId: "test", agent: "orphan-live", role: "implementer",
+			currentTask: "live sibling", kind: "persistent", taskId: liveSiblingTaskId, executionId: liveSiblingExecutionId,
+		});
+		markAgentRunRunning(join(root, ".agentflux"), "orphan-dead-with-live-sibling", 99999999, 1);
+		markAgentRunRunning(join(root, ".agentflux"), "orphan-live-sibling", process.pid, 1);
+		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		check(getAgentRun(join(root, ".agentflux"), "orphan-dead-with-live-sibling")?.status === "failed"
+			&& getAgentRun(join(root, ".agentflux"), "orphan-live-sibling")?.status === "running"
+			&& getTask(join(root, ".agentflux"), liveSiblingTaskId)?.status === "running"
+			&& getTaskExecution(join(root, ".agentflux"), liveSiblingExecutionId)?.status === "running",
+			"orphan recovery does not terminalize a parent with a live sibling Run");
+
+		// 没有可见 sibling 时仍需保护存活的 Main/Workflow owner。
+		const liveOwnerTaskId = "orphan-live-owner-task";
+		const liveOwnerExecutionId = "orphan-live-owner-execution";
+		registerTask(join(root, ".agentflux"), "test", {
+			taskId: liveOwnerTaskId, executionId: liveOwnerExecutionId, task: "orphan with live owner", selectedBy: "user", operation: "new",
+			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
+		}, "running", { ownerPid: process.pid });
+		registerAgentRun(join(root, ".agentflux"), {
+			id: "orphan-with-live-owner", sessionId: "test", agent: "orphan-owned", role: "implementer",
+			currentTask: "dead child with live owner", kind: "persistent", taskId: liveOwnerTaskId, executionId: liveOwnerExecutionId,
+		});
+		markAgentRunRunning(join(root, ".agentflux"), "orphan-with-live-owner", 99999999, 1);
+		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		check(getAgentRun(join(root, ".agentflux"), "orphan-with-live-owner")?.status === "failed"
+			&& getTask(join(root, ".agentflux"), liveOwnerTaskId)?.status === "running"
+			&& getTaskExecution(join(root, ".agentflux"), liveOwnerExecutionId)?.status === "running",
+			"orphan recovery defers while the persisted Main/Workflow owner is alive");
+
 		const turnLimited = await runAgent({
 			cwd: root, agent: { ...template, name: "turn-limited" }, task: "bounded",
 			sessionId: "test", prefixLayout: true, maxTurns: 1, invocationOverride,

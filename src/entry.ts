@@ -87,6 +87,10 @@ function dagResultSummary(r: DAGExecutionResult): string {
 	return `DAG ${r.status}: ${r.completedNodes.length}/${total} nodes passed · wall ${(r.wallClockMs / 1000).toFixed(1)}s · $${r.totalCost.toFixed(4)} · run ${r.executionId}`;
 }
 
+function isWorkflowTimeoutError(error: unknown): boolean {
+	return /(?:deadline|timed[ -]?out|timeout)/i.test(String(error instanceof Error ? error.message : error ?? ""));
+}
+
 function formatMessageGroups(groups: ReturnType<SharedBoard["listGroups"]>): string {
 	if (groups.length === 0) return "No AgentFlux message groups.";
 	return ["AgentFlux message groups:", ...groups.map(group =>
@@ -261,7 +265,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		const startedPlan = plan.deadlineAt || plan.budget.maxWallClockMs === undefined
 			? plan
 			: { ...plan, deadlineAt: new Date(Date.now() + plan.budget.maxWallClockMs).toISOString() };
-		registerTask(runtime.fluxDir, sessionId, startedPlan, "running");
+		registerTask(runtime.fluxDir, sessionId, startedPlan, "running", { ownerPid: process.pid });
 		const lineage = {
 			executionId: startedPlan.executionId,
 			parentTaskId: startedPlan.parentTaskId,
@@ -475,7 +479,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		if (plan.deadlineAt === undefined && plan.budget.maxWallClockMs !== undefined) {
 			plan = { ...plan, deadlineAt: new Date(Date.now() + plan.budget.maxWallClockMs).toISOString() };
 		}
-		registerTask(runtime.fluxDir, sessionId, plan, "running");
+		registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
 		const planDeadlineAt = plan.deadlineAt === undefined
 			? undefined
 			: (() => {
@@ -522,7 +526,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (plan.operation === "new") {
 				plan.operation = "reuse";
 				plan.parentTaskId = definition.sourceTaskId;
-				registerTask(runtime.fluxDir, sessionId, plan, "running");
+				registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
 			}
 			const dag = structuredClone(definition.dag);
 			delete dag.planningCostUsd;
@@ -540,7 +544,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		if (previous && plan.operation === "new") {
 			plan.operation = "continue";
 			plan.parentTaskId = previous.sourceTaskId;
-			registerTask(runtime.fluxDir, sessionId, plan, "running");
+			registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
 		}
 		const planner = resolveDAGRoleModel(runtime.cwd, runtime.modelsConfig, "planner", { model: runtime.mainModel, provider: runtime.mainProvider });
 		const plannerAgentId = `agent-${plan.taskId}-planner`;
@@ -929,7 +933,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 				workflowInvocations.delete(plan.taskId);
 				executionOutcome = signal?.aborted
 					? { action: "cancelled", status: "cancelled", error: "Workflow cancelled" }
-					: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+					: isWorkflowTimeoutError(error)
+						? { action: "failed", status: "timeout", error: String(error?.message ?? error).slice(0, 500) }
+						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
 				throw error;
 			}
 		},
@@ -1035,7 +1041,14 @@ export default function agentFlux(pi: ExtensionAPI) {
 		taskNotify(ctx, `Workflow dispatched: ${plan.task.slice(0, 80)}`);
 		void runWorkflow(plan, controller.signal, request)
 			.then(result => { finish(result); taskNotify(ctx, dagResultSummary(result)); })
-				.catch(error => { updateTaskStatus(runtime!.fluxDir, plan.taskId, "failed", { executionId: plan.executionId, outcome: { status: "failure", error: String(error?.message ?? error) } }); taskNotify(ctx, `Workflow failed: ${error?.message ?? error}`, "error"); })
+				.catch(error => {
+					const timedOut = isWorkflowTimeoutError(error);
+					updateTaskStatus(runtime!.fluxDir, plan.taskId, timedOut ? "timed_out" : "failed", {
+						executionId: plan.executionId,
+						outcome: { status: timedOut ? "timeout" : "failure", error: String(error?.message ?? error) },
+					});
+					taskNotify(ctx, `${timedOut ? "Workflow timed out" : "Workflow failed"}: ${error?.message ?? error}`, timedOut ? "warning" : "error");
+				})
 			.finally(() => activeRuns.delete(plan.taskId));
 	}
 

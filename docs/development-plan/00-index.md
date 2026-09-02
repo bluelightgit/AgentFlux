@@ -32,7 +32,7 @@
 
 采用“可观察的最小闭环 → 可靠 Workflow → 执行语义/数据边界 → 长期验证”的纵向顺序，不再把所有真实验证推迟到最后：
 
-1. P0-01/P0-04、P0-05 的闭环已归档；P0-07 三个阻断项已完成返工，且在当前提交的 production-dist controls/Workflow/deadline/restart 场景通过，仍等待独立审计复核后归档；P0-06 group 单一路径可并行收口，但不得用其替代 P0-07 的审计复核；
+1. P0-01/P0-04、P0-05 的闭环已归档；P0-07 四项独立验收返工已完成实现和确定性回归，当前 production-dist controls、Workflow timeout、restart recovery 证据需在最终提交上同步复跑并等待独立审计；P0-06 group 单一路径可并行收口，但不得替代 P0-07 收口；
 2. 继续闭合 P0-02，形成跨空间可创建、可运行、可失败恢复且可核对的 Workflow；对应 P2 production 扩展场景随实现立即执行；
 3. P0-03 Community fail-closed 契约独立完成，不阻塞与 Community 无关的 P1-03、P1-04、P1-05、P1-06；
 4. P1 按显式依赖推进，P1-07 并行写隔离在核心谱系和空间 lease 稳定后实施；

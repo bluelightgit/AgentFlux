@@ -15,12 +15,26 @@ const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-restart
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
+interface ProcessTerminationEvidence {
+	pid?: number;
+	aliveBefore: boolean;
+	terminated: boolean;
+	attempts: number;
+	command?: string;
+	commandStatus?: number | null;
+	commandSignal?: NodeJS.Signals | null;
+	commandError?: string;
+	stdout?: string;
+	stderr?: string;
+}
+
 interface PiResult {
 	status: number | null;
 	signal: NodeJS.Signals | null;
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+	termination?: ProcessTerminationEvidence;
 }
 
 interface PiHandle {
@@ -39,13 +53,61 @@ function readJson(path: string): any | undefined {
 }
 
 function sleep(ms: number): Promise<void> { return new Promise(resolveSleep => setTimeout(resolveSleep, ms)); }
+function blockSleep(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
-function stopTree(child: ChildProcess): void {
-	if (!child.pid) return;
-	if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-	else {
-		try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch {} }
+function isProcessAlive(pid: number | undefined): boolean {
+	if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error: any) {
+		return error?.code === "EPERM" || error?.code === "EACCES";
 	}
+}
+
+/**
+ * Kill the requested process (and optionally its descendants), then verify the
+ * PID is actually gone. A successful taskkill exit code alone is not evidence: on
+ * Windows it can race with process creation or be unavailable in the host PATH.
+ */
+function stopTree(target: ChildProcess | number, includeDescendants = true): ProcessTerminationEvidence {
+	const pid = typeof target === "number" ? target : target.pid ?? undefined;
+	const evidence: ProcessTerminationEvidence = { pid, aliveBefore: isProcessAlive(pid), terminated: false, attempts: 0 };
+	if (!pid) return evidence;
+	const command = process.platform === "win32"
+		? ((process.env.SystemRoot || process.env.WINDIR)
+			? join(process.env.SystemRoot || process.env.WINDIR || "C:\\Windows", "System32", "taskkill.exe")
+			: "taskkill.exe")
+		: undefined;
+	evidence.command = command;
+	for (let attempt = 0; attempt < 4; attempt++) {
+		evidence.attempts = attempt + 1;
+		if (!isProcessAlive(pid)) { evidence.terminated = true; return evidence; }
+		if (process.platform === "win32") {
+			try {
+				const killed = spawnSync(command ?? "taskkill.exe", ["/PID", String(pid), ...(includeDescendants ? ["/T"] : []), "/F"], {
+					windowsHide: true, stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 10_000,
+				});
+				evidence.commandStatus = killed.status;
+				evidence.commandSignal = killed.signal;
+				evidence.commandError = killed.error?.message;
+				evidence.stdout = String(killed.stdout ?? "").slice(-2000);
+				evidence.stderr = String(killed.stderr ?? "").slice(-2000);
+			} catch (error) {
+				evidence.commandError = String(error instanceof Error ? error.message : error);
+			}
+		} else {
+			try { process.kill(includeDescendants ? -pid : pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch {} }
+		}
+		if (typeof target !== "number" && isProcessAlive(pid)) {
+			try { target.kill("SIGKILL"); } catch {}
+		}
+		blockSleep(250);
+	}
+	evidence.terminated = !isProcessAlive(pid);
+	return evidence;
 }
 
 function launch(config: ReturnType<typeof loadLiveConfig>, extensionEntry: string, sessionId: string, prompt: string, timeoutMs: number): PiHandle {
@@ -63,8 +125,8 @@ function launch(config: ReturnType<typeof loadLiveConfig>, extensionEntry: strin
 		const timer = setTimeout(() => {
 			if (settled) return;
 			settled = true;
-			stopTree(child);
-			resolveResult({ status: 124, signal: "SIGTERM", stdout, stderr, timedOut: true });
+			const termination = stopTree(child);
+			resolveResult({ status: 124, signal: "SIGTERM", stdout, stderr, timedOut: true, termination });
 		}, timeoutMs);
 		child.on("error", error => {
 			if (settled) return;
@@ -87,8 +149,16 @@ async function main(): Promise<void> {
 	if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js"))) throw new Error("production dist entry is missing; run npm run build first");
 	const config = loadLiveConfig("p0-07-restart-recovery");
 	const startedAt = Date.now();
+	const branch = git(["branch", "--show-current"]);
+	const sourceCommit = git(["rev-parse", "HEAD"]);
+	const changedFiles = git(["status", "--porcelain", "--untracked-files=all"])
+		.split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line);
 	let first: PiHandle | undefined;
 	let recovery: PiHandle | undefined;
+	let firstResult: PiResult | undefined;
+	let recoveryResult: PiResult | undefined;
+	let mainTermination: ProcessTerminationEvidence | undefined;
+	let runTermination: ProcessTerminationEvidence | undefined;
 	mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 	try {
 		mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
@@ -121,8 +191,24 @@ async function main(): Promise<void> {
 		}
 		if (!orphan) throw new Error("restart fixture did not expose an active persistent Run");
 		const orphanRunId = orphan.id;
-		stopTree(first.child);
-		const firstResult = await first.result;
+		const firstPid = first.child.pid;
+		const orphanPid = typeof orphan.pid === "number" ? orphan.pid : undefined;
+		if (!isProcessAlive(firstPid) || !isProcessAlive(orphanPid)) {
+			throw new Error(`restart fixture lost the live Pi/Run before kill: mainPid=${firstPid} runPid=${orphanPid}`);
+		}
+		// Kill Pi A without /T first so its child Run remains an orphan long enough
+		// to exercise durable heartbeat recovery. Then terminate the actual child
+		// process tree and verify both PIDs are gone.
+		mainTermination = stopTree(first.child, false);
+		runTermination = stopTree(orphanPid ?? 0, true);
+		if (!runTermination.terminated || !mainTermination.terminated) {
+			throw new Error(`restart fixture could not terminate Pi A process tree: main=${JSON.stringify(mainTermination)} run=${JSON.stringify(runTermination)}`);
+		}
+		firstResult = await Promise.race([
+			first.result,
+			sleep(15_000).then(() => ({ status: 124, signal: "SIGTERM" as NodeJS.Signals, stdout: "", stderr: "first Pi did not close after verified kill", timedOut: true })),
+		]);
+		if (firstResult.timedOut) throw new Error("restart fixture Pi A result timed out after process-tree termination");
 		// reconcileStaleAgentRuns deliberately has a 30s grace period and protects
 		// live PIDs, so wait beyond that window after the forced process-tree stop.
 		await sleep(35_000);
@@ -133,7 +219,7 @@ async function main(): Promise<void> {
 			"2) action=list。",
 			"完成后只输出 P0_07_RESTART_RECOVERY_OK。",
 		].join("\n"), 120_000);
-		const recoveryResult = await recovery.result;
+		recoveryResult = await recovery.result;
 		await sleep(500);
 		const runs = readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"))?.runs ?? [];
 		const recoveredRun = runs.find((run: any) => run.id === orphanRunId);
@@ -153,12 +239,18 @@ async function main(): Promise<void> {
 			&& recoveredTask?.status === "failed"
 			&& recoveredExecution?.status === "failed"
 			&& recoveredExecution?.outcome?.error === recoveredRun.error;
-		const passed = Boolean(orphanRunId) && ACTIVE.has(beforeRecovery?.status) && recoveryResult.status === 0 && marker && recovered;
+		const passed = Boolean(orphanRunId)
+			&& ACTIVE.has(beforeRecovery?.status)
+			&& beforeRecovery?.pid === orphanPid
+			&& mainTermination?.aliveBefore === true && mainTermination.terminated
+			&& runTermination?.terminated === true
+			&& firstResult.status !== 124 && !firstResult.timedOut
+			&& recoveryResult.status === 0 && !recoveryResult.timedOut && marker && recovered;
 		const evidence = {
 			updatedAt: new Date().toISOString(),
-			branch: git(["branch", "--show-current"]),
-			sourceCommit: git(["rev-parse", "HEAD"]),
-			changedFiles: git(["status", "--porcelain", "--untracked-files=all"]).split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line),
+			branch,
+			sourceCommit,
+			changedFiles,
 			profile: config.profileName,
 			configPath: config.configPath,
 			provider: config.providerId,
@@ -166,8 +258,8 @@ async function main(): Promise<void> {
 			thinking: config.thinking,
 			builtExtension: true,
 			wallClockMs: Date.now() - startedAt,
-			firstPi: { pid: first.child.pid, exitCode: firstResult.status, signal: firstResult.signal, stdoutTail: firstResult.stdout.slice(-5000), stderrTail: firstResult.stderr.slice(-3000) },
-			recoveryPi: { pid: recoveryResult.status === 0 ? recovery.child.pid : recovery.child.pid, exitCode: recoveryResult.status, signal: recoveryResult.signal, marker, stdoutTail: recoveryResult.stdout.slice(-5000), stderrTail: recoveryResult.stderr.slice(-3000) },
+			firstPi: { pid: first.child.pid, exitCode: firstResult.status, signal: firstResult.signal, timedOut: firstResult.timedOut, stdoutTail: firstResult.stdout.slice(-5000), stderrTail: firstResult.stderr.slice(-3000), processTreeTermination: mainTermination, childRunTermination: runTermination },
+			recoveryPi: { pid: recoveryResult.status === 0 ? recovery.child.pid : recovery.child.pid, exitCode: recoveryResult.status, signal: recoveryResult.signal, timedOut: recoveryResult.timedOut, marker, stdoutTail: recoveryResult.stdout.slice(-5000), stderrTail: recoveryResult.stderr.slice(-3000) },
 			orphanBeforeRecovery: beforeRecovery,
 			recoveredRun,
 			recoveredAgent,
@@ -182,6 +274,30 @@ async function main(): Promise<void> {
 		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		console.log(JSON.stringify(evidence, null, 2));
 		if (!passed) throw new Error(`restart/orphan recovery evidence failed; report=${reportPath}`);
+	} catch (error) {
+		// Preserve a kill/launch failure as first-class evidence. In particular, a
+		// harness timeout must never overwrite the fact that Pi A was not killed.
+		const failureEvidence = {
+			updatedAt: new Date().toISOString(),
+			branch,
+			sourceCommit,
+			changedFiles,
+			profile: config.profileName,
+			configPath: config.configPath,
+			provider: config.providerId,
+			models: { main: config.mainModel, planner: config.plannerModel, worker: config.workerModel, judge: config.judgeModel },
+			thinking: config.thinking,
+			builtExtension: true,
+			wallClockMs: Date.now() - startedAt,
+			firstPi: firstResult ? { pid: first?.child.pid, exitCode: firstResult.status, signal: firstResult.signal, timedOut: firstResult.timedOut, stdoutTail: firstResult.stdout.slice(-5000), stderrTail: firstResult.stderr.slice(-3000) } : { pid: first?.child.pid },
+			recoveryPi: recoveryResult ? { pid: recovery?.child.pid, exitCode: recoveryResult.status, signal: recoveryResult.signal, timedOut: recoveryResult.timedOut } : undefined,
+			processTreeTermination: mainTermination,
+			childRunTermination: runTermination,
+			passed: false,
+			error: String(error instanceof Error ? error.message : error),
+		};
+		try { writeFileSync(reportPath, JSON.stringify(failureEvidence, null, 2)); } catch {}
+		throw error;
 	} finally {
 		if (first) stopTree(first.child);
 		if (recovery) stopTree(recovery.child);

@@ -69,6 +69,33 @@ try {
 	check("DAG enforces inherited absolute deadline without a relative timeout", inheritedDeadlineResult.status === "timed_out" && inheritedDeadlineResult.completedNodes.length === 0, inheritedDeadlineResult.status);
 } finally { rmSync(inheritedDeadlineRoot, { recursive: true, force: true }); }
 
+const timeoutNodeRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-timeout-node-"));
+try {
+	const timeoutExecutionId = "deadline-node-execution";
+	const timeoutResult = await executeDAG(
+		{ description: "node reaches inherited deadline", nodes: [{ ...node("deadline-node"), acceptanceCriteria: [] }] },
+		{
+			cwd: timeoutNodeRoot,
+			fluxDir: join(timeoutNodeRoot, ".agentflux"),
+			modelsConfig: { models: {}, roles: {} },
+			telemetry: new TelemetryWriter(join(timeoutNodeRoot, ".agentflux")),
+			prefixLayout: true,
+			sessionId: "pi-session",
+			executionId: timeoutExecutionId,
+			deadlineAt: Date.now() + 100,
+			maxWallClockMs: null,
+			maxRetries: 0,
+			enableQualityGate: false,
+			invocationOverride: { command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"] },
+		},
+	);
+	const timeoutRun = listAgentRuns(join(timeoutNodeRoot, ".agentflux"), { taskId: undefined })
+		.find(run => run.executionId === timeoutExecutionId);
+	check("DAG maps an inherited child timeout to timed_out",
+		timeoutResult.status === "timed_out" && timeoutRun?.status === "timed_out" && timeoutResult.failedNodes.includes("deadline-node"),
+		`${timeoutResult.status}/${timeoutRun?.status ?? "missing"}`);
+} finally { rmSync(timeoutNodeRoot, { recursive: true, force: true }); }
+
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
 import { checkQualityGate, interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";

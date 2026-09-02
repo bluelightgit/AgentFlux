@@ -1,8 +1,9 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { readJsonStore, updateJsonStore } from "./json-store";
 import { assertSafeOpaqueId } from "./safe-path";
 import { isProcessAlive } from "./fs-lock";
+import { readActiveContext } from "./active-context";
 import { getTask, getTaskExecution, updateTaskStatus } from "./task-registry";
 import type { AgentRunHealth } from "./run-health";
 export type { AgentRunHealth } from "./run-health";
@@ -144,11 +145,20 @@ interface AgentRunBudgetReservation {
 	updatedAt: string;
 }
 
+interface AgentRunRecoveryFence {
+	taskId: string;
+	executionId: string;
+	runId: string;
+	createdAt: string;
+}
+
 interface AgentRunStore {
 	version: 1;
 	runs: AgentRunRecord[];
 	/** Per-Run observed-usage reservations, retained for atomic parent aggregation. */
 	reservations?: AgentRunBudgetReservation[];
+	/** Cross-file recovery fence preventing a new child during parent convergence. */
+	recoveryFences?: AgentRunRecoveryFence[];
 }
 
 const TERMINAL = new Set<AgentRunStatus>(["completed", "failed", "cancelled", "timed_out"]);
@@ -157,7 +167,7 @@ const TASK_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"])
 const HEARTBEAT_RECOVERY_ERROR = "runtime heartbeat expired before terminal convergence";
 const USAGE_FIELDS = ["turns", "input", "output", "cacheRead", "cacheWrite", "contextTokens", "costUsd"] as const;
 
-const createStore = (): AgentRunStore => ({ version: 1, runs: [], reservations: [] });
+const createStore = (): AgentRunStore => ({ version: 1, runs: [], reservations: [], recoveryFences: [] });
 const isStatus = (value: unknown): value is AgentRunStatus =>
 	value === "starting" || value === "running" || value === "stop_requested"
 	|| value === "completed" || value === "failed" || value === "cancelled" || value === "timed_out";
@@ -193,13 +203,22 @@ const isReservationShape = (value: unknown): value is AgentRunBudgetReservation 
 		&& isNonNegativeFiniteOrMissing(reservation.input)
 		&& typeof reservation.updatedAt === "string";
 };
+const isRecoveryFenceShape = (value: unknown): value is AgentRunRecoveryFence => {
+	if (!value || typeof value !== "object") return false;
+	const fence = value as Record<string, unknown>;
+	return typeof fence.taskId === "string" && fence.taskId.length > 0
+		&& typeof fence.executionId === "string" && fence.executionId.length > 0
+		&& typeof fence.runId === "string" && fence.runId.length > 0
+		&& typeof fence.createdAt === "string" && Number.isFinite(Date.parse(fence.createdAt));
+};
 const isStore = (value: unknown): value is AgentRunStore => {
 	if (!value || typeof value !== "object") return false;
 	const store = value as AgentRunStore;
 	return store.version === 1
 		&& Array.isArray(store.runs)
 		&& store.runs.every(isRunShape)
-		&& (store.reservations === undefined || (Array.isArray(store.reservations) && store.reservations.every(isReservationShape)));
+		&& (store.reservations === undefined || (Array.isArray(store.reservations) && store.reservations.every(isReservationShape)))
+		&& (store.recoveryFences === undefined || (Array.isArray(store.recoveryFences) && store.recoveryFences.every(isRecoveryFenceShape)));
 };
 
 function registryPath(fluxDir: string): string {
@@ -434,6 +453,26 @@ export function registerAgentRun(
 	if (input.deadlineAt !== undefined) assertTimestamp(input.deadlineAt, "deadlineAt");
 	return updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
 		if (store.runs.some(run => run.id === id)) throw new Error(`Agent run already exists: ${id}`);
+		if ((input.taskId || input.executionId) && store.recoveryFences?.some(fence =>
+			(input.taskId !== undefined && fence.taskId === input.taskId)
+			|| (input.executionId !== undefined && fence.executionId === input.executionId))) {
+			throw new Error(`Agent run registration fenced during parent recovery: ${input.taskId ?? input.executionId}`);
+		}
+		// A recovery transaction may have terminalized the parent Task while this
+		// registration was waiting on runs.json. Do not create a new child under an
+		// immutable parent after that fence has been crossed.
+		if (input.taskId) {
+			const task = getTask(fluxDir, input.taskId);
+			if (task && TASK_TERMINAL.has(task.status)) {
+				throw new Error(`Agent run cannot attach to terminal Task ${input.taskId}: ${task.status}`);
+			}
+		}
+		if (input.executionId) {
+			const execution = getTaskExecution(fluxDir, input.executionId);
+			if (execution && TASK_TERMINAL.has(execution.status)) {
+				throw new Error(`Agent run cannot attach to terminal Execution ${input.executionId}: ${execution.status}`);
+			}
+		}
 		if (limits.parentMaxParallel !== undefined) {
 			if (!Number.isInteger(limits.parentMaxParallel) || limits.parentMaxParallel < 1) {
 				throw new Error("parent maxParallel must be a positive integer");
@@ -762,6 +801,31 @@ export function getAgentRun(fluxDir: string, runId: string): AgentRunRecord | un
  * 只处理明确带 heartbeat_expired 证据的 Run，并且不改写任何已经终态的
  * Task/Execution；这样重启恢复不会按 Agent 名称误伤另一个仍存活的 Main。
  */
+function claimRecoveryFence(fluxDir: string, run: AgentRunRecord, taskId: string, executionId: string): boolean {
+	return updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
+		const fences = store.recoveryFences ?? [];
+		if (fences.some(fence => fence.taskId === taskId && fence.executionId === executionId)) return true;
+		const liveSibling = store.runs.some(candidate => candidate.id !== run.id
+			&& ACTIVE.has(candidate.status)
+			&& (candidate.taskId === taskId || candidate.executionId === executionId));
+		if (liveSibling) return false;
+		store.recoveryFences = [...fences, {
+			taskId,
+			executionId,
+			runId: run.id,
+			createdAt: new Date().toISOString(),
+		}].slice(-32);
+		return true;
+	});
+}
+
+function releaseRecoveryFence(fluxDir: string, taskId: string, executionId: string): void {
+	updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
+		store.recoveryFences = (store.recoveryFences ?? [])
+			.filter(fence => fence.taskId !== taskId || fence.executionId !== executionId);
+	});
+}
+
 function reconcileRecoveredTask(fluxDir: string, run: AgentRunRecord): void {
 	if (!run.taskId || run.error !== HEARTBEAT_RECOVERY_ERROR
 		|| !run.recentEvents?.some(event => event.type === "heartbeat_expired")) return;
@@ -770,20 +834,54 @@ function reconcileRecoveredTask(fluxDir: string, run: AgentRunRecord): void {
 	const executionId = run.executionId ?? task.executionId;
 	const execution = getTaskExecution(fluxDir, executionId);
 	if (!execution || execution.taskId !== task.id || TASK_TERMINAL.has(execution.status)) return;
+
+	// Dead child != dead parent. A Workflow/Main can legitimately still own the
+	// same Task/Execution while one child is being replaced or another sibling is
+	// running. Terminalizing the parent here would make that live execution
+	// immutable and later child registration would either leak work or fail late.
+	const liveSibling = listAgentRuns(fluxDir)
+		.find(candidate => candidate.id !== run.id && ACTIVE.has(candidate.status)
+			&& (candidate.taskId === task.id || candidate.executionId === execution.id));
+	if (liveSibling || !claimRecoveryFence(fluxDir, run, task.id, execution.id)) return;
+	// Main/Workflow ownership is persisted on the execution when the host starts
+	// a plan. A live owner is stronger evidence than a stale child heartbeat and
+	// must defer recovery even when no other child Run is currently visible.
+	if (typeof execution.ownerPid === "number" && isProcessAlive(execution.ownerPid)) return;
+	// Older records may not have ownerPid. Workflow active-context entries still
+	// provide a durable parent PID and are checked by exact execution/task scope.
+	try {
+		const activeParent = readActiveContext(dirname(fluxDir)).entries.some(entry =>
+			(entry.scope === execution.id || entry.scope === task.id) && isProcessAlive(entry.pid));
+		if (activeParent) return;
+	} catch {
+		// A malformed/unavailable context store must not silently widen recovery;
+		// the explicit Run/owner fences above remain authoritative.
+		return;
+	}
 	const priorUsage = execution.usage;
-	updateTaskStatus(fluxDir, task.id, "failed", {
-		executionId,
-		costUsd: Math.max(Number.isFinite(execution.costUsd) ? execution.costUsd : 0, run.costUsd),
-		usage: {
-			input: Math.max(priorUsage?.input ?? 0, run.input),
-			output: Math.max(priorUsage?.output ?? 0, run.output),
-			cacheRead: Math.max(priorUsage?.cacheRead ?? 0, run.cacheRead),
-			cacheWrite: Math.max(priorUsage?.cacheWrite ?? 0, run.cacheWrite),
-			costUsd: Math.max(priorUsage?.costUsd ?? 0, run.costUsd),
-			model: run.model ?? priorUsage?.model,
-		},
-		outcome: { status: "failure", error: HEARTBEAT_RECOVERY_ERROR },
-	});
+	let taskStoreConverged = false;
+	try {
+		updateTaskStatus(fluxDir, task.id, "failed", {
+			executionId,
+			costUsd: Math.max(Number.isFinite(execution.costUsd) ? execution.costUsd : 0, run.costUsd),
+			usage: {
+				input: Math.max(priorUsage?.input ?? 0, run.input),
+				output: Math.max(priorUsage?.output ?? 0, run.output),
+				cacheRead: Math.max(priorUsage?.cacheRead ?? 0, run.cacheRead),
+				cacheWrite: Math.max(priorUsage?.cacheWrite ?? 0, run.cacheWrite),
+				costUsd: Math.max(priorUsage?.costUsd ?? 0, run.costUsd),
+				model: run.model ?? priorUsage?.model,
+			},
+			outcome: { status: "failure", error: HEARTBEAT_RECOVERY_ERROR },
+		});
+		taskStoreConverged = true;
+	} finally {
+		// Keep the fence only while task-store convergence is outstanding. A
+		// failed update intentionally leaves it durable for the next startup.
+		if (taskStoreConverged) {
+			try { releaseRecoveryFence(fluxDir, task.id, execution.id); } catch {}
+		}
+	}
 }
 
 export function reconcileStaleAgentRuns(

@@ -27,4 +27,6 @@
 
 ## 独立验收结论
 
-2026-09-02 在同一提交复跑完整门禁后，额外反例确认三项未闭合契约：generated Workflow 会在 planner 后重置父 deadline；`stop_requested` Run 仍可接收 steer 且消息可能进入后续 Run；restart recovery 报告中的 orphan Run 已 failed，但父 Task 仍为 running。因此本归档只保留已实现内容与既有证据，不能作为 P0-07 整体通过结论；返工和重新验收唯一在当前规划中维护。
+2026-09-02 首次独立验收确认三项未闭合契约：generated Workflow 会在 planner 后重置父 deadline；`stop_requested` Run 仍可接收 steer 且消息可能进入后续 Run；restart recovery 报告中的 orphan Run 已 failed，但父 Task 仍为 running。
+
+提交 `9f41788` 的第二次独立验收确认 deadline 时间戳传播与 stop/steer Core fence 已修复；但 Workflow 子 Run 因父 deadline `timed_out` 时父 Task/Execution 仍误写 `failed`，且单个 stale child 可在同一执行仍有 active Run 时提前把父级写成不可变 failed。独立 restart production 复跑也因未稳定终止 Pi A 而保存 `passed=false`。因此本归档只保留已实现内容与历史证据，不能作为 P0-07 整体通过结论；当前返工合同唯一见 `docs/development-plan/03-real-validation.md`。
