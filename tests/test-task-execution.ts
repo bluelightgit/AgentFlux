@@ -124,12 +124,18 @@ check("clamps maxIterations for negative values", () => {
 	assert.strictEqual(plan.budget.maxIterations, 1);
 });
 
-check("converts maxWallClockSeconds to ms with minimum 1000", () => {
-	const plan = createTaskExecutionPlan({
+check("rejects zero maxWallClockSeconds instead of treating it as an implicit deadline", () => {
+	assert.throws(() => createTaskExecutionPlan({
 		task: "test", selectedBy: "user",
 		budget: { ...budget, max_wall_clock_seconds: 0 },
-	});
-	assert.strictEqual(plan.budget.maxWallClockMs, 1000);
+	}), /positive finite/);
+});
+
+check("omitted and null maxWallClockSeconds produce no deadline", () => {
+	const omitted = createTaskExecutionPlan({ task: "test", selectedBy: "user", budget: { ...budget, max_wall_clock_seconds: undefined } });
+	const explicitNull = createTaskExecutionPlan({ task: "test", selectedBy: "user", budget: { ...budget, max_wall_clock_seconds: null } });
+	assert.strictEqual(omitted.budget.maxWallClockMs, undefined);
+	assert.strictEqual(explicitNull.budget.maxWallClockMs, undefined);
 });
 
 check("converts maxWallClockSeconds correctly", () => {
@@ -138,6 +144,15 @@ check("converts maxWallClockSeconds correctly", () => {
 		budget: { ...budget, max_wall_clock_seconds: 300 },
 	});
 	assert.strictEqual(plan.budget.maxWallClockMs, 300000);
+});
+
+check("preserves aggregate turn/input/concurrency budgets in a plan", () => {
+	const plan = createTaskExecutionPlan({
+		task: "fan out",
+		selectedBy: "user",
+		budget: { ...budget, max_turns_per_task: 12, max_input_tokens_per_task: 4000, max_parallel_agents: 4 },
+	});
+	assert.deepEqual(plan.budget, { maxCostUsd: 2, maxIterations: 5, maxTurns: 12, maxInputTokens: 4000, maxParallel: 4, maxWallClockMs: 600000 });
 });
 
 check("defaults operation to 'new' when not specified", () => {

@@ -206,6 +206,8 @@ async function main() {
 			sendUserMessage: (_content, options) => fuCalls.push(options?.deliverAs),
 		});
 		await fuPump.tick(new Date("2026-07-16T12:24:00.000Z"));
+		// 某些宿主会为当前活动 lifecycle 再发 agent_start；不能清掉 followUp watchdog。
+		fuPump.onAgentStart();
 		// 当前轮次正常结束（第一次 message_end 属于当前轮次，不 ACK followUp）
 		fuPump.onAssistantMessageEnd(true);
 		check("followUp batch waits for the queued message_end",

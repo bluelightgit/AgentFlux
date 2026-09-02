@@ -18,6 +18,29 @@ export interface TuiAgentInfo {
 	/** 会话文件最近几条 assistant 回复（Talk 展示“对话内容”，时间正序）。 */
 	lastHistory?: string[];
 	communication: "current_chat" | "persistent_session" | "message" | "none";
+	/** 来自 Core Run Registry 的最新 active Run 在线事实。 */
+	runId?: string;
+	phase?: string;
+	elapsedMs?: number;
+	freshnessMs?: number;
+	turns?: number;
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	contextTokens?: number;
+	liveCostUsd?: number;
+	health?: string;
+	healthReason?: string;
+	progressFreshnessMs?: number;
+	deadlineAt?: string;
+	healthWarningCount?: number;
+	queuedMessages?: number;
+	activity?: string;
+	error?: string;
+	modelError?: string;
+	providerError?: string;
+	recentEvents?: Array<{ at: string; type: string; phase: string; summary: string }>;
 }
 
 export interface TuiIssueInfo {
@@ -49,22 +72,48 @@ async function input(ctx: any, title: string, placeholder: string): Promise<stri
 	return (await ctx.ui.input(title, placeholder))?.trim() || null;
 }
 
+function formatDuration(ms: number | undefined): string {
+	if (ms === undefined || !Number.isFinite(ms)) return "-";
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
+	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
 function agentLabel(agent: TuiAgentInfo): string {
 	const roles = agent.roles?.length ? agent.roles.join("|") : agent.role;
-	return `${agent.name} · ${agent.kind} · ${roles} · ${agent.status}${agent.model ? ` · ${agent.model}` : ""}`;
+	const live = agent.runId
+		? ` · ${agent.phase ?? agent.status} · health=${agent.health ?? "healthy"} · t${agent.turns ?? 0} · $${(agent.liveCostUsd ?? 0).toFixed(4)}`
+		: "";
+	return `${agent.name} · ${agent.kind} · ${roles} · ${agent.status}${agent.model ? ` · ${agent.model}` : ""}${live}`;
 }
 
 function agentDetails(agent: TuiAgentInfo): string {
+	const hasLiveRun = !!agent.runId;
+	const liveTokens = (agent.input ?? 0) + (agent.output ?? 0);
 	return [
 		`Agent ${agent.name}`,
 		`  kind          ${agent.kind}`,
-		`  role/status  ${agent.roles?.length ? agent.roles.join("|") : agent.role} / ${agent.status}`,
-		`  model        ${agent.provider ? `${agent.provider}/` : ""}${agent.model ?? "default"}`,
-		`  session      ${agent.sessionId ?? "-"}`,
-		`  open         ${agent.sessionCommand ?? "-"}`,
-		`  calls/cost   ${agent.callCount} / $${agent.totalCostUsd.toFixed(6)}`,
-		`  capability   generation ${agent.capabilityGeneration}`,
-		`  last task    ${agent.lastTask ?? "-"}`,
+		`  role/status   ${agent.roles?.length ? agent.roles.join("|") : agent.role} / ${agent.status}`,
+		`  model         ${agent.provider ? `${agent.provider}/` : ""}${agent.model ?? "default"}`,
+		`  session       ${agent.sessionId ?? "-"}`,
+		`  open          ${agent.sessionCommand ?? "-"}`,
+		`  history       calls ${agent.callCount} / total cost $${agent.totalCostUsd.toFixed(6)}`,
+		`  run           ${agent.runId ?? "-"}`,
+		`  phase         ${hasLiveRun ? agent.phase ?? agent.status : "-"}`,
+		`  elapsed/fresh ${hasLiveRun ? `${formatDuration(agent.elapsedMs)} / ${formatDuration(agent.freshnessMs)}` : "- / -"}`,
+		`  deadline      ${hasLiveRun ? agent.deadlineAt ?? "none" : "-"}`,
+		`  health        ${hasLiveRun ? `${agent.health ?? "healthy"}${agent.healthReason ? ` · ${agent.healthReason}` : ""} · progress ${formatDuration(agent.progressFreshnessMs)} · warnings ${agent.healthWarningCount ?? 0}` : "-"}`,
+		`  live usage    ${hasLiveRun ? `turns ${agent.turns ?? 0} / tokens ${liveTokens} (in ${agent.input ?? 0}, out ${agent.output ?? 0}, read ${agent.cacheRead ?? 0}, write ${agent.cacheWrite ?? 0}, context ${agent.contextTokens ?? 0})` : "-"}`,
+		`  live cost     ${hasLiveRun ? `$${(agent.liveCostUsd ?? 0).toFixed(6)}` : "-"}`,
+		`  activity      ${hasLiveRun ? agent.activity ?? "-" : "-"}`,
+		`  error         ${agent.error ?? "-"}`,
+		`  model error   ${agent.modelError ?? "-"}`,
+		`  provider err  ${agent.providerError ?? "-"}`,
+		`  recent events ${agent.recentEvents?.length ? agent.recentEvents.slice(-5).map(event => `[${event.phase}/${event.type}] ${event.summary}`).join(" | ") : "-"}`,
+		`  capability    generation ${agent.capabilityGeneration}`,
+		`  last task     ${agent.lastTask ?? "-"}`,
 	].join("\n");
 }
 
@@ -91,8 +140,11 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	if (agent.communication === "persistent_session") actions.unshift("Talk · continue Agent session");
 	if (agent.communication === "message") actions.unshift("Message · send to active Agent");
 	if (agent.kind === "subagent" && agent.status !== "archived") {
-		if (agent.status === "running") actions.push("Stop · abort the running run");
-		else if (agent.lastTask) actions.push("Retry · re-run last task");
+		if (agent.status === "running") {
+			actions.push("Inspect · refresh Run and transcript");
+			actions.push("Steer · queue Message V2 instruction");
+			actions.push("Stop · abort the running run");
+		} else if (agent.lastTask) actions.push("Retry · re-run last task");
 		actions.push("Delete · hard-delete this Agent");
 	}
 	const action = await select(ctx, agent.name, actions);
@@ -113,6 +165,8 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}${selectedRole ? ` --role ${selectedRole}` : ""}`;
 	}
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
+	if (action?.startsWith("Inspect")) return `agent inspect ${agent.name}`;
+	if (action?.startsWith("Steer")) { const message = await input(ctx, `Steer ${agent.name}`, "Instruction for the active Run"); return message ? `agent steer ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Details")) { ctx.ui.notify(agentDetails(agent), "info"); return null; }
 	if (action?.startsWith("Stop")) return `agent stop ${agent.name}`;
 	if (action?.startsWith("Retry")) return `agent retry ${agent.name}`;

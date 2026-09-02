@@ -8,4 +8,7 @@
 |---|---|---|
 | [2026-08-foundation.md](2026-08-foundation.md) | 已完成 | 统一 Agent、模型继承、角色能力和基础 Registry |
 | [2026-09-multirole-dogfood.md](2026-09-multirole-dogfood.md) | 已完成 | 多角色 Workflow 绑定和 production dogfood |
+| [2026-09-p0-01-p0-04-workflow-core.md](2026-09-p0-01-p0-04-workflow-core.md) | 已完成 | Workflow planner、DAG 节点、质量门和显式 deadline 真实闭环 |
+| [2026-09-p0-05-run-telemetry.md](2026-09-p0-05-run-telemetry.md) | 已完成 | Core Run 在线遥测、错误分类和 production model recovery |
+| [2026-09-p0-07-agent-control.md](2026-09-p0-07-agent-control.md) | 已完成 | Agent inspect/steer/stop、nullable deadline、health 和父 Task 聚合预算 |
 | [2026-09-plan-v1.md](2026-09-plan-v1.md) | 已替代 | 旧版集中任务规划迁移到主题化当前规划 |

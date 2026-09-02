@@ -61,6 +61,7 @@ export class RpcInboxPump {
 	private readonly pollIntervalMs: number;
 	private readonly batchSize: number;
 	private readonly heartbeatIntervalMs: number;
+	private readonly agentStartTimeoutMs: number;
 	private timer: NodeJS.Timeout | null = null;
 	private ticking = false;
 	private activeBatch: ActiveBatch | null = null;
@@ -76,6 +77,10 @@ export class RpcInboxPump {
 		this.pollIntervalMs = Math.max(100, Math.min(60_000, options.pollIntervalMs ?? 1_000));
 		this.batchSize = Math.max(1, Math.min(20, options.batchSize ?? 5));
 		this.heartbeatIntervalMs = Math.max(1_000, Math.min(60_000, options.heartbeatIntervalMs ?? 10_000));
+		if (options.agentStartTimeoutMs !== undefined && (!Number.isFinite(options.agentStartTimeoutMs) || options.agentStartTimeoutMs <= 0)) {
+			throw new Error("agentStartTimeoutMs must be a positive finite number");
+		}
+		this.agentStartTimeoutMs = Math.max(1, Math.min(24 * 60 * 60 * 1000, options.agentStartTimeoutMs ?? DEFAULT_AGENT_START_TIMEOUT_MS));
 		this.stats = {
 			recipient: options.recipient, running: false, inFlight: false,
 			inFlightMessageIds: [], delivered: 0, acknowledged: 0, failed: 0,
@@ -154,7 +159,7 @@ export class RpcInboxPump {
 		const waitingForStart = batch.waitingForAgentStart || batch.waitingForCurrentTurnEnd;
 		const anchorMs = waitingForStart ? batch.startedAtMs : batch.currentTurnEndedAtMs;
 		if (anchorMs === undefined) return false;
-		const timeoutMs = this.options.agentStartTimeoutMs ?? DEFAULT_AGENT_START_TIMEOUT_MS;
+		const timeoutMs = this.agentStartTimeoutMs;
 		if (now - anchorMs <= timeoutMs) return false;
 		this.clearAgentStartWatchdog();
 		this.activeBatch = null;
@@ -170,7 +175,7 @@ export class RpcInboxPump {
 
 	private armAgentStartWatchdog(): void {
 		this.clearAgentStartWatchdog();
-		this.agentStartTimer = setTimeout(() => { this.checkAgentStartTimeout(); }, DEFAULT_AGENT_START_TIMEOUT_MS);
+		this.agentStartTimer = setTimeout(() => { this.checkAgentStartTimeout(); }, this.agentStartTimeoutMs);
 		this.agentStartTimer.unref?.();
 	}
 
@@ -181,27 +186,57 @@ export class RpcInboxPump {
 
 	/** Called for every pi agent_start event. */
 	onAgentStart(): void {
-		this.clearAgentStartWatchdog();
-		if (this.activeBatch?.waitingForAgentStart && !this.activeBatch.waitingForCurrentTurnEnd) {
-			this.activeBatch.waitingForAgentStart = false;
+		const batch = this.activeBatch;
+		if (!batch) {
+			this.clearAgentStartWatchdog();
+			return;
 		}
+		// A follow-up is injected into an already active lifecycle. If pi emits an
+		// agent_start for that lifecycle, keep watching for the current turn's
+		// message_end instead of clearing the only watchdog.
+		if (batch.waitingForCurrentTurnEnd) {
+			this.armAgentStartWatchdog();
+			return;
+		}
+		this.clearAgentStartWatchdog();
+		if (batch.waitingForAgentStart) batch.waitingForAgentStart = false;
 	}
 
 	/** ACK only after the assistant response belonging to the injected batch succeeds. */
 	onAssistantMessageEnd(success: boolean, now = new Date()): number {
-		this.clearAgentStartWatchdog();
 		const batch = this.activeBatch;
-		if (!batch) return 0;
+		if (!batch) {
+			this.clearAgentStartWatchdog();
+			return 0;
+		}
 		if (batch.waitingForCurrentTurnEnd) {
+			if (!success) {
+				this.clearAgentStartWatchdog();
+				this.activeBatch = null;
+				this.syncInFlightStats();
+				this.stats.failed += batch.messageIds.length;
+				this.stats.lastError = "current assistant turn failed; delivery retained for lease redelivery";
+				this.options.onAudit?.({ action: "ack", result: "failure", messageIds: batch.messageIds, mode: batch.mode, detail: this.stats.lastError });
+				return 0;
+			}
 			batch.waitingForCurrentTurnEnd = false;
 			// pi drains follow-up messages inside the same agent lifecycle and does
 			// not emit a second agent_start. The next assistant message_end belongs
-			// to the queued follow-up, so it is the ACK boundary.
+			// to the queued follow-up, so it is the ACK boundary. Keep a fresh
+			// watchdog armed for that second response; otherwise a stuck follow-up
+			// would hold the in-flight lease forever.
 			batch.waitingForAgentStart = false;
 			batch.currentTurnEndedAtMs = Date.now();
+			this.armAgentStartWatchdog();
 			return 0;
 		}
-		if (batch.waitingForAgentStart) return 0;
+		if (batch.waitingForAgentStart) {
+			// A message_end before the expected agent_start is not the injected
+			// response. Preserve the watchdog rather than leaving the batch stuck.
+			this.armAgentStartWatchdog();
+			return 0;
+		}
+		this.clearAgentStartWatchdog();
 		this.activeBatch = null;
 		this.syncInFlightStats();
 		if (!success) {

@@ -15,6 +15,8 @@ import { assertSafeOpaqueId, resolvePathInsideExistingRoot } from "../core/safe-
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
+import type { RunHealthConfig } from "../core/run-health";
 
 /**
  * 诊断日志 sink。默认 console.error；UI 模式下由宿主置空（setDagLogSink(null)），
@@ -62,8 +64,12 @@ export function selectHealthyModel(
 	return fallback;
 }
 /** 单节点 deadline 不能越过 DAG 的全局 wall-clock deadline。 */
-export function boundedNodeTimeout(configuredTimeoutMs: number | undefined, dagDeadlineMs: number, nowMs = Date.now()): number {
-	return Math.max(1, Math.min(configuredTimeoutMs ?? Number.MAX_SAFE_INTEGER, dagDeadlineMs - nowMs));
+export function boundedNodeTimeout(configuredTimeoutMs: number | null | undefined, dagDeadlineMs: number | null | undefined, nowMs = Date.now()): number | undefined {
+	const configured = normalizeOptionalDurationMs(configuredTimeoutMs, "node timeout");
+	const remaining = remainingDuration(dagDeadlineMs, nowMs);
+	if (configured === undefined) return remaining;
+	if (remaining === undefined) return configured;
+	return Math.min(configured, remaining);
 }
 
 export interface TaskExecutionResult {
@@ -161,7 +167,10 @@ export async function generateTaskDAG(
 		prefixLayout: boolean;
 		signal?: AbortSignal;
 		maxCostUsd?: number;
-		timeoutMs?: number;
+		parentMaxTurns?: number;
+		parentMaxInputTokens?: number;
+		timeoutMs?: number | null;
+		health?: RunHealthConfig;
 		taskId?: string;
 		executionId?: string;
 	},
@@ -223,6 +232,10 @@ Rules:
 		roleRequirementForFallback: ROLE_FALLBACK_REQUIREMENTS.planner,
 		signal: opts.signal,
 		maxCostUsd: opts.maxCostUsd,
+		parentMaxCostUsd: opts.maxCostUsd,
+		parentMaxTurns: opts.parentMaxTurns,
+		parentMaxInputTokens: opts.parentMaxInputTokens,
+		health: opts.health,
 		taskId: opts.taskId,
 		executionId: opts.executionId,
 		timeoutMs: opts.timeoutMs,
@@ -343,6 +356,8 @@ function findUpstreamImplementer(node: TaskNode, dag: TaskDAG): string | undefin
 
 export interface DAGExecutorOptions {
 	cwd: string;
+	/** executeDAG 内部传递的绝对全局 deadline；调用方通常不设置。 */
+	deadlineAt?: number;
 	fluxDir: string;
 	modelsConfig: any;
 	telemetry: TelemetryWriter;
@@ -355,23 +370,26 @@ export interface DAGExecutorOptions {
 	defaultProvider?: string;
 	maxRetries?: number;
 	enableQualityGate?: boolean;
-	timeoutMs?: number;        // 每个 subagent 超时 (默认 180000 = 3min)
+	timeoutMs?: number | null; // 每个 subagent 的显式 deadline；省略/null 表示不按 wall-clock 终止
 	persistent?: boolean;
 	signal?: AbortSignal;      // 用户取消时传播到每个真实子进程
 	maxCostUsd?: number;       // 步骤之间硬停止；单次 provider 请求可能产生少量超额
-	maxWallClockMs?: number;   // 整个 DAG 的 wall-clock 上限
+	maxWallClockMs?: number | null;   // 整个 DAG 的显式 wall-clock 上限；省略/null 表示无硬限制
 	maxIterations?: number;    // 全局节点执行批次数上限
 	maxParallel?: number;      // 并发节点上限
+	parentMaxTurns?: number;   // 父 Task 聚合 assistant turn 上限
+	parentMaxInputTokens?: number;
+	health?: RunHealthConfig;   // 子 Run 健康阈值；只产生提示，不自动终止
 	/** 确定性测试或受控宿主可替换子进程入口；正常生产调用留空。 */
 	invocationOverride?: { command: string; args: string[] };
 	executionId?: string;      // 显式 run id；也用于断点文件
 	taskId?: string;
 	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
 	resumeFromExecutionId?: string; // 从只读父执行 checkpoint 派生新 execution
-	qualityGate?: {            // 质量门独立配置: judge 模型/超时, 默认沿用节点模型 + 按剩余时间
+	qualityGate?: {            // 质量门独立配置: judge 模型/显式 deadline；省略 timeout 表示只受取消控制
 		model?: string;
 		provider?: string;
-		timeoutMs?: number;
+		timeoutMs?: number | null;
 	};
 }
 
@@ -404,7 +422,8 @@ export async function executeDAG(
 	const maxRetries = opts.maxRetries ?? 2;
 	const enableGate = opts.enableQualityGate ?? true;
 	const wallStart = Date.now();
-	const deadline = wallStart + Math.max(1, opts.maxWallClockMs ?? Number.MAX_SAFE_INTEGER);
+	const configuredWallClockMs = normalizeOptionalDurationMs(opts.maxWallClockMs, "DAG maxWallClockMs");
+	const deadline = configuredWallClockMs === undefined ? undefined : wallStart + configuredWallClockMs;
 	const taskResults = new Map<string, TaskExecutionResult>();
 	const completed = new Set<string>();
 	const failed = new Set<string>();
@@ -511,7 +530,7 @@ export async function executeDAG(
 	// 主循环: 按拓扑序执行
 	while (completed.size + failed.size < dag.nodes.length) {
 		if (opts.signal?.aborted) { status = "cancelled"; break; }
-		if (Date.now() >= deadline) { status = "timed_out"; break; }
+		if (deadline !== undefined && Date.now() >= deadline) { status = "timed_out"; break; }
 		if (opts.maxCostUsd !== undefined && totalCost >= opts.maxCostUsd) { status = "budget_exceeded"; break; }
 		if (iterationCount >= (opts.maxIterations ?? Number.MAX_SAFE_INTEGER)) { status = "failed"; break; }
 		iterationCount++;
@@ -576,7 +595,12 @@ export async function executeDAG(
 		// 并行执行就绪任务 (用 allSettled 防止单个节点 throw 导致整批丢失)
 		const remainingBudget = opts.maxCostUsd === undefined ? undefined : Math.max(0, opts.maxCostUsd - totalCost);
 		const perNodeBudget = remainingBudget === undefined ? undefined : remainingBudget / ready.length;
-		const batchOpts: DAGExecutorOptions = { ...opts, timeoutMs: boundedNodeTimeout(opts.timeoutMs, deadline) };
+		const batchTimeoutMs = boundedNodeTimeout(opts.timeoutMs, deadline);
+		if (batchTimeoutMs !== undefined && batchTimeoutMs <= 0) {
+			status = "timed_out";
+			break;
+		}
+		const batchOpts: DAGExecutorOptions = { ...opts, deadlineAt: deadline, timeoutMs: batchTimeoutMs };
 		const batchSettled = await Promise.allSettled(
 			ready.map(node => executeNodeWithGate(
 				node, roles, models, batchOpts, maxRetries, enableGate, executionId,
@@ -761,14 +785,24 @@ async function executeNodeWithGate(
 	let lastResult: AgentRunResult | null = null;
 	let lastGateResult: QualityGateResult | null = null;
 	let totalNodeCost = 0;
-	const nodeTimeoutMs = Math.max(1, opts.timeoutMs ?? 180000);
-	const nodeDeadline = Date.now() + nodeTimeoutMs;
+	const nodeTimeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "node timeout");
+	const relativeNodeDeadline = nodeTimeoutMs === undefined ? undefined : Date.now() + nodeTimeoutMs;
+	const nodeDeadline = opts.deadlineAt === undefined
+		? relativeNodeDeadline
+		: relativeNodeDeadline === undefined ? opts.deadlineAt : Math.min(opts.deadlineAt, relativeNodeDeadline);
 
 	while (retryCount <= maxRetries) {
 		if (opts.signal?.aborted) {
 			return {
 				node,
 				result: lastResult ?? { agent: agentDef.name, exitCode: 130, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: totalNodeCost, contextTokens: 0 }, model: null, errorMessage: "cancelled" },
+				gateResult: lastGateResult, retryCount, passed: false, cost: totalNodeCost,
+			};
+		}
+		if (nodeDeadline !== undefined && Date.now() >= nodeDeadline) {
+			return {
+				node,
+				result: lastResult ?? { agent: agentDef.name, exitCode: 124, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: totalNodeCost, contextTokens: 0 }, model: null, errorMessage: "node explicit deadline exhausted" },
 				gateResult: lastGateResult, retryCount, passed: false, cost: totalNodeCost,
 			};
 		}
@@ -798,8 +832,13 @@ async function executeNodeWithGate(
 				prefixLayout: opts.prefixLayout,
 				defaultModel: opts.defaultModel,
 				defaultProvider: opts.defaultProvider,
-				timeoutMs: Math.max(1, nodeDeadline - Date.now()),
+				timeoutMs: remainingDuration(nodeDeadline),
 				maxCostUsd: remainingNodeCost,
+				parentMaxCostUsd: opts.maxCostUsd,
+				parentMaxTurns: opts.parentMaxTurns,
+				parentMaxInputTokens: opts.parentMaxInputTokens,
+				parentMaxParallel: opts.maxParallel,
+				health: opts.health,
 				lockFiles: node.files,
 				invocationOverride: opts.invocationOverride,
 			}, opts.signal, undefined, {
@@ -817,7 +856,7 @@ async function executeNodeWithGate(
 				provider: agentDef.provider,
 				pricing: opts.pricing,
 				thinking: agentDef.thinking,
-				timeoutMs: Math.max(1, nodeDeadline - Date.now()), // 所有重试/降级共享节点总时限
+				timeoutMs: remainingDuration(nodeDeadline), // 所有重试/降级共享节点总时限
 				maxRetries: 1,                        // 底层自动重试 1 次
 				retryDelayMs: 3000,
 				persistent: opts.persistent ?? true,
@@ -830,6 +869,11 @@ async function executeNodeWithGate(
 				// while agent.name and persistentSessionId preserve the logical DAG node.
 				runId: createDAGRunId(executionId, node.id),
 				maxCostUsd: remainingNodeCost,
+				parentMaxCostUsd: opts.maxCostUsd,
+				parentMaxTurns: opts.parentMaxTurns,
+				parentMaxInputTokens: opts.parentMaxInputTokens,
+				parentMaxParallel: opts.maxParallel,
+				health: opts.health,
 				taskId: opts.taskId,
 				executionId,
 				lockFiles: node.files,
@@ -855,7 +899,7 @@ async function executeNodeWithGate(
 			if (opts.signal?.aborted || result.exitCode === 130) {
 				return { node, result, gateResult: null, retryCount, passed: false, cost: totalNodeCost };
 			}
-			if (retryCount < maxRetries && Date.now() < nodeDeadline) {
+			if (retryCount < maxRetries && (nodeDeadline === undefined || Date.now() < nodeDeadline)) {
 				const reason = result.exitCode === 124 ? "timeout" : result.errorMessage ?? `exit ${result.exitCode}`;
 				dagLog(`[flux dag] ${node.id} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
 				retryCount++;
@@ -868,18 +912,18 @@ async function executeNodeWithGate(
 
 		// 质量门检查
 		if (enableGate && node.acceptanceCriteria.length > 0) {
-			if (Date.now() >= nodeDeadline) {
+			if (nodeDeadline !== undefined && Date.now() >= nodeDeadline) {
 				return {
 					node,
-					result: { ...result, exitCode: 124, errorMessage: `node timeout (${nodeTimeoutMs / 1000}s) exhausted before quality gate` },
+					result: { ...result, exitCode: 124, errorMessage: `node explicit deadline (${nodeTimeoutMs === undefined ? "unknown" : `${nodeTimeoutMs / 1000}s`}) exhausted before quality gate` },
 					gateResult: null, retryCount, passed: false, cost: totalNodeCost,
 				};
 			}
-			// judge 独立配置优先, 否则沿用节点模型；超时按节点剩余时间（15s-90s 区间）
+			// judge 独立配置优先；未配置显式 timeout 时只受取消和（如有）DAG deadline 控制。
 			const gateCfg = opts.qualityGate;
 			const gateModel = gateCfg?.model ?? result.model ?? agentDef.model ?? "";
 			const gateProvider = gateCfg?.provider ?? (gateModel ? models[gateModel]?.provider ?? agentDef.provider : agentDef.provider);
-			const gateTimeoutMs = gateCfg?.timeoutMs ?? Math.max(15_000, Math.min(90_000, nodeDeadline - Date.now()));
+			const gateTimeoutMs = boundedNodeTimeout(gateCfg?.timeoutMs, nodeDeadline);
 			let gateAttempts = 0;
 			for (;;) {
 				gateAttempts++;
@@ -899,12 +943,13 @@ async function executeNodeWithGate(
 					continue;
 				}
 				if (action === "retry_judge") {
-					// judge 基础设施无法判定: 降级放行（不惩罚已成功的任务本体）, 显式标注无判定
-					dagLog(`[flux dag] ${node.id} gate judge unavailable after ${gateAttempts} attempts (${lastGateResult.feedback.slice(0, 100)}); releasing node without verdict`);
+					// 关键 verdict 不可判定时必须失败关闭；不能把 indeterminate 改写成成功。
+					// 节点本体可能已经 exit=0，但没有明确质量门 pass 就不能释放后续节点。
+					dagLog(`[flux dag] ${node.id} gate judge unavailable after ${gateAttempts} attempts (${lastGateResult.feedback.slice(0, 100)}); failing closed without verdict`);
 					return {
 						node, result,
-						gateResult: { ...lastGateResult, passed: true, feedback: `${lastGateResult.feedback} — node released without verdict (judge unavailable)` },
-						retryCount, passed: true, cost: totalNodeCost,
+						gateResult: lastGateResult,
+						retryCount, passed: false, cost: totalNodeCost,
 					};
 				}
 				break; // retry_node: criteria 明确不满足, 走节点重试

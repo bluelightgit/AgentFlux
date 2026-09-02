@@ -19,6 +19,7 @@ export interface TaskExecutionEvent extends BaseEvent {
 	parentTaskId?: string;
 	executionId?: string;
 	parentExecutionId?: string;
+	deadlineAt?: string;
 	/** Main 会话侧逐轮累计 usage（子 Agent usage 记录在 SubagentRunEvent/checkpoint） */
 	usage?: MainUsage;
 }

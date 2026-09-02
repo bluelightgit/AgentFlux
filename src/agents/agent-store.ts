@@ -16,6 +16,9 @@ import { readJsonStore, updateJsonStore } from "../core/json-store";
 import type { PricingTable } from "../core/pricing";
 import { assertSafePathSegment } from "../core/safe-path";
 import type { AgentRecord, AgentScope, AgentStatus, ThinkingLevel } from "../core/types";
+import { listAgentRuns, type AgentRunRecord } from "../core/run-registry";
+import { MessageBus, type SendMessageV2Result } from "../core/message-bus";
+import type { RunHealthConfig } from "../core/run-health";
 import type { TelemetryWriter } from "../telemetry/events";
 import { runAgent, type AgentRunResult, type AgentTemplate } from "./agent-runner";
 import { loadAllRoles } from "./templates";
@@ -35,8 +38,13 @@ export interface AgentRunContext {
 	/** 未显式指定 Agent/角色模型时，继承当前 Main Agent 的模型。 */
 	defaultModel?: string;
 	defaultProvider?: string;
-	timeoutMs?: number;
+	timeoutMs?: number | null;
 	maxCostUsd?: number;
+	parentMaxCostUsd?: number;
+	parentMaxTurns?: number;
+	parentMaxInputTokens?: number;
+	parentMaxParallel?: number;
+	health?: RunHealthConfig;
 	lockFiles?: string[];
 	invocationOverride?: { command: string; args: string[] };
 }
@@ -141,6 +149,50 @@ export interface AgentRunSummary {
 	model?: string;
 	role?: string;
 	at: string;
+}
+
+export interface QueuedAgentInstruction {
+	agent: AgentRecord;
+	run: AgentRunRecord;
+	message: SendMessageV2Result;
+	pending: number;
+}
+
+/**
+ * 将 busy Agent 的新指令放入唯一的 Message V2 pending 队列。
+ * 返回 undefined 表示没有可接收的 active Run；调用方随后才可以尝试启动新 Run。
+ */
+export function enqueueAgentInstruction(
+	selector: string,
+	task: string,
+	context: Pick<AgentRunContext, "cwd" | "sessionId" | "taskId">,
+	priority: "normal" | "high" = "high",
+): QueuedAgentInstruction | undefined {
+	if (!task.trim()) throw new Error("queued Agent instruction cannot be empty");
+	const record = findSingle(context.cwd, selector, context.sessionId);
+	const run = listAgentRuns(join(context.cwd, ".agentflux"), { agent: record.name, activeOnly: true })[0];
+	if (!run) return undefined;
+	const bus = new MessageBus(join(context.cwd, ".agentflux"), { maxPendingPerRecipient: 20 });
+	const message = bus.sendDirect("main", record.name, "steer", task.trim(), {
+		priority,
+		correlationId: run.id,
+		taskId: context.taskId ?? run.taskId,
+		senderInstanceId: `main:${context.sessionId}`,
+	});
+	const pending = bus.peek(record.name, { limit: 100 })
+		.filter(item => item.envelope.correlationId === run.id && ["pending", "delivered"].includes(item.delivery.status)).length;
+	return { agent: record, run, message, pending };
+}
+
+/** 停止某个具体 Run 时拒绝其尚未消费的 steer，避免旧指令污染下一次 Run。 */
+export function rejectQueuedAgentInstructions(cwd: string, run: AgentRunRecord, reason = "run stopped"): number {
+	const bus = new MessageBus(join(cwd, ".agentflux"));
+	let rejected = 0;
+	for (const item of bus.peek(run.agent, { limit: 100 })) {
+		if (item.envelope.correlationId !== run.id || !["pending", "delivered"].includes(item.delivery.status)) continue;
+		try { bus.reject(run.agent, item.envelope.id, reason); rejected++; } catch { /* 并发 ACK/过期时以最终 delivery 为准 */ }
+	}
+	return rejected;
 }
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -310,10 +362,10 @@ function findSingle(cwd: string, selector: string, ownerSessionId?: string): Age
 /**
  * 运行 Agent = 与子代理对话：发出指令并等待完成（超时可配），
  * 返回其最后一条消息；assistantMessages 供 last(k) 展示更多执行消息。
- * busy 时拒绝（对话排队由 Message V2 pending 投递承载）。
+ * busy 时由调用方通过 enqueueAgentInstruction 将指令放入 Message V2 pending 队列。
  * 同一 Agent 可在每次 Run 中选择其已注册的允许角色。
  */
-export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void): Promise<AgentRunResult> {
+export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void, onHealthChange?: (event: { health: string; reason?: string; warning: boolean }) => void): Promise<AgentRunResult> {
 	assertModelOverride(context.modelsConfig, overrides?.model);
 	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
 		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
@@ -368,6 +420,12 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 			pricing: context.pricing,
 			timeoutMs: context.timeoutMs,
 			maxCostUsd: context.maxCostUsd,
+			parentMaxCostUsd: context.parentMaxCostUsd,
+			parentMaxTurns: context.parentMaxTurns,
+			parentMaxInputTokens: context.parentMaxInputTokens,
+			parentMaxParallel: context.parentMaxParallel,
+			health: context.health,
+			onHealthChange,
 			lockFiles: context.lockFiles,
 			signal,
 			onProgress: onProgress,
@@ -449,15 +507,62 @@ export function resetAgentStatus(cwd: string, selector: string, status: Exclude<
 	});
 }
 
-export function formatAgents(agents: AgentRecord[], cwd?: string): string {
+function formatDuration(ms: number | undefined): string {
+	if (ms === undefined || !Number.isFinite(ms)) return "-";
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
+	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+function ageFrom(timestamp: string | undefined, now = Date.now()): number | undefined {
+	if (!timestamp) return undefined;
+	const at = Date.parse(timestamp);
+	return Number.isFinite(at) ? Math.max(0, now - at) : undefined;
+}
+
+function latestActiveRuns(cwd: string): Map<string, AgentRunRecord> {
+	const latest = new Map<string, AgentRunRecord>();
+	try {
+		for (const run of listAgentRuns(join(cwd, ".agentflux"), { activeOnly: true })) {
+			if (!latest.has(run.agent)) latest.set(run.agent, run);
+		}
+	} catch { /* registry 损坏/不可读时不影响 Agent 身份列表 */ }
+	return latest;
+}
+
+/**
+ * 格式化 Agent 列表。兼容旧的 formatAgents(records, cwd) 调用，也支持
+ * formatAgents(cwd)；在线字段只从 Core Run Registry 的 active Run 读取。
+ */
+export function formatAgents(cwd: string): string;
+export function formatAgents(agents: AgentRecord[], cwd?: string): string;
+export function formatAgents(input: AgentRecord[] | string, cwd?: string): string {
+	const projectCwd = typeof input === "string" ? input : cwd;
+	const agents = typeof input === "string" ? listAgents(input) : input;
 	if (agents.length === 0) return "No Agents.";
-	const sorted = sortAgentsByActivity(agents);
+	const active = projectCwd ? latestActiveRuns(projectCwd) : new Map<string, AgentRunRecord>();
+	const now = Date.now();
+	const sorted = sortAgentsByActivity(agents).sort((left, right) => Number(active.has(right.name)) - Number(active.has(left.name)));
 	return ["Agents:", ...sorted.map(agent => {
+		const run = active.get(agent.name);
 		const summary = (agent.lastResult?.summary.trim().replace(/\s+/g, " ") || "(no output)").slice(0, 60);
 		const roles = getAgentRoles(agent);
 		const roleLabel = roles.length > 1 ? roles.join("|") : roles[0];
-		const lines = [`  ${agent.status.padEnd(9)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${roleLabel} calls=${agent.callCount} cost=$${agent.totalCostUsd.toFixed(6)}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}${roles.length > 1 ? `·${agent.lastResult.role ?? agent.lastRole ?? roleLabel}` : ""}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`];
-		const sessionCommand = cwd ? formatAgentSessionCommand(cwd, agent) : undefined;
+		const historicalCost = Number.isFinite(agent.totalCostUsd) ? agent.totalCostUsd : 0;
+		const runModel = run?.model ?? agent.model ?? "default";
+		const runProvider = run?.provider ?? agent.provider ?? "-";
+		const activity = (run?.lastActivitySummary || run?.currentTask || "-").replace(/\s+/g, " ").slice(0, 100);
+		const error = [run?.error, run?.modelError, run?.providerError].find(value => !!value)?.replace(/\s+/g, " ").slice(0, 120);
+		const pending = run ? (() => { try { return new MessageBus(join(projectCwd ?? "", ".agentflux")).peek(agent.name, { limit: 100 }).filter(item => ["pending", "delivered"].includes(item.delivery.status)).length; } catch { return 0; } })() : 0;
+		const progressFreshness = ageFrom(run?.lastProgressAt, now);
+		const live = run
+			? ` run=${run.status} phase=${run.phase} health=${run.health} elapsed=${formatDuration(ageFrom(run.createdAt, now))} freshness=${formatDuration(ageFrom(run.lastActivityAt, now))} progress=${formatDuration(progressFreshness)} turns=${run.turns} input=${run.input} output=${run.output} tokens=${run.input + run.output} liveCost=$${run.costUsd.toFixed(6)} model=${runModel} provider=${runProvider} queued=${pending} activity=${activity}${run.healthReason ? ` healthReason=${run.healthReason}` : ""}${error ? ` error=${error}` : ""}`
+			: ` run=none phase=- elapsed=- freshness=- turns=0 input=0 output=0 tokens=0 liveCost=$0.000000 model=${runModel} provider=${runProvider} activity=-`;
+		const displayStatus = run?.status ?? agent.status;
+		const lines = [`  ${displayStatus.padEnd(14)} ${agent.name.padEnd(20)} scope=${agent.scope.padEnd(7)} role=${roleLabel} calls=${agent.callCount} totalCost=$${historicalCost.toFixed(6)}${live}${agent.lastResult ? ` last=${agent.lastResult.success ? "SUCCESS" : "FAILED"}${roles.length > 1 ? `·${agent.lastResult.role ?? agent.lastRole ?? roleLabel}` : ""}·t${agent.lastResult.turns}·$${agent.lastResult.costUsd.toFixed(6)}·${summary}` : ""}`];
+		const sessionCommand = projectCwd ? formatAgentSessionCommand(projectCwd, agent) : undefined;
 		if (sessionCommand) lines.push(`     ${sessionCommand}`);
 		return lines.join("\n");
 	})].join("\n");

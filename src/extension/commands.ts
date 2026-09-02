@@ -60,8 +60,8 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 		["workflow delete", "删除已保存 Workflow 定义"],
 	]);
 	if (prefix.startsWith("agent ")) return completions(prefix, [
-		["agent list", "列出 Agents"], ["agent create", "创建 Agent（默认/角色模板/分叉）"],
-		["agent run", "与 Agent 对话（可选择本次角色）"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
+		["agent list", "列出 Agents"], ["agent inspect", "查看实时 Run、健康和最近 transcript"], ["agent create", "创建 Agent（默认/角色模板/分叉）"],
+		["agent run", "与 Agent 对话（可选择本次角色）"], ["agent steer", "通过 Message V2 向运行中的 Agent 排队指令"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
 		["agent delete", "删除 Agent"], ["agent gc", "自动 GC（保留最新 k 个）"],
 	]);
 	if (prefix.startsWith("issue ")) return completions(prefix, [
@@ -130,7 +130,7 @@ export const FLUX_HELP = [
 	"AgentFlux",
 	"  /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]",
 	"  /flux workflow list|show <selector>|reuse <selector> <task>|modify <selector> <change>|delete <selector>",
-	"  /flux agent list|create <name> [role] [--roles <role1,role2>]|run <name> <task> [--role <role>] [--session-mode <shared|fresh>] [--model <m>] [--thinking <t>] [--sync]|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
+	"  /flux agent list|inspect <name> [last]|create <name> [role] [--roles <role1,role2>]|run <name> <task> [--role <role>] [--session-mode <shared|fresh>] [--model <m>] [--thinking <t>] [--sync]|steer <name> <instruction>|stop <name>|retry <name>|delete <name>|gc [keepLatestK]",
 	"  /flux fork [last|index|entryId]",
 	"  /flux issue list|create <title>|show <id>|comment <id> <text>|propose <id> <title> <body>|support|oppose <id> <proposalId>|claim <id> <agent> <scope> [--plan <text>] [--props <id1,id2>]|submit <id> <claimId> [--plan <text>]|review <id> <claimId> pass|rework [feedback]|resolve <id>|delete <id>",
 	"  /flux message send <agent> <text>|inbox [agent]|ack <agent> <messageId>",

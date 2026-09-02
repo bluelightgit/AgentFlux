@@ -40,7 +40,21 @@ import {
 } from "../core/capability-policy";
 import { createEphemeralRecord, finishEphemeralRecord, startEphemeralRecord } from "./agent-lifecycle";
 import { clearAgentRunStop, readAgentRunStop } from "./agent-run-control";
-import { finishAgentRun, heartbeatAgentRun, markAgentRunRunning, registerAgentRun } from "../core/run-registry";
+import {
+	finishAgentRun,
+	heartbeatAgentRun,
+	markAgentRunRunning,
+	markAgentRunStopRequested,
+	registerAgentRun,
+	listAgentRuns,
+	updateAgentRunHealth,
+	updateAgentRunSnapshot,
+	type AgentRunHealthUpdate,
+	type AgentRunSnapshot,
+} from "../core/run-registry";
+import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
+import { getTaskExecution } from "../core/task-registry";
+import { assessRunHealth, DEFAULT_RUN_HEALTH_CONFIG, shouldEmitHealthWarning, type AgentRunHealth, type RunHealthConfig } from "../core/run-health";
 
 // ──────────────────────────────── Parallel Agents ────────────────────────────────
 
@@ -142,18 +156,55 @@ export async function runAgentsParallel(
 		persistent?: boolean;
 		sessionIds?: Map<string, string>;   // per-label session ID (team-workflow 用)
 		sessionDir?: string;                // 自定义 session 目录
-		timeoutMs?: number;                 // 超时 (默认 120000)
+		timeoutMs?: number | null;           // 可选显式 deadline；省略/null 不因 wall-clock 终止
 		maxRetries?: number;                // 重试次数 (默认 1)
 		lockFiles?: Record<string, string[]>;  // per-label 文件锁: {label: [file paths]}
 		signal?: AbortSignal;               // 调用方取消时终止所有子进程
-		maxCostUsd?: number;                // attempt 之间的实际成本硬停止
+		maxCostUsd?: number;                // 父任务聚合成本上限；按 child 预算分配
+		maxTurns?: number;                  // 父任务聚合 assistant turn 上限
+		maxInputTokens?: number;            // 父任务聚合 input token 上限
+		maxParallel?: number;               // 父任务并发上限；省略时与 tasks 数相同
+		parentMaxParallel?: number;         // 已存在父 Task 时的 active Run 上限
+		health?: RunHealthConfig;
 		taskId?: string;                   // 父任务关联；每个并行 child 共享 taskId
 		executionId?: string;              // 父 execution 关联
 		invocationOverride?: { command: string; args: string[] };
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
+	if (tasks.length === 0) return { results: [], wallClockMs: 0, sumIndividualMs: 0, speedupRatio: 1, totalCost: 0, allSucceeded: true, errors: [] };
+	const maxParallel = common.maxParallel ?? tasks.length;
+	if (!Number.isInteger(maxParallel) || maxParallel < 1) throw new Error("Parallel maxParallel must be a positive integer");
+	// 显式并发上限用批次实现；每批重新按父级剩余预算分配，避免后续批次重新获得完整父预算。
+	if (maxParallel < tasks.length) {
+		const results: AgentRunResult[] = [];
+		const errors: string[] = [];
+		let totalCost = 0;
+		let wallClockMs = 0;
+		let sumIndividualMs = 0;
+		let allSucceeded = true;
+		for (let start = 0; start < tasks.length; start += maxParallel) {
+			const batchTasks = tasks.slice(start, start + maxParallel);
+			const batch = await runAgentsParallel(batchTasks, {
+				...common,
+				maxParallel: undefined,
+				parentMaxParallel: common.parentMaxParallel ?? common.maxParallel,
+				maxCostUsd: common.maxCostUsd === undefined ? undefined : Math.max(0, common.maxCostUsd - totalCost),
+				maxTurns: common.maxTurns === undefined ? undefined : Math.max(0, common.maxTurns - results.reduce((sum, item) => sum + item.usage.turns, 0)),
+				maxInputTokens: common.maxInputTokens === undefined ? undefined : Math.max(0, common.maxInputTokens - results.reduce((sum, item) => sum + item.usage.input, 0)),
+			});
+			results.push(...batch.results);
+			errors.push(...batch.errors);
+			totalCost += batch.totalCost;
+			wallClockMs += batch.wallClockMs;
+			sumIndividualMs += batch.sumIndividualMs;
+			allSucceeded = allSucceeded && batch.allSucceeded;
+		}
+		return { results, wallClockMs, sumIndividualMs, speedupRatio: wallClockMs > 0 ? sumIndividualMs / wallClockMs : 1, totalCost: Number(totalCost.toFixed(6)), allSucceeded, errors };
+	}
 	const perAgentMaxCostUsd = allocateParallelAgentBudget(common.maxCostUsd, tasks.length);
+	const perAgentMaxTurns = common.maxTurns === undefined ? undefined : Math.floor(common.maxTurns / tasks.length);
+	const perAgentMaxInputTokens = common.maxInputTokens === undefined ? undefined : Math.floor(common.maxInputTokens / tasks.length);
 	const runIds = tasks.map(() => `subagent-${randomUUID()}`);
 	const lifecycleRecords = tasks.map((task, index) => common.persistent ? null : createEphemeralRecord({
 		name: task.agent.name,
@@ -203,17 +254,22 @@ export async function runAgentsParallel(
 				model: t.model,
 				provider: t.provider,
 				thinking: t.thinking,
-				maxTurns: t.maxTurns,
-				maxInputTokens: t.maxInputTokens,
+				maxTurns: t.maxTurns === undefined ? perAgentMaxTurns : perAgentMaxTurns === undefined ? t.maxTurns : Math.min(t.maxTurns, perAgentMaxTurns),
+				maxInputTokens: t.maxInputTokens === undefined ? perAgentMaxInputTokens : perAgentMaxInputTokens === undefined ? t.maxInputTokens : Math.min(t.maxInputTokens, perAgentMaxInputTokens),
 				completionProof: t.completionProof,
 				lockFiles: t.lockFiles ?? (t.label ? common.lockFiles?.[t.label] : undefined),
 				signal: common.signal,
 				maxCostUsd: perAgentMaxCostUsd,
+				parentMaxCostUsd: common.maxCostUsd,
+				parentMaxTurns: common.maxTurns,
+				parentMaxInputTokens: common.maxInputTokens,
+				parentMaxParallel: common.parentMaxParallel ?? common.maxParallel,
 				taskId: common.taskId,
 				executionId: common.executionId,
 				runId: runIds[i],
 				liveTeamCommunication: true,
 				invocationOverride: common.invocationOverride,
+				health: common.health,
 			}).then(result => {
 				timings[i] = { start: individualStart, end: Date.now() };
 				return result;
@@ -493,9 +549,9 @@ function prependInboxMessages(task: string, agentName: string, cwd: string): { t
 
 // ── 错误检测: 模型错误 (可降级) vs 瞬时错误 (可重试) vs 进程错误 ──
 
-/** 模型解析错误 — 可触发模型降级 */
+/** 只有明确指向模型/凭据的解析错误才可触发模型降级；普通 file not found 不是模型错误。 */
 function isModelError(msg?: string): boolean {
-	return !!msg && /model not found|404|not found|no api key|opencode/i.test(msg);
+	return !!msg && /\bmodel\b.{0,80}\b(?:not found|unknown|invalid|unsupported|unavailable|does not exist)\b|\b(?:unknown|invalid|unsupported|unavailable)\s+model\b|no api key|opencode/i.test(msg);
 }
 
 /** 瞬时错误 — 502/503/500/overloaded/gateway 等, 重试同一模型 */
@@ -516,6 +572,35 @@ export function canCompletionProofRecover(
 /** Provider/API 组合不兼容 — 重试同一组合通常无效，应切换模型/provider。 */
 function isProviderCompatibilityError(msg?: string): boolean {
 	return !!msg && /406(?: status code)?|not acceptable/i.test(msg);
+}
+
+/** 明确的 provider/API 故障；裸 timeout 或普通进程错误只能重试，不能切换模型。 */
+function isExplicitProviderError(msg?: string, output?: string): boolean {
+	const text = `${msg ?? ""} ${output ?? ""}`;
+	return isProviderCompatibilityError(msg) || isProviderQuotaError(msg, output)
+		|| /\b(?:http\s*)?(?:429|500|502|503)\b|provider|api error|upstream|gateway|service unavailable|server(?:s)? (?:are )?overloaded|rate limit|resourceexhausted|local total request limit reached|connection (?:refused|reset|closed)|ECONNREFUSED|ETIMEDOUT|负载.*上限|过载|服务不可用|请求失败|繁忙/i.test(text);
+}
+
+/** 只用于在线错误展示/归类，不把普通业务/文件错误写成 provider/model 故障。 */
+function isProviderOrModelError(msg?: string, output?: string): boolean {
+	return !!msg && (isModelError(msg) || isExplicitProviderError(msg, output));
+}
+
+function usageNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * 仅供确定性测试注入 Registry 写入依赖；生产 flux_agent schema 不暴露该参数。
+ * 未提供的方法全部使用 Core Run Registry 的真实原子实现。
+ */
+export interface AgentRunRegistryHooks {
+	register?: typeof registerAgentRun;
+	markRunning?: typeof markAgentRunRunning;
+	heartbeat?: typeof heartbeatAgentRun;
+	updateSnapshot?: typeof updateAgentRunSnapshot;
+	updateHealth?: typeof updateAgentRunHealth;
+	finish?: typeof finishAgentRun;
 }
 
 /**
@@ -653,7 +738,7 @@ export async function runAgent(opts: {
 	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
 	sessionDir?: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-	timeoutMs?: number;       // 可配置超时 (默认 120000 = 2min)
+	timeoutMs?: number | null; // 可选显式 deadline；未设置时不因模型执行 wall-clock 自动终止
 	maxRetries?: number;      // 超时/进程失败时自动重试次数 (默认 0)
 	retryDelayMs?: number;    // 重试初始延迟 (默认 2000ms, 指数退避)
 	// 模型降级 (opt-in, 默认关): 模型不可用时自动切换低一档模型重试
@@ -664,7 +749,12 @@ export async function runAgent(opts: {
 	lockFiles?: string[];                              // 文件锁: 防并行编辑冲突
 	signal?: AbortSignal;                              // 取消信号，终止真实子进程并停止重试
 	runId?: string;                                    // 外部 run 关联 id
-	maxCostUsd?: number;                               // attempt 间成本上限（单次调用可能产生少量超额）
+	maxCostUsd?: number;                               // 本 Run/节点成本上限（单次调用可能产生少量超额）
+	/** 父 Task 聚合预算；与本 Run 上限分开，避免 fan-out 每个 child 重置预算。 */
+	parentMaxCostUsd?: number;
+	parentMaxTurns?: number;
+	parentMaxInputTokens?: number;
+	parentMaxParallel?: number;
 	maxTurns?: number;                                 // 完成一个 assistant turn 后检查的硬上限
 	maxInputTokens?: number;                           // 跨 turn 累计 input token 硬上限
 	completionProof?: AgentCompletionProof;            // 声明后所有成功都必须通过；仅 exit 74 可由文件事实恢复为成功
@@ -678,8 +768,13 @@ export async function runAgent(opts: {
 	registeredRoles?: string[];
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
 	invocationOverride?: { command: string; args: string[] };
+	/** 仅供确定性测试注入一次 Registry 写失败；生产入口不会暴露。 */
+	runRegistry?: AgentRunRegistryHooks;
 	/** 运行过程实时回调（assistant 消息 / 工具调用 / 回合），供 UI 直播子代理运行过程。 */
 	onProgress?: (event: { type: "message" | "tool"; text: string }) => void;
+	/** 健康状态发生变化或需要限频提示时回调；不会改变 Run 终态。 */
+	onHealthChange?: (event: { health: AgentRunHealth; reason?: string; warning: boolean }) => void;
+	health?: RunHealthConfig;
 }): Promise<AgentRunResult> {
 	const { cwd, agent, sessionId, telemetry, prefixLayout } = opts;
 	const workspaceCwd = resolve(opts.workspaceCwd ?? cwd);
@@ -692,16 +787,54 @@ export async function runAgent(opts: {
 	}
 	const lockFiles = opts.lockFiles?.map(file => resolve(workspaceCwd, file));
 	const runStartedAt = Date.now();
-	const timeoutMs = Math.max(1, opts.timeoutMs ?? 120000);
+	const timeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "Agent run timeoutMs");
 	const maxRetries = opts.maxRetries ?? 0;
 	const retryDelayMs = opts.retryDelayMs ?? 2000;
-	const deadline = Date.now() + timeoutMs;
+	const deadline = timeoutMs === undefined ? undefined : runStartedAt + timeoutMs;
 	const processRunId = opts.runId ?? `subagent-${randomUUID()}`;
+	const runRegistry = opts.runRegistry ?? {};
+	const registerRun = runRegistry.register ?? registerAgentRun;
+	const markRunningRun = runRegistry.markRunning ?? markAgentRunRunning;
+	const heartbeatRun = runRegistry.heartbeat ?? heartbeatAgentRun;
+	const updateSnapshotRun = runRegistry.updateSnapshot ?? updateAgentRunSnapshot;
+	const finishRun = runRegistry.finish ?? finishAgentRun;
+	const updateHealthRun = runRegistry.updateHealth ?? updateAgentRunHealth;
 	const agentInstanceId = `${agent.name}:${processRunId}`;
 	const capabilityRole = agent.role ?? agent.name;
 	const fluxDir = join(cwd, ".agentflux");
+	const parentBudgetError = (checkConcurrency = true): string | undefined => {
+		if (!opts.taskId) return undefined;
+		try {
+			const parentRuns = listAgentRuns(fluxDir, { taskId: opts.taskId });
+			const parentExecution = opts.executionId ? getTaskExecution(fluxDir, opts.executionId) : undefined;
+			if (checkConcurrency && opts.parentMaxParallel !== undefined) {
+				if (!Number.isInteger(opts.parentMaxParallel) || opts.parentMaxParallel < 1) return "parent maxParallel must be a positive integer";
+				const active = parentRuns.filter(run => run.status === "starting" || run.status === "running" || run.status === "stop_requested");
+				if (active.length >= opts.parentMaxParallel) return `parent concurrency budget exhausted: ${active.length} active runs >= ${opts.parentMaxParallel}`;
+			}
+			const total = parentRuns.reduce((sum, run) => ({
+				cost: sum.cost + (Number.isFinite(run.costUsd) ? run.costUsd : 0),
+				turns: sum.turns + (Number.isFinite(run.turns) ? run.turns : 0),
+				input: sum.input + (Number.isFinite(run.input) ? run.input : 0),
+			}), {
+				cost: parentExecution?.usage?.costUsd ?? 0,
+				turns: 0,
+				input: parentExecution?.usage?.input ?? 0,
+			});
+			if (opts.parentMaxCostUsd !== undefined && (!Number.isFinite(opts.parentMaxCostUsd) || opts.parentMaxCostUsd <= 0)) return "parent maxCostUsd must be a finite positive number";
+			if (opts.parentMaxTurns !== undefined && (!Number.isInteger(opts.parentMaxTurns) || opts.parentMaxTurns < 1)) return "parent maxTurns must be a positive integer";
+			if (opts.parentMaxInputTokens !== undefined && (!Number.isInteger(opts.parentMaxInputTokens) || opts.parentMaxInputTokens < 1)) return "parent maxInputTokens must be a positive integer";
+			if (opts.parentMaxCostUsd !== undefined && total.cost >= opts.parentMaxCostUsd) return `parent task budget exhausted: $${total.cost.toFixed(6)} >= $${opts.parentMaxCostUsd.toFixed(6)}`;
+			if (opts.parentMaxTurns !== undefined && total.turns >= opts.parentMaxTurns) return `parent task turn budget exhausted: ${total.turns} >= ${opts.parentMaxTurns}`;
+			if (opts.parentMaxInputTokens !== undefined && total.input >= opts.parentMaxInputTokens) return `parent task input budget exhausted: ${total.input} >= ${opts.parentMaxInputTokens}`;
+			return undefined;
+		} catch (error) {
+			return `parent budget state unavailable: ${error instanceof Error ? error.message : String(error)}`;
+		}
+	};
 	const registeredRecord = loadRegisteredCapabilityOverrideForRole(fluxDir, agent.name, capabilityRole);
 	const baseRegisteredRecord = loadRegisteredCapabilityOverride(fluxDir, agent.name);
+	const initialParentBudgetError = parentBudgetError();
 	// 直接调用 runAgent 时没有 Agent 注册表可校验角色；只有显式传入允许角色集合
 	// 才能安全地把旧的单角色收窄配置与新的角色绑定区分开。
 	if (baseRegisteredRecord && !registeredRecord && !opts.registeredRoles?.includes(capabilityRole)) {
@@ -779,17 +912,39 @@ export async function runAgent(opts: {
 		narrowed: capabilityPolicy.narrowed, cacheImpact: capabilityCacheChanges,
 		detail: `snapshot=${capabilitySnapshotPath}`,
 	});
-	registerAgentRun(fluxDir, {
-		id: processRunId,
-		taskId: opts.taskId,
-		executionId: opts.executionId,
-		sessionId,
-		agent: agent.name,
-		role: capabilityRole,
-		currentTask: opts.task.slice(0, 500),
-		model: opts.model ?? agent.model,
-		kind: opts.persistent ? "persistent" : "ephemeral",
-	});
+	try {
+		registerRun(fluxDir, {
+			id: processRunId,
+			taskId: opts.taskId,
+			executionId: opts.executionId,
+			sessionId,
+			agent: agent.name,
+			role: capabilityRole,
+			currentTask: opts.task.slice(0, 500),
+			model: opts.model ?? agent.model,
+			provider: opts.provider ?? agent.provider,
+			kind: opts.persistent ? "persistent" : "ephemeral",
+			deadlineAt: deadline === undefined ? undefined : new Date(deadline).toISOString(),
+		}, { parentMaxParallel: opts.parentMaxParallel });
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("parent concurrency budget exhausted")) {
+			return {
+				agent: agent.name, exitCode: 75, output: "",
+				usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, contextTokens: 0, cost: 0 },
+				model: null, errorMessage: error.message, retryCount: 0,
+			};
+		}
+		try {
+			finishRun(fluxDir, processRunId, {
+				status: "failed",
+				phase: "terminal",
+				turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, contextTokens: 0, costUsd: 0,
+				attempt: 0, model: opts.model ?? agent.model ?? null, provider: opts.provider ?? agent.provider ?? null,
+				error: `Run Registry register failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		} catch { /* 注册失败时可能没有可收敛的记录 */ }
+		throw error;
+	}
 
 	const thinkingLevel = opts.thinking ?? agent.thinking ?? "off";
 
@@ -846,31 +1001,198 @@ export async function runAgent(opts: {
 	const aggregateUsage: AgentRunResult["usage"] = {
 		turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
 	};
+	let modelError: string | undefined;
+	let providerError: string | undefined;
+	let observedProvider = opts.provider ?? agent.provider;
+	const healthConfig = opts.health ?? DEFAULT_RUN_HEALTH_CONFIG;
+	let currentPhase: AgentRunSnapshot["phase"] = "starting";
+	let currentHealth: AgentRunHealth = "healthy";
+	// 以 Registry 注册后的时刻为进度基线；注册可能跨毫秒，不能再用更早的 runStartedAt 写回快照。
+	let lastProgressAt = new Date().toISOString();
+	let lastProgressType = "registered";
+	let lastProgressSummary = opts.task.slice(0, 300);
+	let healthWarningAt: string | undefined;
+	let healthWarningCount = 0;
+	let repeatActionSignature: string | undefined;
+	let repeatActionCount = 0;
+	let repeatActionWindowStartedAt: string | undefined;
+	let contextPercent: number | undefined;
+	let contextWindow: number | undefined;
+	let contextTokensObserved = 0;
+	let waitingForProvider = false;
+	let registryDiagnosticCount = 0;
+	let registryDiagnosticsSuppressed = false;
+	const reportRegistryFailure = (operation: string, error: unknown): void => {
+		registryDiagnosticCount += 1;
+		if (registryDiagnosticCount <= 3) {
+			console.error(`[flux run-registry] ${agent.name}/${processRunId} ${operation} failed: ${String(error instanceof Error ? error.message : error).slice(0, 300)}`);
+		} else if (!registryDiagnosticsSuppressed) {
+			registryDiagnosticsSuppressed = true;
+			console.error(`[flux run-registry] ${agent.name}/${processRunId} further ${operation} failures suppressed`);
+		}
+	};
+	const writeLiveSnapshot = (snapshot: AgentRunSnapshot): boolean => {
+		try {
+			updateSnapshotRun(fluxDir, processRunId, snapshot);
+			return true;
+		} catch (error) {
+			// 在线遥测是 best-effort；不能把 Registry 故障伪装成业务错误或杀掉健康 child。
+			reportRegistryFailure("online snapshot", error);
+			return false;
+		}
+	};
+	const classifyOnlineError = (message: unknown, output = ""): "model" | "provider" | undefined => {
+		const text = typeof message === "string" ? message : String(message ?? "");
+		if (!text || !isProviderOrModelError(text, output)) return undefined;
+		if (isModelError(text)) {
+			modelError = text.slice(0, 2000);
+			return "model";
+		}
+		if (isExplicitProviderError(text, output)) {
+			providerError = text.slice(0, 2000);
+			return "provider";
+		}
+		return undefined;
+	};
+	const updateRepeatedAction = (signature: string, now = new Date().toISOString()): void => {
+		if (signature === repeatActionSignature) repeatActionCount++;
+		else {
+			repeatActionSignature = signature;
+			repeatActionCount = 1;
+			repeatActionWindowStartedAt = now;
+		}
+	};
+	const observeHealth = (phase: AgentRunSnapshot["phase"]): { health: AgentRunHealth; reason?: string; warning: boolean } => {
+		const next = assessRunHealth({
+			phase,
+			nowMs: Date.now(),
+			lastProgressAt,
+			lastActivityAt: new Date().toISOString(),
+			providerError,
+			modelError,
+			waitingForProvider,
+			repeatActionSignature,
+			repeatActionCount,
+			contextPercent,
+			contextWindow,
+			contextTokens: contextTokensObserved,
+		}, healthConfig);
+		const warning = shouldEmitHealthWarning(currentHealth, next, Date.now(), healthWarningAt, healthConfig.warning_cooldown_ms);
+		const changed = currentHealth !== next.health;
+		if (changed || warning) {
+			currentHealth = next.health;
+			if (next.health !== "healthy" && warning) {
+				healthWarningAt = new Date().toISOString();
+				healthWarningCount++;
+			}
+			try { opts.onHealthChange?.({ health: next.health, reason: next.reason, warning }); } catch { /* UI/observer 回调失败不影响 child */ }
+		}
+		return { health: next.health, reason: next.reason, warning };
+	};
+	const persistHealth = (assessment: { health: AgentRunHealth; reason?: string }): void => {
+		try {
+			const update: AgentRunHealthUpdate = {
+				health: assessment.health,
+				reason: assessment.reason,
+				lastProgressAt,
+				lastProgressType,
+				lastProgressSummary,
+				healthWarningAt,
+				healthWarningCount,
+				repeatActionSignature,
+				repeatActionCount,
+				repeatActionWindowStartedAt,
+			};
+			updateHealthRun(fluxDir, processRunId, update);
+		} catch (error) {
+			reportRegistryFailure("health update", error);
+		}
+	};
+	const refreshHealth = (): void => {
+		const before = currentHealth;
+		const next = observeHealth(currentPhase);
+		if (before !== next.health || next.warning) persistHealth(next);
+	};
+	const absoluteUsage = (current?: AgentRunResult["usage"]): AgentRunSnapshot => ({
+		phase: "running",
+		turns: aggregateUsage.turns + usageNumber(current?.turns),
+		input: aggregateUsage.input + usageNumber(current?.input),
+		output: aggregateUsage.output + usageNumber(current?.output),
+		cacheRead: aggregateUsage.cacheRead + usageNumber(current?.cacheRead),
+		cacheWrite: aggregateUsage.cacheWrite + usageNumber(current?.cacheWrite),
+		contextTokens: Math.max(usageNumber(aggregateUsage.contextTokens), usageNumber(current?.contextTokens)),
+		costUsd: aggregateUsage.cost + usageNumber(current?.cost),
+	});
+	const activeRunSnapshot = (
+		current: AgentRunResult["usage"] | undefined,
+		fields: Pick<AgentRunSnapshot, "phase"> & Partial<Omit<AgentRunSnapshot, "phase" | "turns" | "input" | "output" | "cacheRead" | "cacheWrite" | "contextTokens" | "costUsd">>,
+	): void => {
+		currentPhase = fields.phase;
+		contextTokensObserved = Math.max(contextTokensObserved, aggregateUsage.contextTokens, usageNumber(current?.contextTokens));
+		const activityType = fields.lastActivityType;
+		const semanticProgress = fields.lastProgressAt !== undefined
+			|| ["process_started", "message_end", "tool_start", "tool_end", "model_error", "provider_error"].includes(activityType ?? "");
+		if (fields.lastProgressAt !== undefined) lastProgressAt = fields.lastProgressAt;
+		else if (semanticProgress) lastProgressAt = fields.lastActivityAt ?? new Date().toISOString();
+		if (fields.lastProgressType !== undefined) lastProgressType = fields.lastProgressType;
+		else if (semanticProgress && activityType) lastProgressType = activityType;
+		if (fields.lastProgressSummary !== undefined) lastProgressSummary = fields.lastProgressSummary;
+		else if (semanticProgress && fields.lastActivitySummary) lastProgressSummary = fields.lastActivitySummary;
+		const health = observeHealth(fields.phase);
+		const usage = absoluteUsage(current);
+		writeLiveSnapshot({
+			...usage,
+			...fields,
+			health: health.health,
+			healthReason: health.reason ?? null,
+			lastProgressAt,
+			lastProgressType,
+			lastProgressSummary,
+			healthWarningAt,
+			healthWarningCount,
+			repeatActionSignature,
+			repeatActionCount,
+			repeatActionWindowStartedAt,
+			attempt: attemptCount,
+			lastActivityAt: fields.lastActivityAt ?? new Date().toISOString(),
+			model: fields.model ?? opts.model ?? agent.model ?? undefined,
+			provider: fields.provider ?? opts.provider ?? agent.provider ?? undefined,
+			modelError: fields.modelError ?? modelError,
+			providerError: fields.providerError ?? providerError,
+		});
+	};
 
 	const communicationUnavailable = !prefixLayout
 		&& (communicationPolicy.requiredSendTo.length > 0 || communicationPolicy.requireExplicitInboxAck);
 	const workspaceGuardUnavailable = !prefixLayout
 		&& !!(agent.workspace || registeredCapability?.workspace || runCapability?.workspace);
-	if (lockError || opts.signal?.aborted || communicationUnavailable || workspaceGuardUnavailable) {
+	if (initialParentBudgetError || lockError || opts.signal?.aborted || communicationUnavailable || workspaceGuardUnavailable) {
+		const preflightExitCode = initialParentBudgetError ? 75 : lockError ? 73 : opts.signal?.aborted ? 130 : communicationUnavailable ? 76 : 77;
 		lastResult = {
 			agent: agent.name,
-			exitCode: lockError ? 73 : opts.signal?.aborted ? 130 : communicationUnavailable ? 76 : 77,
+			exitCode: preflightExitCode,
 			output: "",
 			usage: { ...aggregateUsage },
 			model: null,
-			errorMessage: lockError ?? (opts.signal?.aborted ? "cancelled before start"
+			errorMessage: initialParentBudgetError ?? lockError ?? (opts.signal?.aborted ? "cancelled before start"
 				: communicationUnavailable ? "communication contract requires prefixLayout subagent extension"
 					: "workspace capability requires prefixLayout subagent tool hook"),
 			retryCount: 0,
 		};
+		activeRunSnapshot(undefined, {
+			phase: opts.signal?.aborted ? "stopping" : "error",
+			lastActivityType: opts.signal?.aborted ? "stop_requested" : initialParentBudgetError ? "parent_budget_exhausted" : "start_rejected",
+			lastActivitySummary: lastResult.errorMessage ?? "run rejected before start",
+		});
 	}
 
-	while (retryCount <= maxRetries && ![73, 76, 77, 130].includes(lastResult?.exitCode ?? -1)) {
+	while (retryCount <= maxRetries && ![73, 75, 76, 77, 130].includes(lastResult?.exitCode ?? -1)) {
 		if (opts.signal?.aborted) {
 			lastResult = {
 				agent: agent.name, exitCode: 130, output: "", usage: { ...aggregateUsage }, model: null,
 				errorMessage: "cancelled", retryCount: Math.max(0, attemptCount - 1),
 			};
+			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "stop_requested", lastActivitySummary: "run cancelled before next attempt" });
 			break;
 		}
 		if (opts.maxCostUsd !== undefined && aggregateUsage.cost >= opts.maxCostUsd) {
@@ -879,14 +1201,18 @@ export async function runAgent(opts: {
 				errorMessage: `budget exhausted: $${aggregateUsage.cost.toFixed(6)} >= $${opts.maxCostUsd.toFixed(6)}`,
 				retryCount: Math.max(0, attemptCount - 1),
 			};
+			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "budget_exhausted", lastActivitySummary: lastResult.errorMessage });
 			break;
 		}
-		const attemptTimeoutMs = deadline - Date.now();
-		if (attemptTimeoutMs <= 0) {
-			if (lastResult) {
-				lastResult.exitCode = 124;
-				lastResult.errorMessage = `total timeout (${timeoutMs / 1000}s) exhausted across retries/fallbacks`;
-			}
+		const attemptTimeoutMs = remainingDuration(deadline);
+		if (attemptTimeoutMs !== undefined && attemptTimeoutMs <= 0) {
+			lastResult ??= {
+				agent: agent.name, exitCode: 124, output: "", usage: { ...aggregateUsage }, model: null,
+				errorMessage: "explicit deadline exhausted before child start", retryCount: Math.max(0, attemptCount - 1),
+			};
+			lastResult.exitCode = 124;
+			lastResult.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : timeoutMs / 1000}s) exhausted across retries/fallbacks`;
+			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: lastResult.errorMessage });
 			break;
 		}
 		// 每次迭代重建 args (因为 tmpDir 路径会变)
@@ -915,7 +1241,10 @@ export async function runAgent(opts: {
 		}
 		const model = opts.model ?? agent.model ?? null;
 		const provider = opts.provider ?? agent.provider ?? null;
-		if (provider) attemptArgs.push("--provider", provider);
+		if (provider) {
+			observedProvider = provider;
+			attemptArgs.push("--provider", provider);
+		}
 		if (model) attemptArgs.push("--model", model);
 		attemptArgs.push("--thinking", thinkingLevel);
 		if (capabilityPolicy.effective.tools.length > 0) attemptArgs.push("--tools", capabilityPolicy.effective.tools.join(","));
@@ -972,10 +1301,34 @@ export async function runAgent(opts: {
 				});
 				if (!proc.pid) throw new Error(`Agent process did not expose a pid: ${processRunId}`);
 				try {
-					markAgentRunRunning(fluxDir, processRunId, proc.pid, attemptCount);
+					markRunningRun(fluxDir, processRunId, proc.pid, attemptCount, { model, provider });
+					activeRunSnapshot(undefined, {
+						phase: "running", lastActivityType: "process_started",
+						lastActivitySummary: `child process started (pid ${proc.pid}, attempt ${attemptCount})`, model, provider,
+					});
 				} catch (error: any) {
 					void terminateProcessTree(proc);
-					finishAgentRun(fluxDir, processRunId, { status: "failed", error: `Run Registry start failed: ${error?.message ?? error}` });
+					try {
+						finishRun(fluxDir, processRunId, {
+							status: "failed",
+							phase: "terminal",
+							turns: aggregateUsage.turns,
+							input: aggregateUsage.input,
+							output: aggregateUsage.output,
+							cacheRead: aggregateUsage.cacheRead,
+							cacheWrite: aggregateUsage.cacheWrite,
+							contextTokens: aggregateUsage.contextTokens,
+							costUsd: aggregateUsage.cost,
+							attempt: attemptCount,
+							model,
+							provider,
+							modelError,
+							providerError,
+							error: `Run Registry start failed: ${error?.message ?? error}`,
+						});
+					} catch (finishError) {
+						reportRegistryFailure("start failure convergence", finishError);
+					}
 					throw error;
 				}
 				let buffer = "";
@@ -984,12 +1337,14 @@ export async function runAgent(opts: {
 				let terminationPromise: Promise<void> | null = null;
 				let killGraceTimer: NodeJS.Timeout | undefined;
 				let controlTimer: NodeJS.Timeout | undefined;
+				let deadlineTimer: NodeJS.Timeout | undefined;
 				const done = (code: number) => {
 					if (!settled) {
 						settled = true;
 						activeSubagentProcesses.delete(processRunId);
 						opts.signal?.removeEventListener("abort", onAbort);
 						if (killGraceTimer) clearTimeout(killGraceTimer);
+						if (deadlineTimer) clearTimeout(deadlineTimer);
 						if (controlTimer) clearInterval(controlTimer);
 						resolveExit(code);
 					}
@@ -997,6 +1352,14 @@ export async function runAgent(opts: {
 				const requestTermination = (exitCode: number) => {
 					if (forcedExitCode !== null) return;
 					forcedExitCode = exitCode;
+					activeRunSnapshot(result.usage, {
+						phase: "stopping",
+						lastActivityAt: new Date().toISOString(),
+						lastActivityType: exitCode === 124 ? "timeout" : exitCode === 130 ? "stop_requested" : "limit_reached",
+						lastActivitySummary: exitCode === 124 ? "run timeout requested" : exitCode === 130 ? "run cancellation requested" : `run termination requested (exit ${exitCode})`,
+						model,
+						provider,
+					});
 					// A Windows parent may emit close before taskkill /T has finished
 					// reaping its descendants. Keep the caller blocked on the tree-kill
 					// command so a cancelled run cannot report completion while child
@@ -1009,65 +1372,121 @@ export async function runAgent(opts: {
 				const onAbort = () => requestTermination(130);
 				activeSubagentProcesses.set(processRunId, proc);
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
-				let lastHeartbeatAt = Date.now();
+				let lastHeartbeatAttemptAt = Date.now();
+				let lastHealthRefreshAt = Date.now();
 				controlTimer = setInterval(() => {
-					if (readAgentRunStop(cwd, processRunId)) requestTermination(130);
-					if (Date.now() - lastHeartbeatAt >= 2_000) {
+					const stopRequest = readAgentRunStop(cwd, processRunId);
+					if (stopRequest) {
+						try { markAgentRunStopRequested(fluxDir, processRunId); }
+						catch (error) { reportRegistryFailure("stop request", error); }
+						requestTermination(130);
+					}
+					// The 200ms control tick is only a scheduler. A failed heartbeat is
+					// retried at the bounded interval and never kills a healthy child.
+					if (Date.now() - lastHeartbeatAttemptAt >= 2_000) {
+						lastHeartbeatAttemptAt = Date.now();
 						try {
-							heartbeatAgentRun(fluxDir, processRunId);
-							lastHeartbeatAt = Date.now();
+							heartbeatRun(fluxDir, processRunId);
 						} catch (error: any) {
-							result.errorMessage = `Run Registry heartbeat failed: ${error?.message ?? error}`;
-							requestTermination(1);
+							reportRegistryFailure("heartbeat", error);
 						}
 					}
+					if (Date.now() - lastHealthRefreshAt >= 1_000) {
+						lastHealthRefreshAt = Date.now();
+						refreshHealth();
+					}
 				}, 200);
-				controlTimer.unref?.();
-				if (readAgentRunStop(cwd, processRunId)) requestTermination(130);
-				const timer = setTimeout(() => requestTermination(124), attemptTimeoutMs);
+				if (readAgentRunStop(cwd, processRunId)) {
+					try { markAgentRunStopRequested(fluxDir, processRunId); }
+					catch (error) { reportRegistryFailure("stop request", error); }
+					requestTermination(130);
+				}
+				deadlineTimer = attemptTimeoutMs === undefined ? undefined : setTimeout(() => requestTermination(124), attemptTimeoutMs);
 
 				const processLine = (line: string) => {
 					if (!line.trim()) return;
 					let ev: any;
 					try { ev = JSON.parse(line); } catch { return; }
+					if (ev.type === "message_start") {
+						waitingForProvider = true;
+						activeRunSnapshot(result.usage, {
+							phase: "running", lastActivityType: "provider_request",
+							lastActivitySummary: "waiting for provider response", model, provider,
+						});
+						return;
+					}
 					if (ev.type === "message_end" && ev.message) {
+						waitingForProvider = false;
 						const msg = ev.message;
-						if (msg.role === "assistant") {
-							result.usage.turns++;
-							const u = msg.usage || {};
-							result.usage.input += u.input || 0;
-							result.usage.output += u.output || 0;
-							result.usage.cacheRead += u.cacheRead || 0;
-							result.usage.cacheWrite += u.cacheWrite || 0;
-							if (opts.pricing && msg.model) {
-								result.usage.cost += calcCost(u, lookupPrice(opts.pricing, msg.model));
-							} else {
-								result.usage.cost += u.cost?.total || 0;
-							}
-							result.usage.contextTokens = u.totalTokens || 0;
-							if (!result.model && msg.model) result.model = msg.model;
-							if (msg.errorMessage) result.errorMessage = msg.errorMessage;
-							const content = msg.content;
-							if (Array.isArray(content)) {
-								for (const b of content) if (b?.type === "text" && b.text) {
-									outputParts.push(b.text);
-									assistantMessages.push(b.text);
-									opts.onProgress?.({ type: "message", text: b.text });
-								}
-							}
-							if (opts.maxTurns !== undefined && result.usage.turns >= opts.maxTurns) {
-								result.errorMessage = `turn limit reached: ${result.usage.turns} >= ${opts.maxTurns}`;
-								requestTermination(74);
-							} else if (opts.maxInputTokens !== undefined && result.usage.input >= opts.maxInputTokens) {
-								result.errorMessage = `input token limit reached: ${result.usage.input} >= ${opts.maxInputTokens}`;
-								requestTermination(74);
+						if (msg.role !== "assistant") return;
+						result.usage.turns += 1;
+						const u = msg.usage && typeof msg.usage === "object" ? msg.usage : {};
+						result.usage.input += usageNumber(u.input);
+						result.usage.output += usageNumber(u.output);
+						result.usage.cacheRead += usageNumber(u.cacheRead);
+						result.usage.cacheWrite += usageNumber(u.cacheWrite);
+						if (typeof u.contextWindow === "number" && Number.isFinite(u.contextWindow) && u.contextWindow > 0) contextWindow = u.contextWindow;
+						result.usage.contextTokens = Math.max(result.usage.contextTokens, usageNumber(u.totalTokens ?? u.contextTokens));
+						if (typeof u.contextPercent === "number" && Number.isFinite(u.contextPercent)) contextPercent = u.contextPercent;
+						else if (contextWindow && result.usage.contextTokens > 0) contextPercent = result.usage.contextTokens / contextWindow;
+						const reportedCost = u.cost && typeof u.cost === "object" ? u.cost.total : undefined;
+						const calculatedCost = opts.pricing && typeof msg.model === "string"
+							? calcCost(u, lookupPrice(opts.pricing, msg.model))
+							: usageNumber(reportedCost);
+						result.usage.cost += usageNumber(calculatedCost);
+						if (!result.model && typeof msg.model === "string") result.model = msg.model;
+						const messageError = msg.errorMessage === undefined || msg.errorMessage === null ? "" : String(msg.errorMessage);
+						if (messageError) result.errorMessage = messageError;
+						if (typeof msg.provider === "string" && msg.provider.trim()) observedProvider = msg.provider;
+						const textBlocks: string[] = [];
+						if (Array.isArray(msg.content)) {
+							for (const block of msg.content) if (block?.type === "text" && typeof block.text === "string" && block.text) {
+								textBlocks.push(block.text);
+								outputParts.push(block.text);
+								assistantMessages.push(block.text);
 							}
 						}
-					} else if (ev.type === "tool_execution_start" && opts.onProgress) {
-						const toolName = ev.toolName ?? ev.name ?? "tool";
+						const errorClass = messageError ? classifyOnlineError(messageError, textBlocks.join("\n")) : undefined;
+						const activitySummary = (messageError || textBlocks.at(-1) || "assistant message completed").replace(/\s+/g, " ").slice(0, 2000);
+						activeRunSnapshot(result.usage, {
+							phase: errorClass ? "error" : "running",
+							model: typeof msg.model === "string" ? msg.model : model,
+							provider: observedProvider ?? provider,
+							lastActivityType: errorClass === "model" ? "model_error" : errorClass === "provider" ? "provider_error" : "message_end",
+							lastActivitySummary: activitySummary,
+						});
+						const aggregateParentError = parentBudgetError(false);
+						if (aggregateParentError) {
+							result.errorMessage = aggregateParentError;
+							activeRunSnapshot(result.usage, { phase: "stopping", lastActivityType: "parent_budget_exhausted", lastActivitySummary: aggregateParentError, model, provider });
+							requestTermination(75);
+						}
+						for (const text of textBlocks) {
+							try { opts.onProgress?.({ type: "message", text }); } catch { /* UI 回调失败不影响 child */ }
+						}
+						if (opts.maxTurns !== undefined && result.usage.turns >= opts.maxTurns) {
+							result.errorMessage = `turn limit reached: ${result.usage.turns} >= ${opts.maxTurns}`;
+							activeRunSnapshot(result.usage, { phase: "stopping", lastActivityType: "limit_reached", lastActivitySummary: result.errorMessage, model, provider });
+							requestTermination(74);
+						} else if (opts.maxInputTokens !== undefined && result.usage.input >= opts.maxInputTokens) {
+							result.errorMessage = `input token limit reached: ${result.usage.input} >= ${opts.maxInputTokens}`;
+							activeRunSnapshot(result.usage, { phase: "stopping", lastActivityType: "limit_reached", lastActivitySummary: result.errorMessage, model, provider });
+							requestTermination(74);
+						}
+					} else if (ev.type === "tool_execution_start") {
+						waitingForProvider = false;
+						const toolName = typeof ev.toolName === "string" ? ev.toolName : typeof ev.name === "string" ? ev.name : "tool";
 						const input = ev.args;
 						const inputText = input && typeof input === "object" ? JSON.stringify(input).slice(0, 200) : typeof input === "string" ? input.slice(0, 200) : "";
-						opts.onProgress({ type: "tool", text: `${toolName}${inputText ? ` ${inputText}` : ""}` });
+						const activity = `${toolName}${inputText ? ` ${inputText}` : ""}`;
+						updateRepeatedAction(`${toolName}:${inputText}`);
+						activeRunSnapshot(result.usage, { phase: "tool", lastActivityType: "tool_start", lastActivitySummary: activity, model, provider });
+						try { opts.onProgress?.({ type: "tool", text: activity }); } catch { /* UI 回调失败不影响 child */ }
+					} else if (ev.type === "tool_execution_end" || ev.type === "tool_result") {
+						waitingForProvider = false;
+						const toolName = typeof ev.toolName === "string" ? ev.toolName : typeof ev.name === "string" ? ev.name : "tool";
+						const summary = typeof ev.error === "string" ? `${toolName} failed: ${ev.error}` : `${toolName} completed`;
+						activeRunSnapshot(result.usage, { phase: "running", lastActivityType: "tool_end", lastActivitySummary: summary, model, provider });
 					}
 				};
 
@@ -1078,10 +1497,26 @@ export async function runAgent(opts: {
 					for (const ln of lines) processLine(ln);
 				});
 				proc.stderr.on("data", (data) => { stderrBuf += data.toString(); });
-				proc.on("error", (err) => { result.errorMessage = `spawn error: ${err.message}`; clearTimeout(timer); done(forcedExitCode ?? 1); });
+				proc.on("error", (err) => {
+					result.errorMessage = `spawn error: ${err.message}`;
+					activeRunSnapshot(result.usage, { phase: "error", lastActivityType: "spawn_error", lastActivitySummary: result.errorMessage, model, provider });
+					if (deadlineTimer) clearTimeout(deadlineTimer);
+					done(forcedExitCode ?? 1);
+				});
 				proc.on("close", (code, signal) => {
-					clearTimeout(timer);
+					if (deadlineTimer) clearTimeout(deadlineTimer);
+					if (buffer.trim()) processLine(buffer);
 					const resolvedCode = forcedExitCode ?? (code ?? (signal ? 130 : 1));
+					if (resolvedCode === 124 && !result.errorMessage) {
+						result.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : `${timeoutMs / 1000}s`}) exhausted`;
+					}
+					activeRunSnapshot(result.usage, {
+						phase: result.errorMessage ? "error" : "running",
+						lastActivityType: result.errorMessage ? "process_error" : "process_exit",
+						lastActivitySummary: result.errorMessage?.slice(0, 2000) ?? `child process exited (${resolvedCode})`,
+						model: result.model ?? model,
+						provider,
+					});
 					if (terminationPromise) void terminationPromise.finally(() => done(resolvedCode));
 					else done(resolvedCode);
 				});
@@ -1093,19 +1528,29 @@ export async function runAgent(opts: {
 			// pi may surface a provider failure in message_end but still let its CLI
 			// process exit 0. A result with errorMessage is never a successful run.
 			if (result.exitCode === 0 && result.errorMessage) result.exitCode = 1;
-			if (stderrBuf.trim() && exitCode !== 0) result.errorMessage = (result.errorMessage ?? "") + ` stderr: ${stderrBuf.slice(0, 500)}`;
+			if (stderrBuf.trim() && result.exitCode !== 0) result.errorMessage = (result.errorMessage ?? "") + ` stderr: ${stderrBuf.slice(0, 500)}`;
+			const onlineErrorClass = classifyOnlineError(result.errorMessage, result.output);
+			if (onlineErrorClass) {
+				activeRunSnapshot(result.usage, {
+					phase: "error",
+					lastActivityType: onlineErrorClass === "model" ? "model_error" : "provider_error",
+					lastActivitySummary: result.errorMessage?.slice(0, 2000) ?? "provider/model error",
+					model: result.model ?? model,
+					provider,
+				});
+			}
 		} finally {
 			if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ } }
 		}
 
 		lastResult = result;
-		aggregateUsage.turns += result.usage.turns;
-		aggregateUsage.input += result.usage.input;
-		aggregateUsage.output += result.usage.output;
-		aggregateUsage.cacheRead += result.usage.cacheRead;
-		aggregateUsage.cacheWrite += result.usage.cacheWrite;
-		aggregateUsage.cost += result.usage.cost;
-		aggregateUsage.contextTokens = result.usage.contextTokens;
+		aggregateUsage.turns += usageNumber(result.usage.turns);
+		aggregateUsage.input += usageNumber(result.usage.input);
+		aggregateUsage.output += usageNumber(result.usage.output);
+		aggregateUsage.cacheRead += usageNumber(result.usage.cacheRead);
+		aggregateUsage.cacheWrite += usageNumber(result.usage.cacheWrite);
+		aggregateUsage.cost += usageNumber(result.usage.cost);
+		aggregateUsage.contextTokens = Math.max(aggregateUsage.contextTokens, usageNumber(result.usage.contextTokens));
 
 		// 成功 → 返回 (exitCode=0 且无 errorMessage)
 		if (result.exitCode === 0 && !result.errorMessage) {
@@ -1120,6 +1565,7 @@ export async function runAgent(opts: {
 		const transientErr = isTransientError(result.errorMessage, result.output);
 		const providerCompatibilityErr = isProviderCompatibilityError(result.errorMessage);
 		const providerQuotaErr = isProviderQuotaError(result.errorMessage, result.output);
+		const explicitProviderErr = isExplicitProviderError(result.errorMessage, result.output);
 
 		const tryModelFallback = (avoidCurrentProvider = false): boolean => {
 			if (!opts.enableModelFallback || !opts.modelsForFallback || !opts.roleRequirementForFallback) return false;
@@ -1138,6 +1584,13 @@ export async function runAgent(opts: {
 			if (opts.modelsForFallback[fallback]?.provider) {
 				opts.provider = opts.modelsForFallback[fallback].provider;
 			}
+			activeRunSnapshot(undefined, {
+				phase: "retrying",
+				lastActivityType: "model_switch",
+				lastActivitySummary: `switching model/provider from ${currentModel || "default"} to ${fallback}`,
+				model: fallback,
+				provider: opts.provider ?? opts.modelsForFallback[fallback]?.provider,
+			});
 			return true;
 		};
 
@@ -1154,24 +1607,31 @@ export async function runAgent(opts: {
 		if (retryCount < maxRetries && (isTimeout || isProcessError || modelErr || transientErr || providerCompatibilityErr)) {
 			const baseDelay = transientErr ? 5000 : retryDelayMs;  // 502/503 退避更久
 			const delay = baseDelay * Math.pow(2, retryCount);  // 指数退避
-			if (Date.now() + delay >= deadline) {
+			const remainingBeforeRetry = remainingDuration(deadline);
+			if (remainingBeforeRetry !== undefined && remainingBeforeRetry <= delay) {
 				result.exitCode = 124;
-				result.errorMessage = `total timeout (${timeoutMs / 1000}s) exhausted before retry`;
+				result.errorMessage = `explicit deadline (${timeoutMs === undefined ? "unknown" : timeoutMs / 1000}s) exhausted before retry`;
+				activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: result.errorMessage, model, provider });
 				break;
 			}
-			const reason = isTimeout ? `timeout (${timeoutMs / 1000}s)` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : providerCompatibilityErr ? `provider compatibility: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
+			const reason = isTimeout ? `timeout (${timeoutMs === undefined ? "explicit deadline" : `${timeoutMs / 1000}s`})` : modelErr ? `model error: ${result.errorMessage?.slice(0, 60)}` : providerCompatibilityErr ? `provider compatibility: ${result.errorMessage?.slice(0, 60)}` : transientErr ? `transient: ${result.errorMessage?.slice(0, 60) ?? result.output.slice(0, 60)}` : `exit code ${result.exitCode}`;
+			const retrySummary = `${reason}, retry ${retryCount + 1}/${maxRetries} after ${delay}ms`;
 			console.error(`[flux subagent] ${agent.name} failed (${reason}), retrying ${retryCount + 1}/${maxRetries} in ${delay}ms...`);
+			activeRunSnapshot(undefined, { phase: "backoff", lastActivityType: "retry_backoff", lastActivitySummary: retrySummary, model, provider });
 			if (!await waitForRetry(delay, opts.signal)) {
 				result.exitCode = 130;
 				result.errorMessage = "cancelled during retry backoff";
+				activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "stop_requested", lastActivitySummary: result.errorMessage, model, provider });
 				break;
 			}
 			retryCount++;
+			activeRunSnapshot(undefined, { phase: "retrying", lastActivityType: "retry", lastActivitySummary: `starting retry attempt ${retryCount + 1}`, model, provider });
 			continue;
 		}
 
-		// 同一 provider 的瞬时错误耗尽重试后，切换下一档模型/provider。
-		if (transientErr && tryModelFallback()) continue;
+		// 只有明确的 provider/API 故障在同通道重试耗尽后才能切换模型/provider；
+		// 裸 timeout、文件/命令错误和其他普通进程失败不得触发降级。
+		if (explicitProviderErr && tryModelFallback()) continue;
 
 		// 不重试或达到上限 → 跳出
 		break;
@@ -1267,7 +1727,7 @@ export async function runAgent(opts: {
 	} else {
 		updateAgentStatusInBoard(agent.name, finalResult.exitCode === 0 && !finalResult.errorMessage ? "done" : "failed", cwd);
 	}
-	finishAgentRun(fluxDir, processRunId, {
+	finishRun(fluxDir, processRunId, {
 		status: finalResult.exitCode === 0 && !finalResult.errorMessage
 			? "completed"
 			: finalResult.exitCode === 130
@@ -1275,7 +1735,19 @@ export async function runAgent(opts: {
 				: finalResult.exitCode === 124
 					? "timed_out"
 					: "failed",
-		costUsd: finalResult.usage.cost,
+		phase: "terminal",
+		turns: aggregateUsage.turns,
+		input: aggregateUsage.input,
+		output: aggregateUsage.output,
+		cacheRead: aggregateUsage.cacheRead,
+		cacheWrite: aggregateUsage.cacheWrite,
+		contextTokens: aggregateUsage.contextTokens,
+		costUsd: aggregateUsage.cost,
+		attempt: attemptCount,
+		model: finalResult.model ?? opts.model ?? agent.model ?? null,
+		provider: observedProvider ?? opts.provider ?? agent.provider ?? null,
+		modelError,
+		providerError,
 		error: finalResult.errorMessage,
 	});
 	clearAgentRunStop(cwd, processRunId);

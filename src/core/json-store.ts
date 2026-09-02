@@ -25,6 +25,33 @@ export interface JsonStoreOptions {
 
 const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_STALE_LOCK_MS = 30_000;
+const ATOMIC_RENAME_RETRIES = 8;
+const ATOMIC_RENAME_RETRYABLE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const LOCK_RELEASE_RETRIES = 8;
+
+function waitForFilesystemRetry(attempt: number): void {
+	const waiter = new Int32Array(new SharedArrayBuffer(4));
+	Atomics.wait(waiter, 0, 0, Math.min(250, 10 * 2 ** attempt));
+}
+
+/**
+ * Windows Defender/indexers can briefly retain a handle to the destination
+ * after a reader closes it. Keep the atomic replace semantics, but retry only
+ * those transient filesystem errors for a bounded interval; a persistent
+ * failure still escapes with the original error and the temporary file is
+ * cleaned by the caller.
+ */
+function renameWithRetry(source: string, destination: string): void {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			renameSync(source, destination);
+			return;
+		} catch (error: any) {
+			if (!ATOMIC_RENAME_RETRYABLE_CODES.has(error?.code) || attempt >= ATOMIC_RENAME_RETRIES) throw error;
+			waitForFilesystemRetry(attempt);
+		}
+	}
+}
 
 export function readJsonStore<T>(
 	path: string,
@@ -54,7 +81,7 @@ export function writeJsonFileAtomic(path: string, value: unknown, options: { bac
 		closeSync(fd);
 		fd = null;
 		if (backup && existsSync(path)) copyFileSync(path, `${path}.bak`);
-		renameSync(temporary, path);
+		renameWithRetry(temporary, path);
 	} finally {
 		if (fd !== null) {
 			try { closeSync(fd); } catch {}
@@ -80,15 +107,22 @@ function acquireStoreLock(path: string, options: JsonStoreOptions): () => void {
 			closeSync(fd);
 			fd = null;
 			return () => {
-				try {
-					if (readFileSync(lockPath, "utf-8") === owner) unlinkSync(lockPath);
-				} catch {}
+				for (let attempt = 0; attempt <= LOCK_RELEASE_RETRIES; attempt++) {
+					try {
+						if (readFileSync(lockPath, "utf-8") !== owner) return;
+						unlinkSync(lockPath);
+						return;
+					} catch (error: any) {
+						if (!ATOMIC_RENAME_RETRYABLE_CODES.has(error?.code) || attempt >= LOCK_RELEASE_RETRIES) return;
+						waitForFilesystemRetry(attempt);
+					}
+				}
 			};
 		} catch (error: any) {
 			if (fd !== null) {
 				try { closeSync(fd); } catch {}
 			}
-			if (error?.code !== "EEXIST") throw error;
+			if (error?.code !== "EEXIST" && !ATOMIC_RENAME_RETRYABLE_CODES.has(error?.code)) throw error;
 			let stale = false;
 			try {
 				if (Date.now() - statSync(lockPath).mtimeMs > staleLockMs) {

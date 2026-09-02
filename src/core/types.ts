@@ -1,4 +1,5 @@
 import { DEFAULT_PRICING_CONFIG, type PricingConfig } from "./pricing";
+import type { RunHealthConfig } from "./run-health";
 
 export type AgentScope = "global" | "project" | "session";
 export type AgentKind = "main" | "subagent";
@@ -67,7 +68,14 @@ export interface ContextConfig {
 export interface BudgetConfig {
 	max_cost_per_task: number;
 	max_iterations: number;
-	max_wall_clock_seconds: number;
+	/** Parent Task aggregate assistant-turn budget; omitted means no turn cap. */
+	max_turns_per_task?: number;
+	/** Parent Task aggregate input-token budget; omitted means no input cap. */
+	max_input_tokens_per_task?: number;
+	/** Active child Run limit for one parent Task. */
+	max_parallel_agents?: number;
+	/** undefined/null means no model-execution wall-clock deadline. */
+	max_wall_clock_seconds?: number | null;
 }
 
 export interface RetentionConfig {
@@ -97,6 +105,8 @@ export interface FluxConfig {
 	communication: CommunicationRuntimeConfig;
 	pricing: PricingConfig;
 	quality_gate?: QualityGateConfig;
+	/** 健康监控只产生 Core 事实和提示，不自动结束模型 Run。 */
+	health?: RunHealthConfig;
 	/** 社区无进展门禁：连续退回且反馈为空/重复达到该次数后拒绝继续（默认 3）。 */
 	community_stall_threshold?: number;
 }
@@ -104,13 +114,14 @@ export interface FluxConfig {
 /** 质量门配置: judge 独立于节点模型, 避免节点模型慢导致 judge 超时。 */
 export interface QualityGateConfig {
 	model?: string;
-	timeout_ms?: number;
+	/** null/omitted means the judge has no model-execution wall-clock deadline. */
+	timeout_ms?: number | null;
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {
 	cache: { prefix_layout: "static_first", cache_breaker_actions: [], target_hit_rate: 0.85 },
 	context: { compaction_threshold: 0.70 },
-	budget: { max_cost_per_task: 2, max_iterations: 5, max_wall_clock_seconds: 600 },
+	budget: { max_cost_per_task: 2, max_iterations: 5, max_turns_per_task: undefined, max_input_tokens_per_task: undefined, max_parallel_agents: 4, max_wall_clock_seconds: null },
 	retention: {
 		enabled: true,
 		stale_runtime_ttl_hours: 1,
@@ -129,6 +140,14 @@ export const DEFAULT_CONFIG: FluxConfig = {
 		redelivery_after_ms: 30_000,
 	},
 	quality_gate: {},
+	health: {
+		waiting_provider_after_ms: 30_000,
+		quiet_after_ms: 60_000,
+		suspected_stall_after_ms: 120_000,
+		suspected_loop_repeats: 3,
+		warning_cooldown_ms: 60_000,
+		context_pressure_percent: 0.85,
+	},
 	pricing: DEFAULT_PRICING_CONFIG,
 };
 

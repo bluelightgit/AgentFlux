@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentFlux from "../src/entry";
 import { MessageBus } from "../src/core/message-bus";
+import { finishAgentRun, markAgentRunRunning, registerAgentRun, updateAgentRunSnapshot } from "../src/core/run-registry";
 import { SharedBoard } from "../src/core/shared-board";
 import { showAgentTuiMenu, showFluxTuiMenu } from "../src/extension/tui-menu";
 import { isSlashArgumentBoundary, shouldContinueSlashCompletion } from "../src/extension/tui-autocomplete-bridge";
@@ -75,7 +76,31 @@ async function main(): Promise<void> {
 		await flux.handler("agent create reviewer-main reviewer", ctx);
 		await flux.handler("agent list", ctx);
 		check(notices.some(text => text.includes("reviewer-main")), "TUI 创建并列出 Persistent Agent");
+		await flux.handler("agent create core-live tester", ctx);
+		const fluxDir = join(root, ".agentflux");
+		registerAgentRun(fluxDir, {
+			id: "tui-core-live-run", sessionId: "tui-session", agent: "core-live", role: "tester",
+			currentTask: "verify live TUI", kind: "persistent", model: "core-live-model", provider: "core-live-provider",
+		});
+		markAgentRunRunning(fluxDir, "tui-core-live-run", process.pid, 1, { model: "core-live-model", provider: "core-live-provider" });
+		updateAgentRunSnapshot(fluxDir, "tui-core-live-run", {
+			phase: "tool", turns: 3, input: 30, output: 5, cacheRead: 10, cacheWrite: 1,
+			contextTokens: 46, costUsd: 0.02, attempt: 1, lastActivityAt: new Date().toISOString(),
+			lastActivityType: "tool_start", lastActivitySummary: "bash npm test",
+		});
 		let mark = notices.length;
+		menuSelections = ["core-live · subagent · tester · running · core-live-model · tool · health=healthy · t3 · $0.0200", "Details · show information"];
+		await flux.handler("agent", ctx);
+		const coreBackedDetails = notices.slice(mark).join("\n");
+		check(coreBackedDetails.includes("run           tui-core-live-run")
+			&& coreBackedDetails.includes("turns 3 / tokens 35") && coreBackedDetails.includes("live cost     $0.020000")
+			&& coreBackedDetails.includes("activity      bash npm test") && coreBackedDetails.includes("core-live-provider/core-live-model"),
+		"TUI Agent 菜单从 Core Run Registry 组装在线详情而非 AgentStore 终态聚合");
+		finishAgentRun(fluxDir, "tui-core-live-run", {
+			status: "completed", phase: "terminal", turns: 3, input: 30, output: 5, cacheRead: 10,
+			cacheWrite: 1, contextTokens: 46, costUsd: 0.02, attempt: 1,
+		});
+		mark = notices.length;
 		await flux.handler("agent stop reviewer-main", ctx);
 		check(notices.slice(mark).some(text => text.includes("not running")), "stop 空闲 Agent 报 not running");
 		mark = notices.length;
@@ -96,6 +121,25 @@ async function main(): Promise<void> {
 		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Details · show information"];
 		await flux.handler("agent", ctx);
 		check(notices.some(text => text.includes("Agent reviewer-main") && text.includes("capability")), "不带参数的 /flux agent 显示 Agent 列表与详细信息");
+		mark = notices.length;
+		menuSelections = ["live-observer · subagent · tester · running · live-test-model · tool · health=healthy · t2 · $0.0123", "Details · show information"];
+		await showAgentTuiMenu(ctx, {
+			agents: [{
+				name: "live-observer", kind: "subagent", role: "tester", status: "running",
+				model: "live-test-model", provider: "live-test-provider", callCount: 4, totalCostUsd: 0.5,
+				capabilityGeneration: 2, communication: "none", runId: "live-run-1", phase: "tool",
+				elapsedMs: 65_000, freshnessMs: 2_000, turns: 2, input: 21, output: 4,
+				cacheRead: 8, cacheWrite: 2, contextTokens: 33, liveCostUsd: 0.012345,
+				activity: "read src/example.ts", providerError: "provider overloaded", error: "provider overloaded",
+			}],
+			roles: [], issues: [], forkPoints: [], activeTaskIds: [],
+		});
+		const liveDetails = notices.slice(mark).join("\n");
+		check(liveDetails.includes("run           live-run-1") && liveDetails.includes("phase         tool")
+			&& liveDetails.includes("elapsed/fresh 1m5s / 2s") && liveDetails.includes("turns 2 / tokens 25")
+			&& liveDetails.includes("live cost     $0.012345") && liveDetails.includes("total cost $0.500000")
+			&& liveDetails.includes("activity      read src/example.ts") && liveDetails.includes("provider err  provider overloaded"),
+		"TUI Agent Details 从 Core Run 字段展示阶段、时效、usage、实时/累计成本、活动与错误");
 		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Talk · continue Agent session"]; menuInputs = ["review this change"];
 		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "subagent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, lastMessage: "报告写好了", lastHistory: ["报告写好了，共 12 个问题。", "汇总完毕。"], sessionCommand: "npx pi --session \"x.jsonl\"", communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(talkCommand === "agent run reviewer-main review this change", "选择 Agent 后 Talk 生成对话命令（恢复 Talk 入口）");

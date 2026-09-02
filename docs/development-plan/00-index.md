@@ -1,6 +1,6 @@
 # 当前开发规划
 
-更新日期：2026-09-01。
+更新日期：2026-09-02。
 
 本文只负责规划入口、状态规则和执行顺序；具体任务按主题拆分，避免把所有工作塞进一个文档。
 
@@ -8,9 +8,9 @@
 
 | 文件 | 主题 | 范围 |
 |---|---|---|
-| [01-entry-and-safety.md](01-entry-and-safety.md) | 入口与安全边界 | Workflow 入口、空间互斥、Community、质量门、heartbeat、Message V2 |
-| [02-runtime-and-storage.md](02-runtime-and-storage.md) | 执行语义与数据可靠性 | Main 节点、Agent 队列、任务谱系、checkpoint、资源边界、session 隔离 |
-| [03-real-validation.md](03-real-validation.md) | 真实链路与长期验证 | production Pi、恢复、continue/retry、soak 和发布包 |
+| [01-entry-and-safety.md](01-entry-and-safety.md) | 可用入口与安全边界 | Agent 运行控制、Workflow 入口、空间互斥、Community、质量门与 Message V2 |
+| [02-runtime-and-storage.md](02-runtime-and-storage.md) | 执行语义与数据可靠性 | Main 节点、任务谱系、checkpoint、资源边界、session 隔离、并行写隔离 |
+| [03-real-validation.md](03-real-validation.md) | 真实链路与长期验证 | production Pi、恢复、continue/retry、持续 dogfood、soak 和发布包 |
 
 ## 状态规则
 
@@ -30,7 +30,15 @@
 
 ## 当前顺序
 
-先完成 `01-entry-and-safety.md` 的 P0，再处理 `02-runtime-and-storage.md` 的 P1，最后按 `03-real-validation.md` 执行真实链路和长期验证。任务依赖未满足时不得跳过前置工作。
+采用“可观察的最小闭环 → 可靠 Workflow → 执行语义/数据边界 → 长期验证”的纵向顺序，不再把所有真实验证推迟到最后：
+
+1. P0-01/P0-04、P0-05、P0-07 的确定性实现与 production-dist 核心闭环证据已完成并归档；当前补齐 P0-06 单一路径；Agent 在运行中可 inspect/steer/stop，以可选显式 deadline 取代固定总时长，并执行健康提示、消息背压和父 Task 聚合预算；
+2. 继续闭合 P0-02，形成跨空间可创建、可运行、可失败恢复且可核对的 Workflow；对应 P2 production 扩展场景随实现立即执行；
+3. P0-03 Community fail-closed 契约独立完成，不阻塞与 Community 无关的 P1-03、P1-04、P1-05、P1-06；
+4. P1 按显式依赖推进，P1-07 并行写隔离在核心谱系和空间 lease 稳定后实施；
+5. P2-05 长时 soak 与发布包验证最后收口。
+
+任务依赖未满足时不得跳过前置工作；任何涉及模型、进程、消息或恢复的任务，都必须在自身结项前完成对应真实验证。
 
 ## 统一完成标准
 

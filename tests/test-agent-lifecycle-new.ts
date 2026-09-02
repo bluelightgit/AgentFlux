@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createEphemeralRecord, finishEphemeralRecord } from "../src/agents/agent-lifecycle";
 import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAgentsParallel, type AgentTemplate } from "../src/agents/agent-runner";
-import { createAgent, deleteAgent, deleteSessionAgents, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, readAgentLastMessages, resetAgentStatus, runAgentRecord, sortAgentsByActivity } from "../src/agents/agent-store";
+import { createAgent, deleteAgent, deleteSessionAgents, enqueueAgentInstruction, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, readAgentLastMessages, rejectQueuedAgentInstructions, resetAgentStatus, runAgentRecord, sortAgentsByActivity } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
+import { MessageBus } from "../src/core/message-bus";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
-import { getAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns } from "../src/core/run-registry";
+import { finishAgentRun, getAgentRun, heartbeatAgentRun, markAgentRunRunning, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns, updateAgentRunSnapshot } from "../src/core/run-registry";
 
 let passed = 0;
 function check(value: unknown, message: string): void { if (!value) throw new Error(message); passed++; console.log(`✓ ${message}`); }
@@ -32,7 +33,211 @@ async function main(): Promise<void> {
 		await runAgent({ cwd: root, agent: { ...template, name: "progress-watch" }, task: "progress", sessionId: "test", prefixLayout: true, persistent: false, invocationOverride, onProgress: event => progressEvents.push(event) });
 		check(progressEvents.some(event => event.type === "message" && event.text.includes("message processed")), "onProgress 实时上报 assistant 消息块");
 		const firstRun = listAgentRuns(join(root, ".agentflux"), { agent: record.name })[0];
-		check(firstRun?.status === "completed" && !!firstRun.finishedAt, "Run Registry 保存权威终态");
+		check(firstRun?.status === "completed" && !!firstRun.finishedAt && firstRun.recentEvents?.some(event => event.type === "message_end"), "Run Registry 保存权威终态与有界最近事件");
+
+		// 进程仍在运行时，Core Registry、文本 list 与最终结果读取同一份绝对在线快照。
+		const onlineHelper = resolve("tests/helpers/online-telemetry-subagent.cjs");
+		const onlineRunId = "online-telemetry-run";
+		const onlinePromise = runAgent({
+			cwd: root, agent: { ...template, name: "online-observer" }, task: "observe live usage",
+			sessionId: "test", prefixLayout: true, persistent: false, runId: onlineRunId,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "700" },
+		});
+		let onlineRun = getAgentRun(join(root, ".agentflux"), onlineRunId);
+		for (let attempt = 0; attempt < 100 && (onlineRun?.turns ?? 0) < 1; attempt++) {
+			await new Promise(resolveWait => setTimeout(resolveWait, 20));
+			onlineRun = getAgentRun(join(root, ".agentflux"), onlineRunId);
+		}
+		check(onlineRun?.status === "running" && onlineRun.phase === "running" && !!onlineRun.pid
+			&& onlineRun.turns === 1 && onlineRun.input === 21 && onlineRun.output === 4
+			&& onlineRun.cacheRead === 8 && onlineRun.cacheWrite === 2 && onlineRun.contextTokens === 33
+			&& onlineRun.costUsd === 0.012345 && onlineRun.model === "live-test-model"
+			&& onlineRun.provider === "live-test-provider" && onlineRun.lastActivityType === "message_end",
+		"子进程未结束时 Run Registry 暴露非零 usage、模型、provider 与最近活动");
+		const onlineIdentity = {
+			id: "agent-online-observer", name: "online-observer", scope: "project", role: "implementer",
+			status: "idle", lineage: { origin: "fresh" }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+			callCount: 0, totalCostUsd: 0, capabilityGeneration: 1,
+		} as any;
+		const onlineList = formatAgents([onlineIdentity], root);
+		check(onlineList.includes("run=running") && onlineList.includes("turns=1")
+			&& onlineList.includes("liveCost=$0.012345") && onlineList.includes("model=live-test-model")
+			&& onlineList.includes("provider=live-test-provider") && onlineList.includes("activity=online telemetry ready"),
+		"formatAgents 从 Core Run Registry 展示同一份在线事实并区分实时成本");
+		const onlineResult = await onlinePromise;
+		const onlineTerminal = getAgentRun(join(root, ".agentflux"), onlineRunId);
+		check(onlineResult.exitCode === 0 && onlineTerminal?.status === "completed" && onlineTerminal.phase === "terminal"
+			&& onlineTerminal.turns === onlineResult.usage.turns && onlineTerminal.input === onlineResult.usage.input
+			&& onlineTerminal.output === onlineResult.usage.output && onlineTerminal.cacheRead === onlineResult.usage.cacheRead
+			&& onlineTerminal.cacheWrite === onlineResult.usage.cacheWrite && onlineTerminal.contextTokens === onlineResult.usage.contextTokens
+			&& onlineTerminal.costUsd === onlineResult.usage.cost && onlineTerminal.model === "live-test-model"
+			&& onlineTerminal.provider === "live-test-provider",
+		"在线绝对快照与 terminal 汇总一致且不会跨阶段双计");
+
+		const noDeadlineResult = await runAgent({
+			cwd: root, agent: { ...template, name: "no-deadline-agent" }, task: "no hard wall clock deadline",
+			sessionId: "test", prefixLayout: true, timeoutMs: null,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "150" },
+		});
+		check(noDeadlineResult.exitCode === 0, "null deadline 不因固定 wall-clock 终止运行");
+		const explicitDeadlineId = "explicit-deadline-run";
+		const explicitDeadlineResult = await runAgent({
+			cwd: root, agent: { ...template, name: "explicit-deadline-agent" }, task: "explicit deadline",
+			sessionId: "test", prefixLayout: true, timeoutMs: 100, runId: explicitDeadlineId,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "700" },
+		});
+		check(explicitDeadlineResult.exitCode === 124 && getAgentRun(join(root, ".agentflux"), explicitDeadlineId)?.status === "timed_out",
+			"显式 deadline 超时收敛为 timed_out");
+
+		// 父 Task 聚合预算读取 Core Run 快照；并行 child 不能各自重复获得完整父预算。
+		const parentBudgetTaskId = "parent-budget-task";
+		const parentBudgetBase = {
+			cwd: root, sessionId: "test", prefixLayout: true, taskId: parentBudgetTaskId,
+			parentMaxCostUsd: 0.02, parentMaxParallel: 2,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "600" },
+		};
+		const parentBudgetResults = await Promise.all([
+			runAgent({ ...parentBudgetBase, agent: { ...template, name: "parent-budget-a" }, task: "parent child a" }),
+			runAgent({ ...parentBudgetBase, agent: { ...template, name: "parent-budget-b" }, task: "parent child b" }),
+		]);
+		check(parentBudgetResults.some(result => result.exitCode === 75 && result.errorMessage?.includes("parent task budget")), "父 Task 聚合成本预算会停止超限 child");
+		const exhaustedRunId = "parent-budget-preflight-run";
+		const exhaustedResult = await runAgent({ ...parentBudgetBase, agent: { ...template, name: "parent-budget-preflight" }, task: "preflight must not spawn", runId: exhaustedRunId });
+		const exhaustedRun = getAgentRun(join(root, ".agentflux"), exhaustedRunId);
+		check(exhaustedResult.exitCode === 75 && exhaustedResult.errorMessage?.includes("parent task budget") === true
+			&& exhaustedRun?.status === "failed" && exhaustedRun.recentEvents?.some(event => event.type === "parent_budget_exhausted") === true,
+			"父级预算预检失败也持久化 Run 终态且不启动子进程");
+
+		const parentConcurrencyTaskId = "parent-concurrency-task";
+		const parentConcurrencyBase = {
+			cwd: root, sessionId: "test", prefixLayout: true, taskId: parentConcurrencyTaskId,
+			parentMaxParallel: 2,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "600" },
+		};
+		const concurrencyA = runAgent({ ...parentConcurrencyBase, agent: { ...template, name: "parent-concurrency-a" }, task: "concurrency a" });
+		const concurrencyB = runAgent({ ...parentConcurrencyBase, agent: { ...template, name: "parent-concurrency-b" }, task: "concurrency b" });
+		const concurrencyC = runAgent({ ...parentConcurrencyBase, agent: { ...template, name: "parent-concurrency-c" }, task: "concurrency c" });
+		const concurrencyResults = await Promise.all([concurrencyA, concurrencyB, concurrencyC]);
+		check(concurrencyResults.filter(result => result.exitCode === 75 && result.errorMessage?.includes("parent concurrency")).length === 1, "父 Task 并发预算拒绝超出 active Run 的新 child");
+
+		// heartbeat 写失败只产生有界诊断；不能污染业务 error 或终止健康 child。
+		let heartbeatAttempts = 0;
+		const heartbeatRunId = "heartbeat-write-failure-run";
+		const heartbeatResult = await runAgent({
+			cwd: root, agent: { ...template, name: "heartbeat-survivor" }, task: "survive registry heartbeat failure",
+			sessionId: "test", prefixLayout: true, persistent: false, runId: heartbeatRunId,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "2300" },
+			runRegistry: {
+				heartbeat: (fluxDir, runId) => {
+					heartbeatAttempts++;
+					if (heartbeatAttempts === 1) throw new Error("injected heartbeat write failure");
+					return heartbeatAgentRun(fluxDir, runId);
+				},
+			},
+		});
+		check(heartbeatAttempts >= 1 && heartbeatResult.exitCode === 0 && !heartbeatResult.errorMessage
+			&& getAgentRun(join(root, ".agentflux"), heartbeatRunId)?.status === "completed",
+		"首次 heartbeat 写失败后健康 child 仍 exit 0 并收敛 completed");
+
+		// 明确 provider 错误在进程退出前持续可见，普通业务错误不借此扩大 fallback 匹配。
+		const providerErrorRunId = "online-provider-error-run";
+		const providerErrorPromise = runAgent({
+			cwd: root, agent: { ...template, name: "provider-error-observer" }, task: "surface provider failure",
+			sessionId: "test", prefixLayout: true, persistent: false, runId: providerErrorRunId,
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "700", AGENTFLUX_TEST_PROVIDER_ERROR: "Monthly usage limit reached" },
+		});
+		let providerRun = getAgentRun(join(root, ".agentflux"), providerErrorRunId);
+		for (let attempt = 0; attempt < 100 && !providerRun?.providerError; attempt++) {
+			await new Promise(resolveWait => setTimeout(resolveWait, 20));
+			providerRun = getAgentRun(join(root, ".agentflux"), providerErrorRunId);
+		}
+		check(providerRun?.status === "running" && providerRun.phase === "error"
+			&& providerRun.providerError?.includes("Monthly usage limit") === true && providerRun.modelError === undefined,
+		"明确 provider 错误在 child 退出前写入 Core Registry");
+		const providerErrorResult = await providerErrorPromise;
+		check(providerErrorResult.exitCode !== 0
+			&& getAgentRun(join(root, ".agentflux"), providerErrorRunId)?.status === "failed"
+			&& getAgentRun(join(root, ".agentflux"), providerErrorRunId)?.providerError?.includes("Monthly usage limit") === true,
+		"provider 错误在 terminal Run 中保留分类诊断");
+		const modelErrorRunId = "model-error-classification-run";
+		const modelErrorResult = await runAgent({
+			cwd: root, agent: { ...template, name: "model-error-observer" }, task: "surface model failure",
+			sessionId: "test", prefixLayout: true, persistent: false, runId: modelErrorRunId,
+			invocationOverride: { command: process.execPath, args: [resolve("tests/helpers/provider-model-missing.cjs")] },
+		});
+		const modelErrorRun = getAgentRun(join(root, ".agentflux"), modelErrorRunId);
+		check(modelErrorResult.exitCode !== 0 && modelErrorRun?.modelError?.includes("model not found") === true
+			&& modelErrorRun.providerError === undefined,
+		"明确 model 错误单独分类并保留到 terminal Run");
+		const businessFailureResult = await runAgent({
+			cwd: root, agent: { ...template, name: "business-error-no-fallback", model: "primary-model", provider: "provider-a" },
+			task: "ordinary command failure", sessionId: "test", prefixLayout: true, persistent: false,
+			enableModelFallback: true, maxRetries: 0,
+			modelsForFallback: {
+				"primary-model": { provider: "provider-a", capability: { coding: 0.9, reasoning: 0.9, speed: 0.9 } },
+				"fallback-model": { provider: "provider-b", capability: { coding: 0.8, reasoning: 0.8, speed: 0.8 } },
+			} as any,
+			roleRequirementForFallback: { coding: 0.5, reasoning: 0.5 },
+			invocationOverride: { command: process.execPath, args: [onlineHelper] },
+			env: { AGENTFLUX_TEST_EXIT_DELAY_MS: "100", AGENTFLUX_TEST_PROVIDER_ERROR: "file not found: src/missing.ts" },
+		});
+		const businessFailureRun = listAgentRuns(join(root, ".agentflux"), { agent: "business-error-no-fallback" })[0];
+		check(businessFailureResult.exitCode !== 0 && businessFailureResult.fallbackModel === undefined
+			&& businessFailureRun?.modelError === undefined && businessFailureRun?.providerError === undefined,
+		"普通 file not found 业务错误不会触发模型降级或误分类为 provider/model 错误");
+
+		// Core 快照契约：旧格式只在内存补默认值，计数必须非负且单调，terminal 一律拒写。
+		const legacyFluxDir = join(root, "legacy-flux");
+		mkdirSync(join(legacyFluxDir, "runtime"), { recursive: true });
+		writeFileSync(join(legacyFluxDir, "runtime", "runs.json"), JSON.stringify({
+			version: 1,
+			runs: [{
+				id: "legacy-run", sessionId: "legacy", agent: "legacy-agent", role: "implementer",
+				currentTask: "legacy task", kind: "ephemeral", status: "completed", attempt: 1, costUsd: 0.25,
+				createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+				heartbeatAt: "2026-01-01T00:00:01.000Z", finishedAt: "2026-01-01T00:00:01.000Z",
+			}],
+		}, null, 2));
+		const legacyRun = listAgentRuns(legacyFluxDir)[0];
+		check(legacyRun.phase === "terminal" && legacyRun.turns === 0 && legacyRun.input === 0
+			&& legacyRun.output === 0 && legacyRun.cacheRead === 0 && legacyRun.cacheWrite === 0
+			&& legacyRun.contextTokens === 0 && legacyRun.lastActivityType === "terminal",
+		"旧 runs.json 读取时内存归一化在线字段且不要求迁移写回");
+		const contractFluxDir = join(root, "snapshot-contract-flux");
+		registerAgentRun(contractFluxDir, {
+			id: "snapshot-contract-run", sessionId: "test", agent: "contract-agent", role: "tester",
+			currentTask: "validate snapshots", kind: "ephemeral",
+		});
+		markAgentRunRunning(contractFluxDir, "snapshot-contract-run", process.pid, 1, { model: "contract-model", provider: "contract-provider" });
+		const validSnapshot = {
+			phase: "tool" as const, turns: 1, input: 10, output: 2, cacheRead: 3, cacheWrite: 1,
+			contextTokens: 16, costUsd: 0.01, attempt: 1, lastActivityAt: new Date().toISOString(),
+			lastActivityType: "tool_start", lastActivitySummary: "read src/example.ts",
+		};
+		updateAgentRunSnapshot(contractFluxDir, "snapshot-contract-run", validSnapshot);
+		let invalidSnapshotRejected = false;
+		try { updateAgentRunSnapshot(contractFluxDir, "snapshot-contract-run", { ...validSnapshot, input: -1 }); } catch { invalidSnapshotRejected = true; }
+		check(invalidSnapshotRejected && getAgentRun(contractFluxDir, "snapshot-contract-run")?.input === 10,
+		"Run Registry 拒绝负数快照且原子保留上一次事实");
+		let backwardsSnapshotRejected = false;
+		try { updateAgentRunSnapshot(contractFluxDir, "snapshot-contract-run", { ...validSnapshot, turns: 0 }); } catch { backwardsSnapshotRejected = true; }
+		check(backwardsSnapshotRejected && getAgentRun(contractFluxDir, "snapshot-contract-run")?.turns === 1,
+		"Run Registry 拒绝 usage 回退且不会覆盖在线累计");
+		finishAgentRun(contractFluxDir, "snapshot-contract-run", { status: "completed", ...validSnapshot });
+		let terminalWriteRejected = false;
+		try { updateAgentRunSnapshot(contractFluxDir, "snapshot-contract-run", validSnapshot); } catch { terminalWriteRejected = true; }
+		let terminalRefinishRejected = false;
+		try { finishAgentRun(contractFluxDir, "snapshot-contract-run", { status: "completed" }); } catch { terminalRefinishRejected = true; }
+		check(terminalWriteRejected && terminalRefinishRejected,
+		"terminal Run 拒绝在线更新与重复 finish，历史事实保持不可变");
+
 		registerAgentRun(join(root, ".agentflux"), {
 			id: "stale-test-run",
 			sessionId: "test",
@@ -206,13 +411,28 @@ async function main(): Promise<void> {
 		check(listAgents(root).find(agent => agent.name === "reviewer-main")?.status === "running", "resetAgentStatus 可置 running（模拟孤儿状态）");
 		resetAgentStatus(root, "reviewer-main", "idle");
 		check(listAgents(root).find(agent => agent.name === "reviewer-main")?.status === "idle", "stop 孤儿恢复路径：running 无句柄时重置为 idle");
+		// busy Agent 的新指令只能进入 Message V2 pending 队列，并按具体 Run 隔离。
+		const queuedAgent = createAgent(root, { name: "queued-agent", modelsConfig: { models: {} } });
+		const queuedRunId = "queued-agent-run";
+		registerAgentRun(join(root, ".agentflux"), { id: queuedRunId, sessionId: "persistent", agent: queuedAgent.name, role: queuedAgent.role, currentTask: "busy task", kind: "persistent" });
+		markAgentRunRunning(join(root, ".agentflux"), queuedRunId, process.pid, 1);
+		resetAgentStatus(root, queuedAgent.name, "running");
+		const firstQueued = enqueueAgentInstruction(queuedAgent.name, "first steer", { cwd: root, sessionId: "persistent" });
+		const secondQueued = enqueueAgentInstruction(queuedAgent.name, "second steer", { cwd: root, sessionId: "persistent" });
+		check(!!firstQueued && !!secondQueued && firstQueued.run.id === queuedRunId && secondQueued.pending === 2, "busy Agent 指令进入有界 Message V2 pending 队列并保留 Run correlation");
+		const queuedMessages = new MessageBus(join(root, ".agentflux")).peek(queuedAgent.name, { limit: 20 });
+		check(queuedMessages.length === 2 && queuedMessages.every(item => item.envelope.type === "steer" && item.envelope.correlationId === queuedRunId), "busy 队列使用 steer delivery 且顺序可观察");
+		check(rejectQueuedAgentInstructions(root, getAgentRun(join(root, ".agentflux"), queuedRunId)!, "test stop") === 2
+			&& new MessageBus(join(root, ".agentflux")).peek(queuedAgent.name, { limit: 20 }).every(item => item.delivery.status === "rejected"), "停止具体 Run 时拒绝其未消费指令");
+		finishAgentRun(join(root, ".agentflux"), queuedRunId, { status: "cancelled" });
+		resetAgentStatus(root, queuedAgent.name, "idle");
 		// GC: 最新 k 个保留，更早的删除
 		createAgent(root, { name: "gc-a", modelsConfig: { models: {} } });
 		createAgent(root, { name: "gc-b", modelsConfig: { models: {} } });
 		createAgent(root, { name: "gc-c", modelsConfig: { models: {} } });
 		createAgent(root, { name: "gc-d", modelsConfig: { models: {} } });
 		const removed = gcAgents(root, 3, new Set());
-		check(removed.includes("gc-a") && removed.length === 5, "GC 删除无引用且非最新 k 个创建的 Agent");
+		check(removed.includes("gc-a") && removed.length === 6, "GC 删除无引用且非最新 k 个创建的 Agent");
 		const kept = listAgents(root).map(agent => agent.name);
 		check(!kept.includes("gc-a") && kept.includes("gc-b") && kept.includes("gc-c") && kept.includes("gc-d"), "GC 保留最新 k 个");
 		// 手动删除（用 GC 保留的 agent）

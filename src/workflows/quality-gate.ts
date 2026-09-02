@@ -19,6 +19,7 @@ import { createRequire } from "node:module";
 import type { PricingTable } from "../core/pricing";
 import { calcCost, lookupPrice } from "../core/pricing";
 import type { TelemetryWriter } from "../telemetry/events";
+import { normalizeOptionalDurationMs } from "../core/deadline";
 
 export type QualityGateStatus = "passed" | "failed" | "indeterminate";
 
@@ -160,7 +161,7 @@ export async function checkQualityGate(
 		pricing?: PricingTable;
 		telemetry?: TelemetryWriter;
 		sessionId?: string;
-		timeoutMs?: number;
+		timeoutMs?: number | null;
 		signal?: AbortSignal;
 	},
 ): Promise<QualityGateResult> {
@@ -168,6 +169,7 @@ export async function checkQualityGate(
 	if (opts.signal?.aborted) {
 		return interpretQualityGateJudgeExecution({ output: "", exitCode: 130, errorMessage: "cancelled before quality gate" }, criteria);
 	}
+	const gateTimeoutMs = normalizeOptionalDurationMs(opts.timeoutMs, "quality gate timeoutMs");
 	if (!output.trim()) {
 		return interpretQualityGateJudgeExecution({
 			output: "", exitCode: 0, errorMessage: "agent output is empty",
@@ -271,12 +273,12 @@ Respond with ONLY the JSON, no other text.`;
 				}
 			};
 			opts.signal?.addEventListener("abort", onAbort, { once: true });
-			const timer = setTimeout(() => {
+			const timer = gateTimeoutMs === undefined ? undefined : setTimeout(() => {
 				timedOut = true;
-				errorMessage = `timeout after ${opts.timeoutMs ?? 30000}ms`;
+				errorMessage = `explicit deadline after ${gateTimeoutMs}ms`;
 				killTree();
 				done(124);
-			}, opts.timeoutMs ?? 30000);
+			}, gateTimeoutMs);
 
 			const processLine = (ln: string) => {
 				if (!ln.trim()) return;
@@ -311,11 +313,11 @@ Respond with ONLY the JSON, no other text.`;
 			});
 			proc.on("error", (err) => {
 				errorMessage = `spawn error: ${err.message}`;
-				clearTimeout(timer);
+				if (timer) clearTimeout(timer);
 				done(1);
 			});
 			proc.on("close", (code, signal) => {
-				clearTimeout(timer);
+				if (timer) clearTimeout(timer);
 				if (buffer.trim()) processLine(buffer);
 				if (code == null && signal && !timedOut) errorMessage = `judge terminated by ${signal}`;
 				done(forcedExitCode ?? (code ?? (signal ? 1 : 0)));
@@ -330,6 +332,7 @@ Respond with ONLY the JSON, no other text.`;
 		}
 	}
 
+	if (timedOut && stderrBuf.trim()) errorMessage = `${errorMessage ?? "Quality gate judge timed out"}; stderr: ${stderrBuf.trim().slice(0, 500)}`;
 	if (!errorMessage && exitCode !== 0 && stderrBuf.trim()) errorMessage = stderrBuf.trim().slice(0, 500);
 	return interpretQualityGateJudgeExecution({
 		output: gateOutput,

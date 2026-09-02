@@ -15,6 +15,8 @@ export interface TaskRecord {
 	parentTaskId?: string;
 	parentExecutionId?: string;
 	status: TaskStatus;
+	/** Absolute execution deadline; absent means no hard wall-clock limit. */
+	deadlineAt?: string;
 	resource?: { type: "issue" | "workflow"; id: string; version?: number };
 	team?: Array<{ name: string; role?: string; persistent?: boolean }>;
 	createdAt: string;
@@ -29,6 +31,8 @@ export interface TaskExecutionRecord {
 	parentTaskId?: string;
 	parentExecutionId?: string;
 	status: TaskStatus;
+	/** Absolute execution deadline; absent means no hard wall-clock limit. */
+	deadlineAt?: string;
 	budget?: TaskExecutionPlan["budget"];
 	costUsd: number;
 	/** Main 会话侧逐轮累计 usage（turn_end 从 pi message_end 读取） */
@@ -80,6 +84,7 @@ function normalizeStore(value: TaskStore | LegacyTaskStore): TaskStore {
 			parentTaskId: task.parentTaskId,
 			parentExecutionId: task.parentExecutionId ?? task.parentTaskId,
 			status: task.status,
+			deadlineAt: task.deadlineAt,
 			costUsd: 0,
 			createdAt: task.createdAt,
 			updatedAt: task.updatedAt,
@@ -141,6 +146,8 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 	if (plan.parentExecutionId) assertSafeOpaqueId(plan.parentExecutionId, "parentExecutionId");
 	return updateStore(fluxDir, store => {
 		const now = new Date().toISOString();
+		const deadlineAt = plan.deadlineAt
+			?? (plan.budget.maxWallClockMs === undefined ? undefined : new Date(Date.parse(now) + plan.budget.maxWallClockMs).toISOString());
 		const existing = store.tasks.find(task => task.id === plan.taskId);
 		if (existing) {
 			if (TERMINAL_STATUSES.has(existing.status)) {
@@ -157,6 +164,7 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 			existing.operation = plan.operation;
 			existing.parentTaskId = plan.parentTaskId;
 			existing.parentExecutionId = plan.parentExecutionId;
+			if (existing.deadlineAt === undefined) existing.deadlineAt = deadlineAt;
 			existing.status = status;
 			existing.updatedAt = now;
 		} else {
@@ -170,6 +178,7 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				parentTaskId: plan.parentTaskId,
 				parentExecutionId: plan.parentExecutionId,
 				status,
+				deadlineAt,
 				createdAt: now,
 				updatedAt: now,
 			};
@@ -186,6 +195,8 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 			execution.operation = plan.operation;
 			execution.parentTaskId = plan.parentTaskId;
 			execution.parentExecutionId = plan.parentExecutionId;
+			if (execution.deadlineAt === undefined) execution.deadlineAt = deadlineAt;
+			if (execution.budget === undefined) execution.budget = structuredClone(plan.budget);
 			execution.status = status;
 			execution.updatedAt = now;
 		} else {
@@ -197,6 +208,7 @@ export function registerTask(fluxDir: string, sessionId: string, plan: TaskExecu
 				parentTaskId: plan.parentTaskId,
 				parentExecutionId: plan.parentExecutionId,
 				status,
+				deadlineAt,
 				budget: structuredClone(plan.budget),
 				costUsd: 0,
 				createdAt: now,
@@ -261,6 +273,6 @@ export function updateTaskMetadata(fluxDir: string, taskId: string, metadata: Pi
 export function formatTasks(tasks: TaskRecord[]): string {
 	if (tasks.length === 0) return "No AgentFlux tasks.";
 	return ["AgentFlux tasks:", ...tasks.map(task =>
-		`  ${task.status.padEnd(9)} ${task.id} · ${task.operation}${task.parentTaskId ? ` ← ${task.parentTaskId}` : ""}${task.resource ? ` · ${task.resource.type}:${task.resource.id}${task.resource.version ? `@${task.resource.version}` : ""}` : ""}\n    ${task.task.slice(0, 160)}${task.team?.length ? `\n    team ${task.team.map(member => member.name).join(", ")}` : ""}`,
+		`  ${task.status.padEnd(9)} ${task.id} · ${task.operation}${task.parentTaskId ? ` ← ${task.parentTaskId}` : ""}${task.resource ? ` · ${task.resource.type}:${task.resource.id}${task.resource.version ? `@${task.resource.version}` : ""}` : ""}${task.deadlineAt ? ` · deadline ${task.deadlineAt}` : ""}\n    ${task.task.slice(0, 160)}${task.team?.length ? `\n    team ${task.team.map(member => member.name).join(", ")}` : ""}`,
 	)].join("\n");
 }

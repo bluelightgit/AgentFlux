@@ -97,6 +97,14 @@ check("allows valid custom budget values", () => {
 	assert.strictEqual(validateConfig(config).length, 0);
 });
 
+check("validates aggregate turn/input/concurrency budgets", () => {
+	const config: FluxConfig = { ...DEFAULT_CONFIG, budget: { ...DEFAULT_CONFIG.budget, max_turns_per_task: 0, max_input_tokens_per_task: 1.5, max_parallel_agents: 0 } };
+	const warnings = validateConfig(config);
+	assert.equal(warnings.filter(warning => warning.includes("max_turns_per_task")).length, 1);
+	assert.equal(warnings.filter(warning => warning.includes("max_input_tokens_per_task")).length, 1);
+	assert.equal(warnings.filter(warning => warning.includes("max_parallel_agents")).length, 1);
+});
+
 // ─── resolveSharedSkills ─────────────────────────────────────────────
 
 console.log("\n--- resolveSharedSkills ---");

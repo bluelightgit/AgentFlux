@@ -54,6 +54,7 @@ check("node timeout is bounded by DAG global deadline", boundedNodeTimeout(600_0
 
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
+import { interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";
 import type { QualityGateResult } from "../src/workflows/quality-gate";
 
 const minimalGate = (over: Partial<QualityGateResult>): QualityGateResult => ({
@@ -64,6 +65,8 @@ const minimalGate = (over: Partial<QualityGateResult>): QualityGateResult => ({
 check("judge pass releases the node", judgeAction(minimalGate({ status: "passed", passed: true, feedback: "ok" })) === "pass", "pass");
 check("judge clear failure retries the node", judgeAction(minimalGate({ status: "failed", passed: false, feedback: "criteria not met" })) === "retry_node", "retry_node");
 check("judge timeout retries the judge, not the node", judgeAction(minimalGate({ status: "indeterminate", passed: false, feedback: "Quality gate judge timed out" })) === "retry_judge", "retry_judge");
+const timedOutGate = interpretQualityGateJudgeExecution({ output: "", exitCode: 124, timedOut: true, errorMessage: "explicit deadline after 1000ms" }, ["output contains marker"]);
+check("indeterminate quality gate remains failed closed", timedOutGate.status === "indeterminate" && timedOutGate.passed === false && timedOutGate.criteriaResults.length === 0, timedOutGate.feedback);
 const firstDAGRunId = createDAGRunId("execution-one", "review");
 const secondDAGRunId = createDAGRunId("execution-one", "review");
 check(

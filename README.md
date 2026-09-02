@@ -17,7 +17,7 @@ pi -e ./dist/extension/entry.js
 ## 产品能力
 
 - **Main**：直接执行和跨步骤协调。
-- **Agent**：默认、角色模板或真实会话分支创建；支持 `roles[]`、`shared/fresh`、模型继承、运行、停止、重试和 GC。
+- **Agent**：默认、角色模板或真实会话分支创建；支持 `roles[]`、`shared/fresh`、模型继承、运行中 inspect/steer/stop、重试和 GC。
 - **Workflow**：版本化固定 DAG，支持依赖、并行、文件锁、质量门、预算、重试和 checkpoint。
 - **Community**：Issue → Proposal → Claim → Submit → Review → Resolve。
 - **Message V2**：direct/group、recipient delivery、ACK、重投、过期、dedupe 和背压。
@@ -49,7 +49,7 @@ Core 是任务、Agent、Workflow、Issue、消息、权限和运行状态的事
 | `/flux status` | 查看当前运行和状态 |
 | `/flux usage` | 查看 Main usage 和成本 |
 
-Workflow 的命令/TUI 新建与直接 run 入口仍在当前开发规划中；已保存定义可通过工具执行或由 TUI 复用。
+Workflow 支持命令/TUI 新建、运行、复用、修改、删除和 planner/DAG 执行；当前开发规划继续收口空间互斥、Community 和真实链路边界。
 
 ## 验证
 
@@ -58,10 +58,14 @@ npm run verify
 npm run typecheck
 npm run build
 npm run test:live:multirole
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-controls
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-workflow-deadline
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-fanout
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-long
 npm run dogfood:restart
 ```
 
-最近确定性基线为 609/609，production build 已通过。真实链路测试默认使用低成本模型、`thinking=off`、短提示和受限输入；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+最近 `npm run verify`、typecheck 和 production build 均通过；P0-05/P0-07 及 Workflow planner/quality-gate/deadline 的 production-dist 报告位于 `.agentflux/test-results/`（telemetry、controls、workflow-deadline、fanout、long-run）。真实链路测试默认使用低成本模型、`thinking=off`、短提示和受限输入；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 
