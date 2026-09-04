@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createAgent, runAgentRecord, type AgentRunContext } from "../src/agents/agent-store";
 import { readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
+import { assistantFinalText, hasAssistantFinalMarker, toolExecutionStarts } from "./helpers/pi-json-output";
 
 let passed = 0;
 function check(value: unknown, message: string): void {
@@ -79,6 +80,22 @@ async function waitProcess(child: ContextProcess): Promise<number | null> {
 async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "agentflux-p0-02-space-"));
 	try {
+		const echoedMarker = "P0_02_ECHO_ONLY_MARKER";
+		const echoedPromptOutput = JSON.stringify({
+			type: "agent_end",
+			messages: [
+				{ role: "user", content: [{ type: "text", text: `提示中包含 ${echoedMarker}，但最终回复不包含它。` }] },
+				{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "最终回复没有验收标记。" }] },
+			],
+		}) + "\n";
+		check(!hasAssistantFinalMarker(echoedPromptOutput, "", echoedMarker), "marker 不采信包含在 user prompt 回显中的文本");
+		const finalMarker = "P0_02_FINAL_ASSISTANT_MARKER";
+		const finalAssistantOutput = JSON.stringify({ type: "toolResult", toolName: "flux_issue", content: [{ type: "text", text: finalMarker }] }) + "\n"
+			+ JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: finalMarker }] } }) + "\n";
+		check(assistantFinalText(finalAssistantOutput) === finalMarker && hasAssistantFinalMarker(finalAssistantOutput, "", finalMarker), "marker 只采信最终 assistant message_end 文本");
+		const toolStartOutput = JSON.stringify({ type: "tool_execution_start", toolName: "flux_issue", toolCallId: "call-live", args: { action: "claim" } }) + "\n";
+		check(toolExecutionStarts(toolStartOutput, "flux_issue").length === 1, "冲突因果证据只采信真实 tool_execution_start 事件");
+
 		const modelsConfig = { models: {} };
 		const context = (sessionId: string, invocationOverride: AgentRunContext["invocationOverride"]): AgentRunContext => ({
 			cwd: root,

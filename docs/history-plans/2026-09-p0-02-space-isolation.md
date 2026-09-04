@@ -1,6 +1,6 @@
 # P0-02 项目空间互斥与实例 lease
 
-状态：已完成（2026-09-04）
+状态：核心实现归档；2026-09-04 独立验收未通过，返工见当前 `docs/development-plan/01-entry-and-safety.md` 与 `03-real-validation.md`
 
 ## 目标摘要
 
@@ -20,7 +20,7 @@
 - `D:/Nodejs/npm.cmd run verify`：通过；其中 Main routing 36、Agent lifecycle 107、Community 41/22、P0-02 space isolation 25 和其余 unit/typecheck 套件均通过。
 - `D:/Nodejs/npm.cmd run build`：通过，生成 production `dist/extension/entry.js` 与 `dist/extension/subagent-entry.js`；`git diff --check` 通过。
 
-## production-dist 真实证据
+## production-dist 实现阶段证据
 
 运行：
 
@@ -37,8 +37,10 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 - Workflow 阶段观测真实 Workflow lease；无效 selector 的失败 Workflow 释放自身 lease 而保留正常 Workflow lease；Community Claim 尝试收到 `workflow` 空间拒绝；正常 Workflow 节点完成并释放 lease。
 - 最终 `active-context` 无活跃条目，所有 Pi 进程 exit code 为 0，报告 `passed=true`，并记录每个冲突/失败工具调用与结果、PID、lease、模型配置和失败原因。
 
-当前报告 `p0-02-space-isolation-latest.json` 为 production-dist clean-tree 证据：`sourceCommit` 与执行时 HEAD 一致，`builtExtension=true`、`passed=true`、`changedFiles=[]`。
+实现阶段报告 `p0-02-space-isolation-pre-independent-audit.json` 是 production-dist clean-tree passing 证据：`sourceCommit` 与执行时 HEAD 一致，`builtExtension=true`、`passed=true`、`changedFiles=[]`。它仅作为历史证据保留，不能覆盖后续独立验收失败。
 
-## 后续边界
+## 独立验收结论
 
-P0-02 的项目空间互斥和实例级清理已完成。P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。
+2026-09-04 在同一 clean HEAD 重新 build 后，以默认低成本 `octopus-completions/deepseek-v4-flash`、`thinking=off` 运行 production fixture。Main 与 Community 阶段通过，但 Workflow 只保持 15 秒，冲突 Pi 的实际 claim 在 Workflow 结束后才发生并成功，`workflowPhase.passed=false`。同时确认 `marker()` 搜索完整 JSONL stdout，会命中回显的用户提示，存在假阳性。最新失败报告 `.agentflux/test-results/p0-02-space-isolation-latest.json` 与审计摘要 `p0-02-independent-audit-latest.json` 是当前依据；P0-02 不得宣告完成，返工和重验要求只看当前开发规划。
+
+P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。

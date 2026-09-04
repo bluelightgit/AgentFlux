@@ -4,13 +4,15 @@
 
 本文件只记录需要 production dist、全新 Pi/Provider 或长时运行才能完成的验证任务。P2 不是实现完成后的末尾阶段：除 P2-05 长时 soak 外，各场景在对应 P0/P1 实现具备条件后立即执行，真实失败直接阻止该任务结项。
 
-## P0-02 项目空间互斥真实验证
+## P0-02 项目空间互斥独立验收返工
 
-- **状态**：已完成（2026-09-04）
-- **实现**：Main persistent Agent 派发、Workflow 执行和 Community Claim 共用项目级 `active-context`；实例用 leaseId/Claim ID 定向释放，跨空间 fail-closed、同空间允许并行。
-- **确定性证据**：`test-active-context.ts` 25 项、`test-p0-02-space-isolation.ts` 25 项；完整 `verify`、typecheck 和 production build 通过，后者含真实子进程 crash 与并行 sibling 不误删断言。
-- **production-dist 证据**：`AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation`；报告 `.agentflux/test-results/p0-02-space-isolation-latest.json`。多个全新 Pi 进程实际观测 Main/Community 同空间并行、失败 Main/Community/Workflow 实例释放自身 lease 且不误删存活 sibling、Main→Workflow/Community、Community→Workflow、Workflow→Community 的显式 toolResult 拒绝、PID/lease 清理和最终无活跃条目；报告记录 provider/model/thinking、PID、lease、退出码、sourceCommit 与 changedFiles。
-- **证据状态**：最新报告为 clean-tree production-dist 证据，`sourceCommit` 与执行时 HEAD 一致、`changedFiles=[]`、`passed=true`、`builtExtension=true`；其余 P0-03 Community 契约、P0-06 Message V2 group 单一路径和更广资源/并行写隔离仍独立推进。
+- **状态**：独立验收未通过（2026-09-04）；Core 确定性门禁通过，production fixture 需返工后重验。
+- **实现现状**：Main persistent Agent 派发、Workflow 执行和 Community Claim 共用项目级 `active-context`；实例用 leaseId/Claim ID 定向释放，跨空间 fail-closed、同空间允许并行。代码审查与确定性复跑未发现 Core 跨空间 fail-open 或 sibling 误删。
+- **已通过门禁**：`test-active-context.ts` 25、`test-p0-02-space-isolation.ts` 25、Main routing 36、Community 41/22；完整 `npm run verify`、独立 typecheck、production build、dist 入口和 diff 检查通过。
+- **失败证据**：全新 production dist 使用默认低成本 `octopus-completions/deepseek-v4-flash`、`thinking=off` 复跑 361.595 秒；Main 与 Community 阶段通过，但 Workflow→Community 冲突阶段的 claim 在 15 秒 Workflow 节点结束后才真正调用并成功，故 `workflowIssueErrors=[]`、`workflowPhase.passed=false`、总报告 `passed=false`。latest 失败报告和 `p0-02-space-isolation-failed-1788522468872-13308.json` 优先于此前 Luna/max 的 passing 报告；此前报告保存在 `p0-02-space-isolation-pre-independent-audit.json`。
+- **fixture 阻断**：`tests/live/test-p0-02-space-isolation.ts` 只在启动冲突 Pi 前观测 Workflow lease，没有同步真实 tool call；固定 15 秒不足以覆盖 provider 延迟。`marker()` 搜索含用户提示的完整 stdout，因此提示中的 marker 可制造假阳性；本次最终 assistant 明确未输出 marker，但旧 helper 仍返回 true。
+- **重验要求**：让实际冲突 tool call 在 Workflow lease 存活期间发生，使用有界且 provider 延迟容忍的握手；marker 只解析最终 assistant 消息，并加入提示含 marker/最终不含 marker 的回归。重新 build 后由全新 production Pi 复跑，报告必须保存 Task/Execution/Run/Issue、PID、lease、冲突 toolResult、退出码和最终空 active-context；失败报告不得覆盖或删除。
+- **审计摘要**：`.agentflux/test-results/p0-02-independent-audit-latest.json`，结论 `rework`。
 
 ## P2-01 Production Workflow
 

@@ -6,6 +6,7 @@ import { readActiveContext } from "../../src/core/active-context";
 import { createWorkflowDefinition } from "../../src/workflows/workflow-registry";
 import type { TaskDAG } from "../../src/workflows/dag-executor";
 import { loadLiveConfig, type LiveConfig } from "./live-config";
+import { hasAssistantFinalMarker, toolExecutionStarts } from "../helpers/pi-json-output";
 
 /**
  * P0-02 真实多进程空间互斥：
@@ -22,6 +23,8 @@ const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-02-space-i
 const failureReportPath = join(sourceRoot, ".agentflux", "test-results", `p0-02-space-isolation-failed-${Date.now()}-${process.pid}.json`);
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
+const WORKFLOW_HOLD_MS = 180_000;
+const WORKFLOW_CONFLICT_WAIT_MS = 240_000;
 
 type ContextName = "main" | "workflow" | "community";
 
@@ -37,6 +40,7 @@ interface PiResult {
 interface PiHandle {
 	child: ChildProcess;
 	result: Promise<PiResult>;
+	snapshot(): { stdout: string; stderr: string };
 }
 
 function git(args: string[]): string {
@@ -106,7 +110,7 @@ function launch(
 			resolveResult({ label, pid: child.pid, exitCode: code ?? 1, stdout, stderr, timedOut: false });
 		});
 	});
-	return { child, result };
+	return { child, result, snapshot: () => ({ stdout, stderr }) };
 }
 
 function activeEntries(): any[] {
@@ -185,7 +189,37 @@ function toolCalls(stdout: string, toolName: string): any[] {
 }
 
 function marker(result: PiResult, text: string): boolean {
-	return result.stdout.includes(text) || result.stderr.includes(text);
+	return hasAssistantFinalMarker(result.stdout, result.stderr, text);
+}
+
+interface ConflictObservation {
+	observedAt: string;
+	toolExecutionStart: any;
+	activeWorkflowEntries: any[];
+}
+
+/**
+ * 等待真实 flux_issue 工具开始执行，并在同一时刻确认 Workflow lease 仍活跃。
+ * 仅等待冲突 Pi 进程启动或在完整 stdout 中搜索 call 都无法证明因果关系。
+ */
+async function waitForWorkflowCommunityConflict(handle: PiHandle, timeoutMs = 240_000): Promise<ConflictObservation> {
+	let observation: ConflictObservation | undefined;
+	await waitFor(() => {
+		const starts = toolExecutionStarts(handle.snapshot().stdout, "flux_issue");
+		if (starts.length === 0) return false;
+		const activeWorkflowEntries = activeEntriesByContext("workflow");
+		observation = {
+			observedAt: new Date().toISOString(),
+			toolExecutionStart: starts.at(-1),
+			activeWorkflowEntries,
+		};
+		if (activeWorkflowEntries.length === 0) {
+			throw new Error("Workflow→Community conflict tool call started after the Workflow lease ended");
+		}
+		return true;
+	}, timeoutMs, "real Workflow→Community flux_issue call while Workflow lease is active");
+	if (!observation) throw new Error("Workflow→Community conflict observation was not captured");
+	return observation;
 }
 
 function compactResult(result: PiResult): any {
@@ -230,7 +264,7 @@ function setup(config: LiveConfig): { workflowId: string; issueIds: string[] } {
 			parallelizable: false,
 			acceptanceCriteria: [],
 			files: [],
-			description: "Use bash to run node -e \"setTimeout(() => {}, 15000)\" and wait for it to finish before replying WORKFLOW_NODE_DONE.",
+			description: `Use bash to run node -e "setTimeout(() => {}, ${WORKFLOW_HOLD_MS})" and wait for it to finish before replying WORKFLOW_NODE_DONE`,
 		}],
 	};
 	const definition = createWorkflowDefinition(join(fixtureRoot, ".agentflux"), { name: "p0-02-space-workflow", dag: workflow });
@@ -382,27 +416,30 @@ async function main(): Promise<void> {
 		const workflowPi = launch("workflow", extensionEntry, [
 			"必须实际调用 AgentFlux flux_workflow 工具，不要自行完成任务。",
 			`调用 action=reuse，workflow=\"${fixture.workflowId}\"，task=\"执行 P0-02 空间互斥流程\"；等待流程结束后只输出 P0_02_WORKFLOW_OK。`,
-		].join("\n"), config, config.plannerModel, 180_000);
+		].join("\n"), config, config.plannerModel, WORKFLOW_CONFLICT_WAIT_MS + 60_000);
 		handles.push(workflowPi);
 		await waitFor(() => activeEntriesByContext("workflow").length >= 1, 90_000, "Workflow space lease");
 		const workflowActiveSnapshot = activeEntriesByContext("workflow").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
+		// Launch the conflicting Pi immediately after the lease is observed, then wait
+		// for the actual tool_execution_start while the Workflow lease remains live.
+		const workflowConflict = launch("workflow-community-conflict", extensionEntry, [
+			"必须实际调用 flux_issue 工具；跨空间错误是预期结果，收到后只输出 P0_02_WORKFLOW_CONFLICT_OK。",
+			`调用 action=claim，issueId=\"${fixture.issueIds[2]}\"，agent=\"workflow-conflict\"，scope=\"workflow-conflict\"，记录显式错误后输出标记。`,
+		].join("\n"), config, config.mainModel, WORKFLOW_CONFLICT_WAIT_MS + 60_000);
+		handles.push(workflowConflict);
 		const workflowFailure = launch("workflow-failure", extensionEntry, [
 			"必须实际调用 flux_workflow 工具；这次 reuse 预期因不存在的 selector 失败，记录显式工具错误后只输出 P0_02_WORKFLOW_FAILURE_OK。",
 			"调用 action=reuse，workflow=\"workflow-does-not-exist\"，task=\"失败隔离检查\"。",
 		].join("\n"), config);
 		handles.push(workflowFailure);
-		const workflowFailureResult = await workflowFailure.result;
+		const workflowConflictObservation = await waitForWorkflowCommunityConflict(workflowConflict, WORKFLOW_CONFLICT_WAIT_MS);
+		const [workflowResult, workflowConflictResult, workflowFailureResult] = await Promise.all([workflowPi.result, workflowConflict.result, workflowFailure.result]);
 		const workflowAfterFailedRun = activeEntriesByContext("workflow").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
 		const workflowFailureErrors = toolErrors(workflowFailureResult.stdout, "flux_workflow");
-		const workflowConflict = launch("workflow-community-conflict", extensionEntry, [
-			"必须实际调用 flux_issue 工具；跨空间错误是预期结果，收到后只输出 P0_02_WORKFLOW_CONFLICT_OK。",
-			`调用 action=claim，issueId=\"${fixture.issueIds[2]}\"，agent=\"workflow-conflict\"，scope=\"workflow-conflict\"，记录显式错误后输出标记。`,
-		].join("\n"), config);
-		handles.push(workflowConflict);
-		const [workflowResult, workflowConflictResult] = await Promise.all([workflowPi.result, workflowConflict.result]);
 		const workflowIssueErrors = toolErrors(workflowConflictResult.stdout, "flux_issue");
 		evidence.workflowPhase = {
 			activeBeforeConflict: workflowActiveSnapshot,
+			conflictObservation: workflowConflictObservation,
 			activeAfterFailedRun: workflowAfterFailedRun,
 			failedRunErrors: workflowFailureErrors,
 			processes: [compactResult(workflowResult), compactResult(workflowConflictResult), compactResult(workflowFailureResult)],
@@ -412,6 +449,7 @@ async function main(): Promise<void> {
 				&& marker(workflowResult, "P0_02_WORKFLOW_OK") && marker(workflowConflictResult, "P0_02_WORKFLOW_CONFLICT_OK") && marker(workflowFailureResult, "P0_02_WORKFLOW_FAILURE_OK")
 				&& workflowFailureErrors.some(item => JSON.stringify(item).includes("Workflow not found"))
 				&& workflowAfterFailedRun.length >= 1
+				&& workflowConflictObservation.activeWorkflowEntries.length >= 1
 				&& workflowIssueErrors.some(item => JSON.stringify(item).includes("workflow 空间活跃")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Workflow space lease cleanup");
