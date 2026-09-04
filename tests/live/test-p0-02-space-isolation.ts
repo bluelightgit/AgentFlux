@@ -454,8 +454,9 @@ async function main(): Promise<void> {
 		].join("\n"), config);
 		handles.push(workflowFailure);
 		const workflowConflictObservation = await waitForToolWhileContext(workflowConflict, "flux_issue", "workflow", CONFLICT_WAIT_MS);
-		const [workflowResult, workflowConflictResult, workflowFailureResult] = await Promise.all([workflowPi.result, workflowConflict.result, workflowFailure.result]);
+		const workflowFailureResult = await workflowFailure.result;
 		const workflowAfterFailedRun = activeEntriesByContext("workflow").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
+		const [workflowResult, workflowConflictResult] = await Promise.all([workflowPi.result, workflowConflict.result]);
 		const workflowFailureErrors = toolErrors(workflowFailureResult.stdout, "flux_workflow");
 		const workflowIssueErrors = toolErrors(workflowConflictResult.stdout, "flux_issue");
 		evidence.workflowPhase = {
