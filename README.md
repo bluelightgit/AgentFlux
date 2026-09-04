@@ -75,7 +75,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-P0-02 Core 空间互斥与独立 production 行为复跑已通过，但第二次独立验收仍为 `rework`：最终 assistant marker 仍使用 substring 匹配，否定句可假阳性；`.agentflux/test-results/p0-02-space-isolation-latest.json` 未保存 Task/Execution/Run/Issue、usage/cost/父谱系，且 11 个 5 KB stdout tail 均无法解析 assistant 终态。当前返工依据见开发规划与 `.agentflux/test-results/p0-02-independent-second-audit-latest.json`。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+P0-02 项目空间互斥已完成返工并通过当前 HEAD 的 production-dist 重验（`1d0edc347032bb76bf28fa0c1e0dd1d17829e744`）：Main、Workflow、Community 跨空间 fail-closed、同空间并行和实例级清理均通过；11 个全新 Pi 子进程的最终 assistant marker 采用 trim 后精确相等规则，完整 stdout/stderr 与终态文本保存为带 SHA-256 的 artifact。报告同时保存 11 个 Task/Execution、3 个 Agent、3 个 Run、3 个 Issue、usage/cost、父谱系、toolResult/lease 事实及一致性检查，cleanup 前后 workspace 与 active-context 均可核对；`passed=true`、`builtExtension=true`、`changedFiles=[]`。报告：`.agentflux/test-results/p0-02-space-isolation-latest.json`。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 
