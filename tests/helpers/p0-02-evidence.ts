@@ -80,6 +80,7 @@ function auditExecution(execution: any): any {
 		deadlineAt: execution?.deadlineAt ?? null,
 		budget: execution?.budget ?? null,
 		costUsd: numberOrZero(execution?.costUsd),
+		observedCostUsd: Math.max(numberOrZero(execution?.costUsd), numberOrZero(execution?.usage?.costUsd)),
 		usage: execution?.usage ? {
 			input: numberOrZero(execution.usage.input),
 			output: numberOrZero(execution.usage.output),
@@ -478,7 +479,7 @@ export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: str
 	const consistencyReasons = Object.entries(consistencyChecks).filter(([, value]) => !value).map(([key]) => key);
 	const runUsage = aggregateRunUsage(runs);
 	const executionUsage = aggregateExecutionUsage(executions);
-	const executionCost = executions.reduce((sum, execution) => sum + numberOrZero(execution.costUsd), 0);
+	const executionCost = executions.reduce((sum, execution) => sum + Math.max(numberOrZero(execution.costUsd), numberOrZero(execution.usage?.costUsd)), 0);
 	const agentCost = agents.reduce((sum, agent) => sum + numberOrZero(agent.totalCostUsd), 0);
 	const issueCost = issues.reduce((sum, issue) => sum + numberOrZero(issue.costUsd), 0);
 	const parentLineage = {
@@ -507,6 +508,7 @@ export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: str
 			agents: agentCost,
 			issues: issueCost,
 			observedRunAndExecution: runUsage.costUsd + executionCost,
+			total: runUsage.costUsd + executionCost,
 		},
 		costUsdTotal: runUsage.costUsd + executionCost,
 		parentLineage,
