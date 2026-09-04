@@ -23,8 +23,10 @@ const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-02-space-i
 const failureReportPath = join(sourceRoot, ".agentflux", "test-results", `p0-02-space-isolation-failed-${Date.now()}-${process.pid}.json`);
 const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
+const MAIN_HOLD_MS = 120_000;
+const COMMUNITY_HOLD_MS = 180_000;
 const WORKFLOW_HOLD_MS = 180_000;
-const WORKFLOW_CONFLICT_WAIT_MS = 240_000;
+const CONFLICT_WAIT_MS = 240_000;
 
 type ContextName = "main" | "workflow" | "community";
 
@@ -194,31 +196,38 @@ function marker(result: PiResult, text: string): boolean {
 
 interface ConflictObservation {
 	observedAt: string;
+	toolName: string;
 	toolExecutionStart: any;
-	activeWorkflowEntries: any[];
+	activeEntries: any[];
 }
 
 /**
- * 等待真实 flux_issue 工具开始执行，并在同一时刻确认 Workflow lease 仍活跃。
+ * 等待真实工具开始执行，并在同一时刻确认目标空间 lease 仍活跃。
  * 仅等待冲突 Pi 进程启动或在完整 stdout 中搜索 call 都无法证明因果关系。
  */
-async function waitForWorkflowCommunityConflict(handle: PiHandle, timeoutMs = 240_000): Promise<ConflictObservation> {
+async function waitForToolWhileContext(
+	handle: PiHandle,
+	toolName: string,
+	context: ContextName,
+	timeoutMs = CONFLICT_WAIT_MS,
+): Promise<ConflictObservation> {
 	let observation: ConflictObservation | undefined;
 	await waitFor(() => {
-		const starts = toolExecutionStarts(handle.snapshot().stdout, "flux_issue");
+		const starts = toolExecutionStarts(handle.snapshot().stdout, toolName);
 		if (starts.length === 0) return false;
-		const activeWorkflowEntries = activeEntriesByContext("workflow");
+		const activeEntries = activeEntriesByContext(context);
 		observation = {
 			observedAt: new Date().toISOString(),
+			toolName,
 			toolExecutionStart: starts.at(-1),
-			activeWorkflowEntries,
+			activeEntries,
 		};
-		if (activeWorkflowEntries.length === 0) {
-			throw new Error("Workflow→Community conflict tool call started after the Workflow lease ended");
+		if (activeEntries.length === 0) {
+			throw new Error(`${context}→conflict ${toolName} call started after the ${context} lease ended`);
 		}
 		return true;
-	}, timeoutMs, "real Workflow→Community flux_issue call while Workflow lease is active");
-	if (!observation) throw new Error("Workflow→Community conflict observation was not captured");
+	}, timeoutMs, `real ${context} ${toolName} call while ${context} lease is active`);
+	if (!observation) throw new Error(`${context} ${toolName} conflict observation was not captured`);
 	return observation;
 }
 
@@ -302,9 +311,9 @@ async function main(): Promise<void> {
 		const mainA = launch("main-a", extensionEntry, [
 			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
 			"1) action=create，name=p0-02-main-a，role=implementer，scope=project。",
-			"2) action=run，agent=p0-02-main-a，background=false，task=必须调用 bash 执行 node -e \"setTimeout(() => {}, 25000)\"，等待命令完成后只回复 MAIN_SPACE_A_RUN_DONE。",
+			`2) action=run，agent=p0-02-main-a，background=false，task=必须调用 bash 执行 node -e "setTimeout(() => {}, ${MAIN_HOLD_MS})"，等待命令完成后只回复 MAIN_SPACE_A_RUN_DONE。`,
 			"3) run 返回后只输出 P0_02_MAIN_A_OK。",
-		].join("\n"), config, config.mainModel, 180_000);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(mainA);
 		await waitFor(() => activeEntriesByContext("main").length >= 1, 90_000, "first Main space lease");
 
@@ -313,18 +322,20 @@ async function main(): Promise<void> {
 			`1) 调用 flux_workflow action=run，task=\"只读检查 README.md\"；这次必须记录工具返回的跨空间错误。`,
 			`2) 调用 flux_issue action=claim，issueId=\"${fixture.issueIds[2]}\"，agent=\"main-conflict\"，scope=\"conflict\"；这次也必须记录工具返回的跨空间错误。`,
 			"3) 两次调用都收到错误后只输出 P0_02_MAIN_CONFLICT_OK。",
-		].join("\n"), config);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(mainConflict);
 
 		const mainB = launch("main-b", extensionEntry, [
 			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
 			"1) action=create，name=p0-02-main-b，role=implementer，scope=project。",
-			"2) action=run，agent=p0-02-main-b，background=false，task=必须调用 bash 执行 node -e \"setTimeout(() => {}, 22000)\"，等待命令完成后只回复 MAIN_SPACE_B_RUN_DONE。",
+			`2) action=run，agent=p0-02-main-b，background=false，task=必须调用 bash 执行 node -e "setTimeout(() => {}, ${MAIN_HOLD_MS})"，等待命令完成后只回复 MAIN_SPACE_B_RUN_DONE。`,
 			"3) run 返回后只输出 P0_02_MAIN_B_OK。",
-		].join("\n"), config, config.mainModel, 180_000);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(mainB);
 		await waitFor(() => activeEntriesByContext("main").length >= 2, 90_000, "parallel Main space leases");
 		const mainActiveSnapshot = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
+		const mainConflictWorkflowObservationPromise = waitForToolWhileContext(mainConflict, "flux_workflow", "main");
+		const mainConflictIssueObservationPromise = waitForToolWhileContext(mainConflict, "flux_issue", "main");
 		const mainFailure = launch("main-failure", extensionEntry, [
 			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
 			"1) action=create，name=p0-02-main-failure，role=implementer，scope=project。",
@@ -332,7 +343,11 @@ async function main(): Promise<void> {
 			"3) run 返回后只输出 P0_02_MAIN_FAILURE_OK。",
 		].join("\n"), config);
 		handles.push(mainFailure);
-		const mainFailureResult = await mainFailure.result;
+		const [mainFailureResult, mainConflictWorkflowObservation, mainConflictIssueObservation] = await Promise.all([
+			mainFailure.result,
+			mainConflictWorkflowObservationPromise,
+			mainConflictIssueObservationPromise,
+		]);
 		const activeAfterMainFailure = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
 		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_agent");
 		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "p0-02-main-failure");
@@ -351,6 +366,8 @@ async function main(): Promise<void> {
 				workflowErrors: mainConflictWorkflowErrors,
 				issueCalls: toolCalls(mainConflictResult.stdout, "flux_issue"),
 				issueErrors: mainConflictIssueErrors,
+				workflowObservation: mainConflictWorkflowObservation,
+				issueObservation: mainConflictIssueObservation,
 			},
 			passed: mainAResult.exitCode === 0 && mainBResult.exitCode === 0 && mainConflictResult.exitCode === 0 && mainFailureResult.exitCode === 0
 				&& !mainAResult.timedOut && !mainBResult.timedOut && !mainConflictResult.timedOut && !mainFailureResult.timedOut
@@ -358,6 +375,8 @@ async function main(): Promise<void> {
 				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Unknown model: unknown-live-model"))
 				&& mainFailureFacts.length === 0
 				&& activeAfterMainFailure.length >= 2 && activeAfterMainFailure.every(entry => entry.pid !== mainFailureResult.pid)
+				&& mainConflictWorkflowObservation.activeEntries.length >= 1
+				&& mainConflictIssueObservation.activeEntries.length >= 1
 				&& mainConflictWorkflowErrors.some(item => JSON.stringify(item).includes("main 空间活跃"))
 				&& mainConflictIssueErrors.some(item => JSON.stringify(item).includes("main 空间活跃")),
 		};
@@ -367,17 +386,17 @@ async function main(): Promise<void> {
 		const communityA = launch("community-a", extensionEntry, [
 			"必须实际调用 AgentFlux flux_issue 工具，不要自行完成任务。",
 			`1) action=claim，issueId=\"${fixture.issueIds[0]}\"，agent=\"community-a\"，scope=\"scope-a\"。`,
-			"2) claim 成功后调用 bash 执行 node -e \"setTimeout(() => {}, 20000)\"，等待命令完成。",
+			`2) claim 成功后调用 bash 执行 node -e "setTimeout(() => {}, ${COMMUNITY_HOLD_MS})"，等待命令完成。`,
 			"3) 最后只输出 P0_02_COMMUNITY_A_OK。",
-		].join("\n"), config);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(communityA);
 		await waitFor(() => activeEntriesByContext("community").length >= 1, 60_000, "first Community space lease");
 		const communityB = launch("community-b", extensionEntry, [
 			"必须实际调用 AgentFlux flux_issue 工具，不要自行完成任务。",
 			`1) action=claim，issueId=\"${fixture.issueIds[1]}\"，agent=\"community-b\"，scope=\"scope-b\"。`,
-			"2) claim 成功后调用 bash 执行 node -e \"setTimeout(() => {}, 18000)\"，等待命令完成。",
+			`2) claim 成功后调用 bash 执行 node -e "setTimeout(() => {}, ${COMMUNITY_HOLD_MS})"，等待命令完成。`,
 			"3) 最后只输出 P0_02_COMMUNITY_B_OK。",
-		].join("\n"), config);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(communityB);
 		await waitFor(() => activeEntriesByContext("community").length >= 2, 60_000, "parallel Community space leases");
 		const communityActiveSnapshot = activeEntriesByContext("community").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
@@ -392,8 +411,9 @@ async function main(): Promise<void> {
 		const communityConflict = launch("community-conflict", extensionEntry, [
 			"必须实际调用 flux_workflow 工具；跨空间错误是预期结果，收到后只输出 P0_02_COMMUNITY_CONFLICT_OK。",
 			"调用 action=run，task=\"只读检查 README.md\"，记录显式错误后输出标记。",
-		].join("\n"), config);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(communityConflict);
+		const communityConflictObservation = await waitForToolWhileContext(communityConflict, "flux_workflow", "community");
 		const [communityAResult, communityBResult, communityConflictResult] = await Promise.all([communityA.result, communityB.result, communityConflict.result]);
 		const communityWorkflowErrors = toolErrors(communityConflictResult.stdout, "flux_workflow");
 		evidence.communityPhase = {
@@ -402,12 +422,13 @@ async function main(): Promise<void> {
 			failedClaimErrors: communityFailureErrors,
 			processes: [compactResult(communityAResult), compactResult(communityBResult), compactResult(communityConflictResult), compactResult(communityFailureResult)],
 			parallelCommunityCountObserved: 2,
-			conflict: { workflowCalls: toolCalls(communityConflictResult.stdout, "flux_workflow"), workflowErrors: communityWorkflowErrors },
+			conflict: { workflowCalls: toolCalls(communityConflictResult.stdout, "flux_workflow"), workflowErrors: communityWorkflowErrors, observation: communityConflictObservation },
 			passed: communityAResult.exitCode === 0 && communityBResult.exitCode === 0 && communityConflictResult.exitCode === 0 && communityFailureResult.exitCode === 0
 				&& !communityAResult.timedOut && !communityBResult.timedOut && !communityConflictResult.timedOut && !communityFailureResult.timedOut
 				&& marker(communityAResult, "P0_02_COMMUNITY_A_OK") && marker(communityBResult, "P0_02_COMMUNITY_B_OK") && marker(communityConflictResult, "P0_02_COMMUNITY_CONFLICT_OK") && marker(communityFailureResult, "P0_02_COMMUNITY_FAILURE_OK")
 				&& communityFailureErrors.some(item => JSON.stringify(item).includes("Scope already claimed"))
 				&& communityAfterFailedClaim.length >= 2
+				&& communityConflictObservation.activeEntries.length >= 2
 				&& communityWorkflowErrors.some(item => JSON.stringify(item).includes("community 空间活跃")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Community space lease cleanup");
@@ -416,7 +437,7 @@ async function main(): Promise<void> {
 		const workflowPi = launch("workflow", extensionEntry, [
 			"必须实际调用 AgentFlux flux_workflow 工具，不要自行完成任务。",
 			`调用 action=reuse，workflow=\"${fixture.workflowId}\"，task=\"执行 P0-02 空间互斥流程\"；等待流程结束后只输出 P0_02_WORKFLOW_OK。`,
-		].join("\n"), config, config.plannerModel, WORKFLOW_CONFLICT_WAIT_MS + 60_000);
+		].join("\n"), config, config.plannerModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(workflowPi);
 		await waitFor(() => activeEntriesByContext("workflow").length >= 1, 90_000, "Workflow space lease");
 		const workflowActiveSnapshot = activeEntriesByContext("workflow").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
@@ -425,14 +446,14 @@ async function main(): Promise<void> {
 		const workflowConflict = launch("workflow-community-conflict", extensionEntry, [
 			"必须实际调用 flux_issue 工具；跨空间错误是预期结果，收到后只输出 P0_02_WORKFLOW_CONFLICT_OK。",
 			`调用 action=claim，issueId=\"${fixture.issueIds[2]}\"，agent=\"workflow-conflict\"，scope=\"workflow-conflict\"，记录显式错误后输出标记。`,
-		].join("\n"), config, config.mainModel, WORKFLOW_CONFLICT_WAIT_MS + 60_000);
+		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(workflowConflict);
 		const workflowFailure = launch("workflow-failure", extensionEntry, [
 			"必须实际调用 flux_workflow 工具；这次 reuse 预期因不存在的 selector 失败，记录显式工具错误后只输出 P0_02_WORKFLOW_FAILURE_OK。",
 			"调用 action=reuse，workflow=\"workflow-does-not-exist\"，task=\"失败隔离检查\"。",
 		].join("\n"), config);
 		handles.push(workflowFailure);
-		const workflowConflictObservation = await waitForWorkflowCommunityConflict(workflowConflict, WORKFLOW_CONFLICT_WAIT_MS);
+		const workflowConflictObservation = await waitForToolWhileContext(workflowConflict, "flux_issue", "workflow", CONFLICT_WAIT_MS);
 		const [workflowResult, workflowConflictResult, workflowFailureResult] = await Promise.all([workflowPi.result, workflowConflict.result, workflowFailure.result]);
 		const workflowAfterFailedRun = activeEntriesByContext("workflow").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, scope: entry.scope }));
 		const workflowFailureErrors = toolErrors(workflowFailureResult.stdout, "flux_workflow");
@@ -449,7 +470,7 @@ async function main(): Promise<void> {
 				&& marker(workflowResult, "P0_02_WORKFLOW_OK") && marker(workflowConflictResult, "P0_02_WORKFLOW_CONFLICT_OK") && marker(workflowFailureResult, "P0_02_WORKFLOW_FAILURE_OK")
 				&& workflowFailureErrors.some(item => JSON.stringify(item).includes("Workflow not found"))
 				&& workflowAfterFailedRun.length >= 1
-				&& workflowConflictObservation.activeWorkflowEntries.length >= 1
+				&& workflowConflictObservation.activeEntries.length >= 1
 				&& workflowIssueErrors.some(item => JSON.stringify(item).includes("workflow 空间活跃")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Workflow space lease cleanup");
