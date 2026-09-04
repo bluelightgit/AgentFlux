@@ -65,7 +65,7 @@ Message V2 是 Agent 间消息基础设施，提供 direct/group、独立 recipi
 ## 存储与安全
 
 - JSON/JSONL 写入使用文件锁、临时文件、原子替换和损坏 fail-closed。
-- Dead-PID orphan recovery 只有在同一 Task/Execution 没有 active sibling Run、且持久化的 Main/Workflow owner 已退出后，才可通过 Task Registry 同步 terminalize Run、TaskExecution、Task 和 Agent；恢复期间使用 Run Registry fence 阻止新 child 注册。
+- Dead-PID orphan recovery 只有在同一 Task/Execution 没有 active sibling Run、且持久化的 Main/Workflow owner 已退出后，才可通过 Task Registry 同步 terminalize Run、TaskExecution、Task 和 Agent；Run Registry fence 只覆盖已确认需要父级收敛到 Task-store 写入完成的窗口，因 owner/active-context 存活而 defer 时必须释放，尚未收敛的 fence 不得因容量截断被静默淘汰。
 - Run、Task、事件、delivery、dedupe、控制文件和子进程输出必须有容量/保留边界。
 - workspace、lockFiles、Git worktree/独立 checkout 和 bash 门禁是 Host 策略，不是操作系统级沙箱。
 - production 入口是 `dist/extension/entry.js`，子代理入口是 `dist/extension/subagent-entry.js`。

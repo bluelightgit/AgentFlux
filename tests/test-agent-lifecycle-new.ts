@@ -6,6 +6,7 @@ import { allocateParallelAgentBudget, canCompletionProofRecover, runAgent, runAg
 import { createAgent, deleteAgent, deleteSessionAgents, enqueueAgentInstruction, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, listAgents, readAgentLastMessage, readAgentLastMessages, rejectQueuedAgentInstructions, resetAgentStatus, runAgentRecord, sortAgentsByActivity } from "../src/agents/agent-store";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { MessageBus } from "../src/core/message-bus";
+import { registerActiveContext, releaseActiveContext } from "../src/core/active-context";
 import { resolveAgentFluxTeamTaskRuntime } from "../src/core/team-runtime";
 import { finishAgentRun, getAgentRun, heartbeatAgentRun, markAgentRunRunning, markAgentRunStopRequested, reconcileStaleAgentRuns, registerAgentRun, listAgentRuns, updateAgentRunSnapshot } from "../src/core/run-registry";
 import { getTask, getTaskExecution, registerTask } from "../src/core/task-registry";
@@ -375,10 +376,97 @@ async function main(): Promise<void> {
 		});
 		markAgentRunRunning(join(root, ".agentflux"), "orphan-with-live-owner", 99999999, 1);
 		reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		const liveOwnerRunsPath = join(root, ".agentflux", "runtime", "runs.json");
+		const liveOwnerRunsAfterRecovery = JSON.parse(readFileSync(liveOwnerRunsPath, "utf8"));
+		let liveOwnerReplacementRegistered = false;
+		try {
+			registerAgentRun(join(root, ".agentflux"), {
+				id: "orphan-live-owner-replacement", sessionId: "test", agent: "orphan-replacement", role: "implementer",
+				currentTask: "replacement after owner deferral", kind: "persistent", taskId: liveOwnerTaskId, executionId: liveOwnerExecutionId,
+			});
+			liveOwnerReplacementRegistered = true;
+		} finally {
+			if (liveOwnerReplacementRegistered) finishAgentRun(join(root, ".agentflux"), "orphan-live-owner-replacement", { status: "completed" });
+		}
 		check(getAgentRun(join(root, ".agentflux"), "orphan-with-live-owner")?.status === "failed"
 			&& getTask(join(root, ".agentflux"), liveOwnerTaskId)?.status === "running"
-			&& getTaskExecution(join(root, ".agentflux"), liveOwnerExecutionId)?.status === "running",
-			"orphan recovery defers while the persisted Main/Workflow owner is alive");
+			&& getTaskExecution(join(root, ".agentflux"), liveOwnerExecutionId)?.status === "running"
+			&& (liveOwnerRunsAfterRecovery.recoveryFences ?? []).length === 0
+			&& liveOwnerReplacementRegistered,
+			"存活 Main/Workflow owner 推迟 orphan recovery 时释放 fence 且允许 replacement child 注册");
+
+		// 没有 ownerPid 的旧执行通过精确 active-context scope 同样必须释放
+		// recovery fence，不能阻塞后续 replacement/retry child。
+		const activeContextTaskId = "orphan-active-context-task";
+		const activeContextExecutionId = "orphan-active-context-execution";
+		registerTask(join(root, ".agentflux"), "test", {
+			taskId: activeContextTaskId, executionId: activeContextExecutionId, task: "orphan with active context owner", selectedBy: "user", operation: "new",
+			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
+		}, "running");
+		registerActiveContext(root, { name: "workflow:active-context-owner", context: "workflow", scope: activeContextExecutionId, task: "live workflow owner", pid: process.pid });
+		try {
+			registerAgentRun(join(root, ".agentflux"), {
+				id: "orphan-with-active-context-owner", sessionId: "test", agent: "orphan-context-owned", role: "implementer",
+				currentTask: "dead child with active context owner", kind: "persistent", taskId: activeContextTaskId, executionId: activeContextExecutionId,
+			});
+			markAgentRunRunning(join(root, ".agentflux"), "orphan-with-active-context-owner", 99999999, 1);
+			reconcileStaleAgentRuns(join(root, ".agentflux"), { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+			const activeContextRunsAfterRecovery = JSON.parse(readFileSync(liveOwnerRunsPath, "utf8"));
+			let activeContextReplacementRegistered = false;
+			try {
+				registerAgentRun(join(root, ".agentflux"), {
+					id: "orphan-active-context-replacement", sessionId: "test", agent: "orphan-context-replacement", role: "implementer",
+					currentTask: "replacement after active-context deferral", kind: "persistent", taskId: activeContextTaskId, executionId: activeContextExecutionId,
+				});
+				activeContextReplacementRegistered = true;
+			} finally {
+				if (activeContextReplacementRegistered) finishAgentRun(join(root, ".agentflux"), "orphan-active-context-replacement", { status: "completed" });
+			}
+			check(getTask(join(root, ".agentflux"), activeContextTaskId)?.status === "running"
+				&& getTaskExecution(join(root, ".agentflux"), activeContextExecutionId)?.status === "running"
+				&& (activeContextRunsAfterRecovery.recoveryFences ?? []).length === 0
+				&& activeContextReplacementRegistered,
+				"精确 active-context owner 推迟 orphan recovery 时释放 fence 且允许 replacement child 注册");
+		} finally {
+			releaseActiveContext(root, activeContextExecutionId);
+		}
+
+		// 安全 fence 达到容量上限时必须 fail-closed，不能通过 slice 静默
+		// 丢弃最早的未收敛 fence。
+		const fenceCapacityRoot = join(root, "recovery-fence-capacity");
+		const fenceCapacityFluxDir = join(fenceCapacityRoot, ".agentflux");
+		const capacityTaskId = "recovery-capacity-task";
+		const capacityExecutionId = "recovery-capacity-execution";
+		registerTask(fenceCapacityFluxDir, "test", {
+			taskId: capacityTaskId, executionId: capacityExecutionId, task: "recovery fence capacity", selectedBy: "user", operation: "new",
+			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
+		}, "running");
+		registerAgentRun(fenceCapacityFluxDir, {
+			id: "recovery-capacity-dead-run", sessionId: "test", agent: "recovery-capacity-agent", role: "implementer",
+			currentTask: "capacity dead child", kind: "persistent", taskId: capacityTaskId, executionId: capacityExecutionId,
+		});
+		markAgentRunRunning(fenceCapacityFluxDir, "recovery-capacity-dead-run", 99999999, 1);
+		const capacityRunsPath = join(fenceCapacityFluxDir, "runtime", "runs.json");
+		const capacityStore = JSON.parse(readFileSync(capacityRunsPath, "utf8"));
+		capacityStore.recoveryFences = Array.from({ length: 32 }, (_, index) => ({
+			taskId: `occupied-recovery-task-${index}`,
+			executionId: `occupied-recovery-execution-${index}`,
+			runId: `occupied-recovery-run-${index}`,
+			createdAt: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+		}));
+		writeFileSync(capacityRunsPath, JSON.stringify(capacityStore, null, 2));
+		let capacityRejected = false;
+		try {
+			reconcileStaleAgentRuns(fenceCapacityFluxDir, { now: new Date(Date.now() + 31_000), staleAfterMs: 30_000 });
+		} catch (error: any) {
+			capacityRejected = /recovery fence capacity exhausted/.test(String(error?.message ?? error));
+		}
+		const capacityAfter = JSON.parse(readFileSync(capacityRunsPath, "utf8"));
+		check(capacityRejected
+			&& capacityAfter.recoveryFences?.length === 32
+			&& capacityAfter.recoveryFences[0]?.runId === "occupied-recovery-run-0"
+			&& getTask(fenceCapacityFluxDir, capacityTaskId)?.status === "running",
+			"recovery fence 容量耗尽时 fail-closed 且不静默淘汰未收敛 fence");
 
 		const turnLimited = await runAgent({
 			cwd: root, agent: { ...template, name: "turn-limited" }, task: "bounded",

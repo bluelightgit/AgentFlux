@@ -165,6 +165,12 @@ const TERMINAL = new Set<AgentRunStatus>(["completed", "failed", "cancelled", "t
 const ACTIVE = new Set<AgentRunStatus>(["starting", "running", "stop_requested"]);
 const TASK_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 const HEARTBEAT_RECOVERY_ERROR = "runtime heartbeat expired before terminal convergence";
+/**
+ * Recovery fences are deliberately bounded, but an unresolved safety fence must
+ * never be evicted to make room for another one.  When this bound is reached,
+ * recovery fails closed until an existing fence is proven resolved.
+ */
+const MAX_RECOVERY_FENCES = 32;
 const USAGE_FIELDS = ["turns", "input", "output", "cacheRead", "cacheWrite", "contextTokens", "costUsd"] as const;
 
 const createStore = (): AgentRunStore => ({ version: 1, runs: [], reservations: [], recoveryFences: [] });
@@ -218,6 +224,9 @@ const isStore = (value: unknown): value is AgentRunStore => {
 		&& Array.isArray(store.runs)
 		&& store.runs.every(isRunShape)
 		&& (store.reservations === undefined || (Array.isArray(store.reservations) && store.reservations.every(isReservationShape)))
+		// Do not reject an older store merely because it already contains more
+		// fences than the current bound; claimRecoveryFence fails closed until
+		// those records are resolved, while terminal cleanup can still repair it.
 		&& (store.recoveryFences === undefined || (Array.isArray(store.recoveryFences) && store.recoveryFences.every(isRecoveryFenceShape)));
 };
 
@@ -809,31 +818,80 @@ function claimRecoveryFence(fluxDir: string, run: AgentRunRecord, taskId: string
 			&& ACTIVE.has(candidate.status)
 			&& (candidate.taskId === taskId || candidate.executionId === executionId));
 		if (liveSibling) return false;
+		// Repeat the owner check while the Run Registry lock is held.  The caller
+		// also checks before/after this transaction, but this prevents a newly
+		// observed live owner from acquiring a fresh parent-convergence fence.
+		if (isLiveRecoveryOwner(fluxDir, taskId, executionId)) return false;
+		if (fences.length >= MAX_RECOVERY_FENCES) {
+			throw new Error(`Run Registry recovery fence capacity exhausted (${MAX_RECOVERY_FENCES}); existing fences must converge before another recovery can be claimed`);
+		}
+		// Never truncate unresolved fences.  A missing fence would remove the
+		// registration barrier while the corresponding Task-store convergence may
+		// still be in flight.  Capacity exhaustion is intentionally fail-closed.
 		store.recoveryFences = [...fences, {
 			taskId,
 			executionId,
 			runId: run.id,
 			createdAt: new Date().toISOString(),
-		}].slice(-32);
+		}];
 		return true;
 	});
 }
 
-function releaseRecoveryFence(fluxDir: string, taskId: string, executionId: string): void {
+/**
+ * Release either the whole parent fence (after both parent records are
+ * terminal) or only the fence owned by a particular recovered Run when a
+ * deferral is discovered.  The latter prevents one recovery attempt from
+ * clearing another attempt's in-flight barrier.
+ */
+function releaseRecoveryFence(fluxDir: string, taskId: string, executionId: string, runId?: string): void {
 	updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
 		store.recoveryFences = (store.recoveryFences ?? [])
-			.filter(fence => fence.taskId !== taskId || fence.executionId !== executionId);
+			.filter(fence => fence.taskId !== taskId || fence.executionId !== executionId || (runId !== undefined && fence.runId !== runId));
 	});
+}
+
+/**
+ * Re-read parent ownership immediately before a recovery fence is claimed (and
+ * again after the claim).  A live persisted owner or exact active-context
+ * owner means the child is replaceable work, not an orphaned parent.
+ * Missing/corrupt ownership state is treated as live/unknown and therefore
+ * defers recovery rather than widening terminalization authority.
+ */
+function isLiveRecoveryOwner(fluxDir: string, taskId: string, executionId: string): boolean {
+	let execution;
+	try {
+		execution = getTaskExecution(fluxDir, executionId);
+	} catch {
+		return true;
+	}
+	if (!execution || execution.taskId !== taskId) return true;
+	if (typeof execution.ownerPid === "number" && isProcessAlive(execution.ownerPid)) return true;
+	try {
+		return readActiveContext(dirname(fluxDir)).entries.some(entry =>
+			(entry.scope === executionId || entry.scope === taskId) && isProcessAlive(entry.pid));
+	} catch {
+		return true;
+	}
 }
 
 function reconcileRecoveredTask(fluxDir: string, run: AgentRunRecord): void {
 	if (!run.taskId || run.error !== HEARTBEAT_RECOVERY_ERROR
 		|| !run.recentEvents?.some(event => event.type === "heartbeat_expired")) return;
 	const task = getTask(fluxDir, run.taskId);
-	if (!task || TASK_TERMINAL.has(task.status)) return;
+	if (!task) return;
 	const executionId = run.executionId ?? task.executionId;
 	const execution = getTaskExecution(fluxDir, executionId);
-	if (!execution || execution.taskId !== task.id || TASK_TERMINAL.has(execution.status)) return;
+	if (!execution || execution.taskId !== task.id) return;
+	if (TASK_TERMINAL.has(task.status) || TASK_TERMINAL.has(execution.status)) {
+		// A terminal parent is a proof that no replacement may attach, so a fence
+		// left by a prior failed cleanup can be safely removed.  If the two parent
+		// records disagree, preserve the fence and fail closed.
+		if (TASK_TERMINAL.has(task.status) && TASK_TERMINAL.has(execution.status)) {
+			releaseRecoveryFence(fluxDir, task.id, execution.id);
+		}
+		return;
+	}
 
 	// Dead child != dead parent. A Workflow/Main can legitimately still own the
 	// same Task/Execution while one child is being replaced or another sibling is
@@ -842,22 +900,34 @@ function reconcileRecoveredTask(fluxDir: string, run: AgentRunRecord): void {
 	const liveSibling = listAgentRuns(fluxDir)
 		.find(candidate => candidate.id !== run.id && ACTIVE.has(candidate.status)
 			&& (candidate.taskId === task.id || candidate.executionId === execution.id));
-	if (liveSibling || !claimRecoveryFence(fluxDir, run, task.id, execution.id)) return;
-	// Main/Workflow ownership is persisted on the execution when the host starts
-	// a plan. A live owner is stronger evidence than a stale child heartbeat and
-	// must defer recovery even when no other child Run is currently visible.
-	if (typeof execution.ownerPid === "number" && isProcessAlive(execution.ownerPid)) return;
-	// Older records may not have ownerPid. Workflow active-context entries still
-	// provide a durable parent PID and are checked by exact execution/task scope.
-	try {
-		const activeParent = readActiveContext(dirname(fluxDir)).entries.some(entry =>
-			(entry.scope === execution.id || entry.scope === task.id) && isProcessAlive(entry.pid));
-		if (activeParent) return;
-	} catch {
-		// A malformed/unavailable context store must not silently widen recovery;
-		// the explicit Run/owner fences above remain authoritative.
+	if (liveSibling) {
+		// This also heals a fence left by an older recovery implementation, but
+		// never clears a different Run's in-flight fence.
+		releaseRecoveryFence(fluxDir, task.id, execution.id, run.id);
 		return;
 	}
+
+	// Main/Workflow ownership is persisted on the execution when the host starts
+	// a plan. Check it before claiming the fence: a live owner means this child is
+	// replaceable work, not an orphaned parent.  Re-checking after claim closes
+	// the small cross-store race where the owner starts during the first check.
+	if (isLiveRecoveryOwner(fluxDir, task.id, execution.id)) {
+		releaseRecoveryFence(fluxDir, task.id, execution.id, run.id);
+		return;
+	}
+	if (!claimRecoveryFence(fluxDir, run, task.id, execution.id)) {
+		// A false claim can mean a sibling won the race or the owner became live
+		// during the locked check.  Only the latter owns a deferral cleanup.
+		if (isLiveRecoveryOwner(fluxDir, task.id, execution.id)) {
+			releaseRecoveryFence(fluxDir, task.id, execution.id, run.id);
+		}
+		return;
+	}
+	if (isLiveRecoveryOwner(fluxDir, task.id, execution.id)) {
+		releaseRecoveryFence(fluxDir, task.id, execution.id, run.id);
+		return;
+	}
+
 	const priorUsage = execution.usage;
 	let taskStoreConverged = false;
 	try {

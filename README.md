@@ -73,7 +73,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-当前 HEAD 对应的 `npm run verify`、typecheck、production build 和同步 production-dist 复跑均通过；P0-07 四项返工的 controls、Workflow timeout、restart recovery 报告位于 `.agentflux/test-results/`，三份报告均记录匹配的 sourceCommit 与 `changedFiles=[]`，仍等待独立审计后归档。其余 telemetry、fanout、long-run、provider-overload、task-lineage、package-boundary、bound-resume、soak 报告作为独立场景证据保留。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+当前 HEAD 对应的 `npm run verify`、typecheck、production build 和 controls、Workflow timeout、restart recovery production-dist 复跑均通过；recovery fence 的 live-owner defer 泄漏与容量静默截断已修复，并由 Agent lifecycle 回归覆盖，新增 `AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-owner-fence` 验证存活 owner 下的 stale child recovery、fence 清理和 replacement child。其余 telemetry、fanout、long-run、provider-overload、task-lineage、package-boundary、bound-resume、soak 报告作为独立场景证据保留。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 
