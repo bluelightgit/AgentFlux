@@ -31,4 +31,6 @@
 
 提交 `9f41788` 的第二次独立验收确认 deadline 时间戳传播与 stop/steer Core fence 已修复；但 Workflow 子 Run 因父 deadline `timed_out` 时父 Task/Execution 仍误写 `failed`，且单个 stale child 可在同一执行仍有 active Run 时提前把父级写成不可变 failed。独立 restart production 复跑也因未稳定终止 Pi A 而保存 `passed=false`。
 
-提交 `33773c0` 的第三次独立验收确认上述 timeout 映射、active sibling 防护、process-tree kill 证据和 post-stop steer 因果均已闭合，三个 fresh production-dist 场景也独立复跑通过；但 live Main/Workflow owner defer 路径在 claim recovery fence 后直接 return，遗留 fence 并拒绝同父执行的合法 replacement/retry child。因此本归档仍不能作为 P0-07 整体通过结论；当前返工合同唯一见 `docs/development-plan/03-real-validation.md`。
+提交 `33773c0` 的第三次独立验收确认上述 timeout 映射、active sibling 防护、process-tree kill 证据和 post-stop steer 因果均已闭合，三个 fresh production-dist 场景也独立复跑通过；但 live Main/Workflow owner defer 路径在 claim recovery fence 后直接 return，遗留 fence 并拒绝同父执行的合法 replacement/retry child。
+
+后续返工修复了 owner/active-context defer 的 fence 释放，并将 recovery fence 容量改为 fail-closed；确定性 Agent lifecycle 回归和 fresh production owner-fence 场景均证明 parent 状态安全、fence 清空且 replacement child 能完成。该历史阻断已关闭，后续更广的 Workflow/Community/Message V2 验证仍按当前规划推进。
