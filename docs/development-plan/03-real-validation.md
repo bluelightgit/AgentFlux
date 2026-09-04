@@ -10,7 +10,7 @@
 - **实现**：Main persistent Agent 派发、Workflow 执行和 Community Claim 共用项目级 `active-context`；实例用 leaseId/Claim ID 定向释放，跨空间 fail-closed、同空间允许并行。
 - **确定性证据**：`test-active-context.ts` 25 项、`test-p0-02-space-isolation.ts` 25 项；完整 `verify`、typecheck 和 production build 通过，后者含真实子进程 crash 与并行 sibling 不误删断言。
 - **production-dist 证据**：`AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation`；报告 `.agentflux/test-results/p0-02-space-isolation-latest.json`。多个全新 Pi 进程实际观测 Main/Community 同空间并行、失败 Main/Community/Workflow 实例释放自身 lease 且不误删存活 sibling、Main→Workflow/Community、Community→Workflow、Workflow→Community 的显式 toolResult 拒绝、PID/lease 清理和最终无活跃条目；报告记录 provider/model/thinking、PID、lease、退出码、sourceCommit 与 changedFiles。
-- **边界**：本轮报告按执行时工作树记录 changedFiles；若作为 clean-tree 发布证据，应在相应提交后重跑。P0-03 Community 契约、P0-06 Message V2 group 单一路径和更广资源/并行写隔离仍独立推进。
+- **证据状态**：最新报告为 clean-tree production-dist 证据，`sourceCommit` 与执行时 HEAD 一致、`changedFiles=[]`、`passed=true`、`builtExtension=true`；其余 P0-03 Community 契约、P0-06 Message V2 group 单一路径和更广资源/并行写隔离仍独立推进。
 
 ## P2-01 Production Workflow
 
