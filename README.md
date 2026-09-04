@@ -75,7 +75,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-P0-02 项目空间互斥已完成重验：fixture 让 Main/Community sibling 分别保持 120/180 秒、Workflow 保持 180 秒，并在真实 `tool_execution_start` 时确认目标 space lease 仍活跃；marker 只解析最终 assistant `message_end`/`agent_end` 文本。当前 `.agentflux/test-results/p0-02-space-isolation-latest.json` 为 `passed=true`、`builtExtension=true`、`changedFiles=[]`、sourceCommit 匹配 HEAD，Main、Community、Workflow 三阶段均通过并留下显式 toolResult/lease/最终空 active-context 证据。一次 `environment` profile 的 deepseek/off 重跑因 provider 月度额度返回 429，失败报告保留为审计证据，不覆盖当前基于配置 `local` profile（openai-codex/gpt-5.6-luna/max）的通过报告。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+P0-02 Core 空间互斥与独立 production 行为复跑已通过，但第二次独立验收仍为 `rework`：最终 assistant marker 仍使用 substring 匹配，否定句可假阳性；`.agentflux/test-results/p0-02-space-isolation-latest.json` 未保存 Task/Execution/Run/Issue、usage/cost/父谱系，且 11 个 5 KB stdout tail 均无法解析 assistant 终态。当前返工依据见开发规划与 `.agentflux/test-results/p0-02-independent-second-audit-latest.json`。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 

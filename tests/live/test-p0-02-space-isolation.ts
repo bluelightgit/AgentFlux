@@ -7,6 +7,7 @@ import { createWorkflowDefinition } from "../../src/workflows/workflow-registry"
 import type { TaskDAG } from "../../src/workflows/dag-executor";
 import { loadLiveConfig, type LiveConfig } from "./live-config";
 import { hasAssistantFinalMarker, toolExecutionStarts } from "../helpers/pi-json-output";
+import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence } from "../helpers/p0-02-evidence";
 
 /**
  * P0-02 真实多进程空间互斥：
@@ -27,6 +28,20 @@ const MAIN_HOLD_MS = 120_000;
 const COMMUNITY_HOLD_MS = 180_000;
 const WORKFLOW_HOLD_MS = 180_000;
 const CONFLICT_WAIT_MS = 240_000;
+const outputArtifactRoot = join(sourceRoot, ".agentflux", "test-results", `p0-02-space-isolation-artifacts-${Date.now()}-${process.pid}`);
+const EXPECTED_MARKERS: Record<string, string> = {
+	"main-a": "P0_02_MAIN_A_OK",
+	"main-b": "P0_02_MAIN_B_OK",
+	"main-conflict": "P0_02_MAIN_CONFLICT_OK",
+	"main-failure": "P0_02_MAIN_FAILURE_OK",
+	"community-a": "P0_02_COMMUNITY_A_OK",
+	"community-b": "P0_02_COMMUNITY_B_OK",
+	"community-conflict": "P0_02_COMMUNITY_CONFLICT_OK",
+	"community-failure": "P0_02_COMMUNITY_FAILURE_OK",
+	workflow: "P0_02_WORKFLOW_OK",
+	"workflow-community-conflict": "P0_02_WORKFLOW_CONFLICT_OK",
+	"workflow-failure": "P0_02_WORKFLOW_FAILURE_OK",
+};
 
 type ContextName = "main" | "workflow" | "community";
 
@@ -40,10 +55,13 @@ interface PiResult {
 }
 
 interface PiHandle {
+	label: string;
 	child: ChildProcess;
 	result: Promise<PiResult>;
 	snapshot(): { stdout: string; stderr: string };
 }
+
+const outputEvidenceByLabel = new Map<string, any>();
 
 function git(args: string[]): string {
 	try { return execFileSync("git", args, { cwd: sourceRoot, encoding: "utf8", windowsHide: true }).trimEnd(); }
@@ -112,7 +130,7 @@ function launch(
 			resolveResult({ label, pid: child.pid, exitCode: code ?? 1, stdout, stderr, timedOut: false });
 		});
 	});
-	return { child, result, snapshot: () => ({ stdout, stderr }) };
+	return { label, child, result, snapshot: () => ({ stdout, stderr }) };
 }
 
 function activeEntries(): any[] {
@@ -231,15 +249,29 @@ async function waitForToolWhileContext(
 	return observation;
 }
 
-function compactResult(result: PiResult): any {
-	return {
-		label: result.label,
-		pid: result.pid,
-		exitCode: result.exitCode,
-		timedOut: result.timedOut,
-		stdoutTail: result.stdout.slice(-5000),
-		stderrTail: result.stderr.slice(-3000),
-	};
+function compactResult(result: PiResult, expectedMarker?: string): any {
+	const outputEvidence = buildProcessOutputEvidence(result, expectedMarker, sourceRoot, outputArtifactRoot);
+	outputEvidenceByLabel.set(result.label, outputEvidence);
+	return outputEvidence;
+}
+
+/** 在失败或超时路径也保存已经产生的完整输出，避免只留下不可解析的 tail。 */
+function persistPartialOutputEvidence(handles: PiHandle[]): void {
+	for (const handle of handles) {
+		if (outputEvidenceByLabel.has(handle.label)) continue;
+		const snapshot = handle.snapshot();
+		if (!snapshot.stdout && !snapshot.stderr) continue;
+		const partial: PiResult = {
+			label: handle.label,
+			pid: handle.child.pid,
+			exitCode: handle.child.exitCode ?? 124,
+			stdout: snapshot.stdout,
+			stderr: snapshot.stderr,
+			timedOut: handle.child.exitCode === null,
+		};
+		const outputEvidence = buildProcessOutputEvidence(partial, EXPECTED_MARKERS[handle.label], sourceRoot, outputArtifactRoot);
+		outputEvidenceByLabel.set(handle.label, outputEvidence);
+	}
 }
 
 function setup(config: LiveConfig): { workflowId: string; issueIds: string[] } {
@@ -289,6 +321,7 @@ async function main(): Promise<void> {
 	const changedFiles = git(["status", "--porcelain", "--untracked-files=all"])
 		.split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line);
 	const handles: PiHandle[] = [];
+	let fixture: ReturnType<typeof setup> | undefined;
 	let evidence: any = {
 		updatedAt: new Date().toISOString(),
 		branch,
@@ -300,11 +333,12 @@ async function main(): Promise<void> {
 		models: { main: config.mainModel, planner: config.plannerModel, worker: config.workerModel, judge: config.judgeModel },
 		thinking: config.thinking,
 		builtExtension: true,
+		outputArtifactDirectory: outputArtifactRoot,
 	};
 	if (process.env.AGENTFLUX_LIVE_BUILT !== "1") throw new Error("P0-02 live test requires AGENTFLUX_LIVE_BUILT=1");
 	if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js"))) throw new Error("production dist entry is missing; run npm run build first");
 	try {
-		const fixture = setup(config);
+		fixture = setup(config);
 		const extensionEntry = join(fixtureRoot, "dist", "extension", "entry.js");
 
 		// Phase 1: Main space, then a real cross-space rejection and a same-space parallel Run.
@@ -359,7 +393,7 @@ async function main(): Promise<void> {
 			activeAfterFailedRun: activeAfterMainFailure,
 			failedRunErrors: mainFailureErrors,
 			failedRunFacts: mainFailureFacts,
-			processes: [compactResult(mainAResult), compactResult(mainBResult), compactResult(mainConflictResult), compactResult(mainFailureResult)],
+			processes: [compactResult(mainAResult, EXPECTED_MARKERS["main-a"]), compactResult(mainBResult, EXPECTED_MARKERS["main-b"]), compactResult(mainConflictResult, EXPECTED_MARKERS["main-conflict"]), compactResult(mainFailureResult, EXPECTED_MARKERS["main-failure"])],
 			parallelMainCountObserved: 2,
 			conflict: {
 				workflowCalls: toolCalls(mainConflictResult.stdout, "flux_workflow"),
@@ -420,7 +454,7 @@ async function main(): Promise<void> {
 			activeBeforeConflict: communityActiveSnapshot,
 			activeAfterFailedClaim: communityAfterFailedClaim,
 			failedClaimErrors: communityFailureErrors,
-			processes: [compactResult(communityAResult), compactResult(communityBResult), compactResult(communityConflictResult), compactResult(communityFailureResult)],
+			processes: [compactResult(communityAResult, EXPECTED_MARKERS["community-a"]), compactResult(communityBResult, EXPECTED_MARKERS["community-b"]), compactResult(communityConflictResult, EXPECTED_MARKERS["community-conflict"]), compactResult(communityFailureResult, EXPECTED_MARKERS["community-failure"])],
 			parallelCommunityCountObserved: 2,
 			conflict: { workflowCalls: toolCalls(communityConflictResult.stdout, "flux_workflow"), workflowErrors: communityWorkflowErrors, observation: communityConflictObservation },
 			passed: communityAResult.exitCode === 0 && communityBResult.exitCode === 0 && communityConflictResult.exitCode === 0 && communityFailureResult.exitCode === 0
@@ -464,7 +498,7 @@ async function main(): Promise<void> {
 			conflictObservation: workflowConflictObservation,
 			activeAfterFailedRun: workflowAfterFailedRun,
 			failedRunErrors: workflowFailureErrors,
-			processes: [compactResult(workflowResult), compactResult(workflowConflictResult), compactResult(workflowFailureResult)],
+			processes: [compactResult(workflowResult, EXPECTED_MARKERS.workflow), compactResult(workflowConflictResult, EXPECTED_MARKERS["workflow-community-conflict"]), compactResult(workflowFailureResult, EXPECTED_MARKERS["workflow-failure"])],
 			conflict: { issueCalls: toolCalls(workflowConflictResult.stdout, "flux_issue"), issueErrors: workflowIssueErrors },
 			passed: workflowResult.exitCode === 0 && workflowConflictResult.exitCode === 0 && workflowFailureResult.exitCode === 0
 				&& !workflowResult.timedOut && !workflowConflictResult.timedOut && !workflowFailureResult.timedOut
@@ -476,17 +510,32 @@ async function main(): Promise<void> {
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Workflow space lease cleanup");
 
+		const coreFacts = snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId);
+		const outputEvidence = [...outputEvidenceByLabel.values()];
+		const outputEvidenceConsistency = validateProcessOutputEvidence(outputEvidence, EXPECTED_MARKERS, sourceRoot);
+		Object.assign(evidence, coreFacts, { outputEvidence, outputEvidenceConsistency });
 		evidence.updatedAt = new Date().toISOString();
 		evidence.wallClockMs = Date.now() - startedAt;
-		evidence.finalActiveEntries = activeEntries();
-		evidence.passed = evidence.mainPhase.passed && evidence.communityPhase.passed && evidence.workflowPhase.passed && evidence.finalActiveEntries.length === 0;
+		evidence.finalActiveEntries = coreFacts.activeContextAtSnapshot;
+		evidence.passed = evidence.mainPhase.passed && evidence.communityPhase.passed && evidence.workflowPhase.passed
+			&& evidence.finalActiveEntries.length === 0
+			&& coreFacts.coreFactConsistency.passed
+			&& outputEvidenceConsistency.passed;
 		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		if (!evidence.passed) throw new Error(`P0-02 live space isolation evidence failed; report=${reportPath}`);
 		console.log(JSON.stringify(evidence, null, 2));
 	} catch (error) {
+		persistPartialOutputEvidence(handles);
+		evidence.outputEvidence = [...outputEvidenceByLabel.values()];
+		evidence.outputEvidenceConsistency = validateProcessOutputEvidence(evidence.outputEvidence, EXPECTED_MARKERS, sourceRoot);
+		try {
+			if (fixture) Object.assign(evidence, snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId));
+		} catch (snapshotError) {
+			evidence.coreFactsSnapshotError = String(snapshotError instanceof Error ? snapshotError.message : snapshotError);
+		}
 		evidence.updatedAt = new Date().toISOString();
 		evidence.wallClockMs = Date.now() - startedAt;
-		evidence.finalActiveEntries = activeEntries();
+		try { evidence.finalActiveEntries = activeEntries(); } catch { evidence.finalActiveEntries = []; }
 		evidence.passed = false;
 		evidence.error = String(error instanceof Error ? error.message : error);
 		try {
@@ -495,9 +544,33 @@ async function main(): Promise<void> {
 		} catch {}
 		throw error;
 	} finally {
+		persistPartialOutputEvidence(handles);
 		for (const handle of handles) stopTree(handle.child);
-		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch (error) { console.warn(`P0-02 fixture cleanup deferred: ${String(error)}`); }
-		config.cleanup();
+		let workspaceRemoved = false;
+		let cleanupError: string | undefined;
+		try {
+			rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+			workspaceRemoved = !existsSync(fixtureRoot);
+		} catch (error) {
+			cleanupError = String(error instanceof Error ? error.message : error);
+			console.warn(`P0-02 fixture cleanup deferred: ${cleanupError}`);
+		}
+		try { config.cleanup(); } catch (error) { cleanupError = cleanupError ?? String(error instanceof Error ? error.message : error); }
+		evidence.cleanup = {
+			workspacePath: fixtureRoot,
+			workspaceRemoved,
+			artifactDirectory: outputArtifactRoot,
+			passed: workspaceRemoved && !cleanupError,
+			error: cleanupError ?? null,
+		};
+		if ((!workspaceRemoved || cleanupError) && evidence.passed) {
+			evidence.passed = false;
+			evidence.error = cleanupError ?? `fixture workspace was not removed: ${fixtureRoot}`;
+		}
+		try {
+			writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
+			if (evidence.passed !== true) writeFileSync(failureReportPath, JSON.stringify({ ...evidence, failureReportPath }, null, 2));
+		} catch (error) { console.warn(`P0-02 report finalization failed: ${String(error)}`); }
 	}
 }
 

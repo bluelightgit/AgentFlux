@@ -1,6 +1,6 @@
 # P0-02 项目空间互斥与实例 lease
 
-状态：已完成（2026-09-04 重验通过）
+状态：核心实现与真实行为重验通过；2026-09-04 第二次独立验收未通过，当前返工见开发规划
 
 ## 目标摘要
 
@@ -39,10 +39,10 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 
 实现阶段报告 `p0-02-space-isolation-pre-independent-audit.json` 和后续失败报告均作为历史证据保留；失败尝试未被删除，其中一次 environment profile 的 deepseek/off 运行因 provider 月度额度返回 429。
 
-## 重验结论
+## 重验与第二次独立验收结论
 
-2026-09-04 修复 fixture 后，在 clean current HEAD 上重新 build，并以配置 `local` profile 的 `openai-codex/gpt-5.6-luna`、`thinking=max` 启动多个全新 production Pi。Main/Community sibling 分别保持 120/180 秒，Workflow 保持 180 秒；三阶段冲突均在真实 `tool_execution_start` 时核验目标 lease 仍活跃，最终 assistant marker、显式 toolResult、进程退出和空 active-context 均一致。当前 `.agentflux/test-results/p0-02-space-isolation-latest.json` 为 `passed=true`、`builtExtension=true`、`changedFiles=[]` 且 sourceCommit 匹配 HEAD。
+2026-09-04 修复 fixture 后，在 clean current HEAD 上重新 build，并以 `openai-codex/gpt-5.6-luna`、`thinking=max` 启动多个全新 production Pi。Main/Community sibling 分别保持 120/180 秒，Workflow 保持 180 秒；三阶段冲突均在真实 `tool_execution_start` 时核验目标 lease 仍活跃，显式 toolResult、进程退出和空 active-context 均一致。实现方报告与随后独立复跑都在 clean HEAD `293d1b9` 上返回 `passed=true`；独立运行耗时 570.155 秒。
 
-此前 `p0-02-independent-audit-latest.json` 及带时间戳的失败报告不被覆盖，保留用于审计追溯。
+第二次独立验收仍判 `rework`：最终 assistant marker 只做 substring 匹配，否定句会假阳性；passing 报告没有保存 Task/Execution/Run/Issue、usage/cost 和父谱系；11 个 5 KB stdout tail 均因超长 JSONL 截断而解析不到 assistant 终态。Core 行为通过不替代可审计结项证据。当前要求和结论只看 `docs/development-plan/01-entry-and-safety.md`、`03-real-validation.md` 与 `.agentflux/test-results/p0-02-independent-second-audit-latest.json`。
 
-P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。
+此前独立审计、实现方 passing 报告和所有带时间戳失败报告均保留用于追溯。P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。

@@ -5,7 +5,7 @@
  * 验收 marker 不能在原始 stdout 上做 includes，否则 prompt 回显会造成假阳性。
  */
 
-function parseJsonLines(output: string): any[] {
+export function parseJsonLines(output: string): any[] {
 	return output.split(/\r?\n/).flatMap(line => {
 		if (!line.trim()) return [];
 		try { return [JSON.parse(line)]; } catch { return []; }
@@ -51,9 +51,39 @@ export function assistantFinalText(stdout: string, stderr = ""): string {
 	return messages.at(-1) ?? "";
 }
 
-/** marker 只有出现在最终 assistant 消息正文中才算通过。 */
+/**
+ * 终态 marker 使用最终 assistant 正文的 trim 后精确匹配。
+ * 不能使用 includes：否定句或模型复述 marker 都不是完成凭证。
+ */
 export function hasAssistantFinalMarker(stdout: string, stderr: string, marker: string): boolean {
-	return assistantFinalText(stdout, stderr).includes(marker);
+	const expected = marker.trim();
+	return expected.length > 0 && assistantFinalText(stdout, stderr).trim() === expected;
+}
+
+export interface AssistantOutputEvidence {
+	assistantMessageCount: number;
+	finalAssistantText: string;
+	parseable: boolean;
+	expectedMarker?: string;
+	markerMatched?: boolean;
+	markerMatchRule?: "trimmed-exact";
+}
+
+/** 生成可持久化、可独立复核的 assistant 终态判定，不依赖输出 tail。 */
+export function assistantOutputEvidence(stdout: string, stderr = "", marker?: string): AssistantOutputEvidence {
+	const messages = [...assistantMessageTexts(stdout), ...assistantMessageTexts(stderr)];
+	const finalAssistantText = messages.at(-1) ?? "";
+	const evidence: AssistantOutputEvidence = {
+		assistantMessageCount: messages.length,
+		finalAssistantText,
+		parseable: messages.length > 0,
+	};
+	if (marker !== undefined) {
+		evidence.expectedMarker = marker;
+		evidence.markerMatched = finalAssistantText.trim() === marker.trim() && marker.trim().length > 0;
+		evidence.markerMatchRule = "trimmed-exact";
+	}
+	return evidence;
 }
 
 /** 在实时 JSONL 中识别已经开始执行的具体工具调用。 */

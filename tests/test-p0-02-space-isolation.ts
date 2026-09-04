@@ -1,11 +1,12 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createAgent, runAgentRecord, type AgentRunContext } from "../src/agents/agent-store";
 import { readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
-import { assistantFinalText, hasAssistantFinalMarker, toolExecutionStarts } from "./helpers/pi-json-output";
+import { assistantFinalText, assistantMessageTexts, assistantOutputEvidence, hasAssistantFinalMarker, toolExecutionStarts } from "./helpers/pi-json-output";
+import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence } from "./helpers/p0-02-evidence";
 
 let passed = 0;
 function check(value: unknown, message: string): void {
@@ -93,6 +94,30 @@ async function main(): Promise<void> {
 		const finalAssistantOutput = JSON.stringify({ type: "toolResult", toolName: "flux_issue", content: [{ type: "text", text: finalMarker }] }) + "\n"
 			+ JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: finalMarker }] } }) + "\n";
 		check(assistantFinalText(finalAssistantOutput) === finalMarker && hasAssistantFinalMarker(finalAssistantOutput, "", finalMarker), "marker 只采信最终 assistant message_end 文本");
+		const negatedFinalOutput = JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `条件未满足，因此不会输出 ${finalMarker}` }] } }) + "\n";
+		check(!hasAssistantFinalMarker(negatedFinalOutput, "", finalMarker), "最终 assistant 否定提及 marker 不能通过精确判定");
+		const whitespaceFinalOutput = JSON.stringify({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: `  ${finalMarker} \n` }] } }) + "\n";
+		check(hasAssistantFinalMarker(whitespaceFinalOutput, "", finalMarker), "最终 assistant marker 允许首尾空白但不允许额外文本");
+		const persistedAssistantEvidence = JSON.parse(JSON.stringify(assistantOutputEvidence(finalAssistantOutput, "", finalMarker)));
+		check(persistedAssistantEvidence.parseable === true && persistedAssistantEvidence.finalAssistantText === finalMarker && persistedAssistantEvidence.markerMatched === true && persistedAssistantEvidence.markerMatchRule === "trimmed-exact", "保存的终态 assistant/marker 证据可独立复核");
+		const largeTrailingEventOutput = finalAssistantOutput + JSON.stringify({ type: "provider_trace", payload: "x".repeat(12_000) }) + "\n";
+		const reportOutputEvidence = buildProcessOutputEvidence({ label: "report-proof", pid: process.pid, exitCode: 0, stdout: largeTrailingEventOutput, stderr: "", timedOut: false }, finalMarker, root, join(root, "report-artifacts"));
+		check(assistantMessageTexts(reportOutputEvidence.stdoutTail ?? "").length === 0 && validateProcessOutputEvidence([JSON.parse(JSON.stringify(reportOutputEvidence))], { "report-proof": finalMarker }, root).passed === true && reportOutputEvidence.finalAssistantText === finalMarker, "报告 artifact 在 tail 截断后仍可独立复核最终 marker");
+		const coreRoot = mkdtempSync(join(tmpdir(), "agentflux-p0-02-core-evidence-"));
+		try {
+			const runtime = join(coreRoot, ".agentflux", "runtime");
+			mkdirSync(runtime, { recursive: true });
+			const now = new Date().toISOString();
+			writeFileSync(join(runtime, "tasks.json"), JSON.stringify({ version: 2, tasks: [{ id: "task-a", executionId: "exec-a", sessionId: "session-a", task: "audit task", selectedBy: "user", operation: "new", status: "completed", createdAt: now, updatedAt: now }], executions: [{ id: "exec-a", taskId: "task-a", sessionId: "session-a", operation: "new", status: "completed", costUsd: 0.01, usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01, model: "audit-model" }, createdAt: now, updatedAt: now, finishedAt: now }] }));
+			writeFileSync(join(runtime, "runs.json"), JSON.stringify({ version: 1, runs: [{ id: "run-a", taskId: "task-a", executionId: "exec-a", sessionId: "session-a", agent: "agent-a", role: "assistant", currentTask: "audit", kind: "persistent", status: "completed", attempt: 0, turns: 1, input: 2, output: 1, cacheRead: 0, cacheWrite: 0, contextTokens: 3, costUsd: 0.01, phase: "terminal", health: "healthy", lastProgressAt: now, lastProgressType: "message", lastProgressSummary: "done", lastActivityAt: now, lastActivityType: "terminal", lastActivitySummary: "completed", createdAt: now, updatedAt: now, heartbeatAt: now, finishedAt: now }] }));
+			writeFileSync(join(runtime, "agents.json"), JSON.stringify({ agents: [{ id: "agent-a", name: "agent-a", scope: "project", role: "assistant", roles: ["assistant"], status: "idle", lineage: { origin: "fresh" }, callCount: 1, totalCostUsd: 0.01, capabilityGeneration: 1, createdAt: now, updatedAt: now }] }));
+			writeFileSync(join(coreRoot, ".agentflux", "issues.json"), JSON.stringify({ issues: [{ id: "issue-a", title: "audit issue", description: "audit", status: "open", createdBy: "main", createdAt: now, updatedAt: now, acceptanceCriteria: [], comments: [], claims: [], proposals: [], timeline: [], costUsd: 0 }] }));
+			writeFileSync(join(runtime, "workflows.json"), JSON.stringify({ version: 1, definitions: [{ id: "workflow-a", name: "workflow-a", version: 1, description: "audit", dag: { description: "audit", nodes: [] }, createdAt: now, updatedAt: now }] }));
+			const coreEvidence = snapshotP002CoreFacts(coreRoot, ["issue-a"], "workflow-a");
+			check(coreEvidence.coreFactConsistency.passed === true && coreEvidence.tasks.length === 1 && coreEvidence.executions.length === 1 && coreEvidence.runs.length === 1 && coreEvidence.agents.length === 1 && coreEvidence.issues.length === 1 && coreEvidence.parentLineage.tasks[0].parentTaskId === null && typeof coreEvidence.costUsdTotal === "number", "报告保存 Task/Execution/Run/Agent/Issue、usage/cost 与父谱系事实");
+		} finally {
+			rmSync(coreRoot, { recursive: true, force: true });
+		}
 		const toolStartOutput = JSON.stringify({ type: "tool_execution_start", toolName: "flux_issue", toolCallId: "call-live", args: { action: "claim" } }) + "\n";
 		check(toolExecutionStarts(toolStartOutput, "flux_issue").length === 1, "冲突因果证据只采信真实 tool_execution_start 事件");
 
@@ -127,7 +152,7 @@ async function main(): Promise<void> {
 		const normalLongResult = await normalLongRun;
 		check(normalLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "long Main 完成后清空剩余 space lease");
 
-		const processMain = startContextProcess(root, "main", "process-main", 700);
+		const processMain = startContextProcess(root, "main", "process-main", 2_000);
 		const processMainResult = await readProcessResult(processMain);
 		check(processMainResult.ok === true, "独立进程可以原子注册 Main space lease");
 		const processConflict = startContextProcess(root, "workflow", "process-workflow-conflict", 100);
@@ -175,7 +200,7 @@ async function main(): Promise<void> {
 		const failureLongResult = await failureLongRun;
 		check(failureLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "failure long sibling 完成后清空剩余 lease");
 
-		const crashSibling = startContextProcess(root, "main", "process-crash-sibling", 1200);
+		const crashSibling = startContextProcess(root, "main", "process-crash-sibling", 3_000);
 		const crashSiblingResult = await readProcessResult(crashSibling);
 		check(crashSiblingResult.ok === true, "真实 crash 场景先注册 sibling lease");
 		const crashed = startContextProcess(root, "main", "process-crashed", 250, "crash");

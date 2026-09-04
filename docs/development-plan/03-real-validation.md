@@ -4,13 +4,14 @@
 
 本文件只记录需要 production dist、全新 Pi/Provider 或长时运行才能完成的验证任务。P2 不是实现完成后的末尾阶段：除 P2-05 长时 soak 外，各场景在对应 P0/P1 实现具备条件后立即执行，真实失败直接阻止该任务结项。
 
-## P0-02 项目空间互斥真实验证
+## P0-02 项目空间互斥第二次独立验收返工
 
-- **状态**：已完成重验（2026-09-04）。
-- **实现现状**：Main persistent Agent 派发、Workflow 执行和 Community Claim 共用项目级 `active-context`；实例用 leaseId/Claim ID 定向释放，跨空间 fail-closed、同空间允许并行。fixture 将 Main/Community sibling 保持 120/180 秒、Workflow 保持 180 秒，并在真实冲突工具 `tool_execution_start` 时核验目标 lease 仍活跃；marker 只解析最终 assistant `message_end`/`agent_end` 文本。
-- **确定性证据**：`test-active-context.ts` 25、`test-p0-02-space-isolation.ts` 28、Main routing 36、Community 41/22；完整 `npm run verify`、独立 typecheck、production build、dist 入口和 diff 检查通过，且 marker prompt 回显反例不会通过。
-- **production-dist 证据**：`.agentflux/test-results/p0-02-space-isolation-latest.json` 为 clean current-HEAD 报告，`passed=true`、`builtExtension=true`、`changedFiles=[]`、sourceCommit 匹配 HEAD；Main、Community、Workflow 三阶段均通过，保存了 Task/Execution/Run/Issue、PID、lease、真实冲突 toolResult 和最终空 active-context。通过运行使用 `tests/live/live-test-config.json` 的 `local` profile（openai-codex/gpt-5.6-luna、thinking=max）；一次 environment profile 的 deepseek/off 运行因 provider 月度额度 429 失败，失败报告保留为诊断证据。
-- **验收边界**：本项不把自然语言 marker 或启动时的 lease 快照当作事实；后续 P0-03/P0-06 和更广 Community/Message V2、资源容量、并行写隔离仍按各自规划推进。
+- **状态**：独立验收未通过（2026-09-04）；Core 行为与 production 冲突同步通过，判定和持久证据仍不满足结项要求。
+- **行为证据**：clean HEAD `293d1b9` 上完整 `verify`、独立 typecheck/build、dist/diff 门禁通过。独立全新 production Pi 使用 `openai-codex/gpt-5.6-luna`、`thinking=max` 运行 570.155 秒，Main、Community、Workflow 三阶段均通过；4 个冲突工具开始事件均在目标 lease 存活时捕获，显式 toolResult 拒绝、失败 sibling 保留、11 个进程正常退出和最终空 active-context 均成立。默认 deepseek 先前明确返回月度额度 429，故本轮使用可用模型完成多步工具链验证。
+- **判定缺陷**：`hasAssistantFinalMarker()` 仍用 substring 匹配；final assistant 的否定句只要含 marker 就会通过。必须改为 trim 后精确相等或结构化 receipt，并覆盖 final assistant 自身否定提及 marker 的反例。
+- **持久证据缺陷**：当前 passing 报告没有 `tasks`、`executions`、`runs`、`issues`、`usage`、`costUsd`、`parentTaskId` 或 `parentExecutionId`；workspace 清理后不可恢复，和本文件统一要求冲突。必须在 cleanup 前保存并断言 Core Registry、谱系、模型、usage/cost 与失败原因。
+- **截断缺陷**：`compactResult` 只保存最后 5 KB，Codex 加密 reasoning 使每个 JSONL 事件可能超过 5 KB；本轮 11 个 stdout tail 的结构化 assistant 消息解析数全部为 0。必须从完整输出预提取 final assistant/精确 marker 结果，并保留完整输出 artifact 指针；报告级测试要证明保存后的终态证据可复核。
+- **当前报告**：`.agentflux/test-results/p0-02-space-isolation-latest.json` 是行为通过证据，`.agentflux/test-results/p0-02-independent-second-audit-latest.json` 是结论 `rework` 的当前审计依据；此前实现方 passing 报告保存为 `p0-02-space-isolation-pre-second-independent-audit.json`。
 
 ## P2-01 Production Workflow
 
