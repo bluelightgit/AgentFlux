@@ -37,7 +37,7 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 - Workflow 阶段观测真实 Workflow lease；无效 selector 的失败 Workflow 释放自身 lease 而保留正常 Workflow lease；Community Claim 尝试收到 `workflow` 空间拒绝；正常 Workflow 节点完成并释放 lease。
 - 最终 `active-context` 无活跃条目，所有 Pi 进程 exit code 为 0，报告 `passed=true`，并记录每个冲突/失败工具调用与结果、PID、lease、模型配置和失败原因。
 
-当前报告 `p0-02-space-isolation-latest.json` 为 production-dist clean-tree 证据：`sourceCommit=8cb58936def511f24a9e331aac0ca4d17c9d1941` 与执行时 HEAD 一致，`builtExtension=true`、`passed=true`、`changedFiles=[]`。
+当前报告 `p0-02-space-isolation-latest.json` 为 production-dist clean-tree 证据：`sourceCommit` 与执行时 HEAD 一致，`builtExtension=true`、`passed=true`、`changedFiles=[]`。
 
 ## 后续边界
 
