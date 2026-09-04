@@ -49,7 +49,7 @@ Core 是任务、Agent、Workflow、Issue、消息、权限和运行状态的事
 | `/flux status` | 查看当前运行和状态 |
 | `/flux usage` | 查看 Main usage 和成本 |
 
-Workflow 支持命令/TUI 新建、运行、复用、修改、删除和 planner/DAG 执行；当前开发规划继续收口空间互斥、Community 和真实链路边界。
+Workflow 支持命令/TUI 新建、运行、复用、修改、删除和 planner/DAG 执行；当前开发规划继续收口 P0-03 Community、P0-06 Message V2 和真实链路边界。
 
 ## 验证
 
@@ -64,6 +64,8 @@ AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-fanout
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-long
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-provider-overload
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-restart-recovery
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-owner-fence
+AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-02-space-isolation
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-task-lineage
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-package-boundary
 AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-07-soak
@@ -73,7 +75,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-当前 HEAD 对应的 `npm run verify`、typecheck、production build 和 controls、Workflow timeout、restart recovery、owner-fence production-dist 复跑均通过；owner-fence 报告 `p0-07-owner-fence-latest.json` 为 `passed=true`、`builtExtension=true`、`changedFiles=[]` 且 sourceCommit 与 HEAD 匹配，证明 live owner defer 会清理 fence 并允许 replacement child 完成。recovery fence 的容量边界也由 Agent lifecycle 回归覆盖。其余 telemetry、fanout、long-run、provider-overload、task-lineage、package-boundary、bound-resume、soak 报告作为独立场景证据保留。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+P0-02 项目空间互斥已完成：Main persistent Agent 派发、Workflow 和 Community Claim 共用 active-context/lease，跨空间拒绝、同空间并行、失败/取消/deadline/crash 的实例级清理和 surviving sibling 不误删由 `test-active-context.ts`、`test-p0-02-space-isolation.ts` 与多 Pi production-dist 报告 `.agentflux/test-results/p0-02-space-isolation-latest.json` 覆盖。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档：`npm run verify`、typecheck、production build 和 controls、Workflow timeout、restart recovery、owner-fence production-dist 复跑均通过；四个 fresh production 场景统一使用 `openai-codex/gpt-5.6-luna`、`thinking=max`，latest 报告均记录 `passed=true`、`builtExtension=true`、`changedFiles=[]` 和匹配的 sourceCommit。其余 telemetry、fanout、long-run、provider-overload、task-lineage、package-boundary、bound-resume、soak 报告作为独立场景证据保留。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 

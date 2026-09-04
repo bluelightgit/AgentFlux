@@ -4,6 +4,7 @@ import { join } from "node:path";
 import agentFlux from "../src/entry";
 import { createAgentFluxTaskEnvelope, encodeAgentFluxTaskEnvelope } from "../src/core/task-envelope";
 import { getTask } from "../src/core/task-registry";
+import { readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
 import { createWorkflowDefinition, reviseWorkflowDefinition } from "../src/workflows/workflow-registry";
 
 type Handler = (...args: any[]) => any;
@@ -59,6 +60,14 @@ async function main(): Promise<void> {
 		await emit(pi, "agent_settled", {}, ctx);
 		const directEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line)).filter(event => event.type === "task.execution");
 		check(directEvents.some(event => event.selectedBy === "main_agent" && event.action === "completed" && !("workStyle" in event)), "自然任务记录为 Main Agent 执行且不携带工作方式");
+		const mainSpaceLease = registerActiveContext(root, { name: "main-workflow-conflict", context: "main", scope: "main-workflow-conflict", task: "main dispatch" });
+		await checkRejects(
+			() => pi.tools.get("flux_workflow").execute("workflow-space-conflict", { action: "reuse", workflow: savedWorkflow.id, task: "workflow conflict" }),
+			/main 空间活跃/,
+			"Workflow 入口使用统一 active-context 拒绝活跃 Main 空间",
+		);
+		check(readActiveContext(root).entries.some(entry => entry.leaseId === mainSpaceLease.leaseId), "Workflow 冲突不会误删 Main lease");
+		releaseActiveContext(root, mainSpaceLease.leaseId);
 		const workflowList = await pi.tools.get("flux_workflow").execute("workflow-list", { action: "list" });
 		check(workflowList.content[0].text.includes("empty-review"), "Main 可列出已保存 Workflow");
 		const workflowShow = await pi.tools.get("flux_workflow").execute("workflow-show", { action: "show", workflow: savedWorkflow.id });
@@ -156,6 +165,7 @@ async function main(): Promise<void> {
 		await emit(pi, "before_agent_start", { prompt: "复用保存的流程执行", systemPrompt: "base", systemPromptOptions: {} }, ctx);
 		const reusedWorkflow = await pi.tools.get("flux_workflow").execute("workflow-reuse", { action: "reuse", workflow: savedWorkflow.id });
 		check(reusedWorkflow.content[0].text.includes("[DAG Execution: PASSED]"), "已保存 Workflow 可跳过 planner 直接创建新执行");
+		check(readActiveContext(root).entries.length === 0, "Workflow 正常完成后释放自身 space lease");
 		await checkRejects(
 			() => pi.tools.get("flux_workflow").execute("workflow-repeated", { action: "reuse", workflow: savedWorkflow.id }),
 			/Workflow execution already started/,

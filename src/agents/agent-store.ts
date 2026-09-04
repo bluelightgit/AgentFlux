@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonStore, updateJsonStore } from "../core/json-store";
 import type { PricingTable } from "../core/pricing";
+import { registerActiveContext, releaseActiveContext, type SpaceContext } from "../core/active-context";
 import { assertSafePathSegment } from "../core/safe-path";
 import type { AgentRecord, AgentScope, AgentStatus, ThinkingLevel } from "../core/types";
 import { getAgentRun, listAgentRuns, type AgentRunRecord } from "../core/run-registry";
@@ -50,6 +51,8 @@ export interface AgentRunContext {
 	health?: RunHealthConfig;
 	lockFiles?: string[];
 	invocationOverride?: { command: string; args: string[] };
+	/** 当前 Agent 派发所属空间；设置后以具体 lease 参与项目级互斥。 */
+	space?: SpaceContext;
 }
 
 function registryPath(cwd: string, scope: AgentScope): string {
@@ -391,7 +394,7 @@ function findSingle(cwd: string, selector: string, ownerSessionId?: string): Age
  * busy 时由调用方通过 enqueueAgentInstruction 将指令放入 Message V2 pending 队列。
  * 同一 Agent 可在每次 Run 中选择其已注册的允许角色。
  */
-export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void, onHealthChange?: (event: { health: string; reason?: string; warning: boolean }) => void): Promise<AgentRunResult> {
+async function runAgentRecordCore(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void, onHealthChange?: (event: { health: string; reason?: string; warning: boolean }) => void): Promise<AgentRunResult> {
 	assertModelOverride(context.modelsConfig, overrides?.model);
 	if (overrides?.thinking !== undefined && !THINKING_LEVELS.includes(overrides.thinking)) {
 		throw new Error(`Unknown thinking level: ${overrides.thinking}. Use one of: ${THINKING_LEVELS.join(", ")}.`);
@@ -505,6 +508,27 @@ export async function runAgentRecord(selector: string, task: string, context: Ag
 	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: completed.id, agent: completed.name, kind: "subagent", origin: completed.lineage.origin, status: completed.status, action: completed.status === "idle" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed", role: selectedRole });
 	onStatusChange?.(completed.status, completed);
 	return result;
+}
+
+/**
+ * Main 派发的 persistent Agent 运行统一持有 main-space lease；Workflow/测试
+ * 可省略 space，避免把节点级执行与外层 Workflow lease 重复计数。
+ */
+export async function runAgentRecord(selector: string, task: string, context: AgentRunContext, signal?: AbortSignal, sessionDir?: string, overrides?: AgentRunOverrides, onStatusChange?: (status: string, record: AgentRecord) => void, onProgress?: (event: { type: "message" | "tool"; text: string }) => void, onHealthChange?: (event: { health: string; reason?: string; warning: boolean }) => void): Promise<AgentRunResult> {
+	let lease: ReturnType<typeof registerActiveContext> | undefined;
+	try {
+		if (context.space) {
+			lease = registerActiveContext(context.cwd, {
+				name: `${context.space}:${context.sessionId}:${randomUUID()}`,
+				context: context.space,
+				scope: context.executionId ?? context.taskId ?? context.sessionId,
+				task,
+			});
+		}
+		return await runAgentRecordCore(selector, task, context, signal, sessionDir, overrides, onStatusChange, onProgress, onHealthChange);
+	} finally {
+		if (lease) releaseActiveContext(context.cwd, lease.leaseId);
+	}
 }
 
 /** 会话结束清理：删除本会话创建的 session 作用域 Agent（运行中保留）。 */

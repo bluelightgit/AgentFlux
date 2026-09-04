@@ -317,7 +317,7 @@ try {
 		assert.strictEqual(getIssue(root, issue.id), undefined);
 		// 认领时注册的 community 空间条目随删除释放，避免幽灵占用
 		check("deleting a stalled issue releases its community space entry", () => {
-			assert.ok(!readActiveContext(root).entries.some(entry => entry.name === `issue:${issue.id}`));
+			assert.ok(!readActiveContext(root).entries.some(entry => entry.name === `issue:${issue.id}` || entry.name.startsWith(`issue:${issue.id}:`)));
 		});
 	});
 

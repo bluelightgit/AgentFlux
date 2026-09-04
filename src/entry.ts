@@ -335,7 +335,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		try {
 			return await run();
 		} finally {
-			releaseActiveContext(cwd, entry.name);
+			releaseActiveContext(cwd, entry.leaseId);
 		}
 	}
 
@@ -383,6 +383,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			parentMaxInputTokens: parentPlan?.budget.maxInputTokens ?? runtime.config.budget.max_input_tokens_per_task,
 			parentMaxParallel: parentPlan?.budget.maxParallel ?? runtime.config.budget.max_parallel_agents,
 			health: runtime.config.health,
+			space: "main",
 		};
 	};
 
@@ -467,6 +468,15 @@ export default function agentFlux(pi: ExtensionAPI) {
 	};
 
 	async function runWorkflow(
+		plan: TaskExecutionPlan,
+		signal?: AbortSignal,
+		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string } = {},
+	): Promise<DAGExecutionResult> {
+		if (!runtime) throw new Error("AgentFlux is not initialized");
+		return runWorkflowWithContext(runtime.cwd, plan, () => runWorkflowInternal(plan, signal, request));
+	}
+
+	async function runWorkflowInternal(
 		plan: TaskExecutionPlan,
 		signal?: AbortSignal,
 		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string } = {},

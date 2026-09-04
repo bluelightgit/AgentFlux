@@ -1,6 +1,6 @@
 # P0-07 Agent 运行控制、健康监控与聚合预算
 
-状态：核心实现归档；2026-09-02 独立验收未通过，返工见当前 `docs/development-plan/03-real-validation.md`
+状态：完成；2026-09-04 第四次独立验收通过
 
 ## 目标摘要
 
@@ -33,4 +33,6 @@
 
 提交 `33773c0` 的第三次独立验收确认上述 timeout 映射、active sibling 防护、process-tree kill 证据和 post-stop steer 因果均已闭合，三个 fresh production-dist 场景也独立复跑通过；但 live Main/Workflow owner defer 路径在 claim recovery fence 后直接 return，遗留 fence 并拒绝同父执行的合法 replacement/retry child。
 
-后续返工修复了 owner/active-context defer 的 fence 释放，并将 recovery fence 容量改为 fail-closed；确定性 Agent lifecycle 回归和 fresh production owner-fence 场景均证明 parent 状态安全、fence 清空且 replacement child 能完成。该历史阻断已关闭，后续更广的 Workflow/Community/Message V2 验证仍按当前规划推进。
+后续返工修复了 owner/active-context defer 的 fence 释放，并将 recovery fence 容量改为 fail-closed；确定性 Agent lifecycle 回归和 fresh production owner-fence 场景均证明 parent 状态安全、fence 清空且 replacement child 能完成。
+
+提交 `5371db2` 的第四次独立验收通过：`npm run verify`、独立 typecheck、production build 与 diff 检查通过；Agent lifecycle 107、DAG 35、Message V2 39、RPC inbox 22。全新 production dist 的 owner-fence、restart recovery、controls 和 Workflow/deadline 四个场景均在 `openai-codex/gpt-5.6-luna`、`thinking=max` 下通过，报告绑定同一 clean HEAD、`changedFiles=[]`；live-owner fence 泄漏和容量静默截断已关闭。审计摘要保存于 `.agentflux/test-results/p0-07-independent-fourth-audit-latest.json`。后续更广的 Workflow/Community/Message V2 验证仍按当前规划推进。

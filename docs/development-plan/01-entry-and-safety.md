@@ -1,15 +1,8 @@
 # 当前规划：可用入口与安全边界
 
-更新日期：2026-09-02。
+更新日期：2026-09-04。
 
-本文件只保留尚未闭合的 P0 任务；P0-01/P0-04 已归档，核心闭环证据见 `docs/history-plans/2026-09-p0-01-p0-04-workflow-core.md`。
-
-## P0-02 项目空间互斥
-
-- **状态**：部分完成
-- **目标**：Workflow、Main 派发和 Community Claim 使用统一 active-context、lease 和实例身份。
-- **验收**：跨空间拒绝、同空间并行；成功、失败、取消、显式 deadline 超时和崩溃清理只释放自己的实例；并行 Claim 不互相误删。
-- **验证**：并发/故障确定性测试；多进程真实冲突测试。
+本文件只保留尚未闭合的 P0 任务；P0-01/P0-04、P0-02 已归档，核心闭环证据见 `docs/history-plans/2026-09-p0-01-p0-04-workflow-core.md` 与 `docs/history-plans/2026-09-p0-02-space-isolation.md`。
 
 ## P0-03 Community 工具契约
 
@@ -27,4 +20,4 @@
 
 ## 完成前置条件
 
-P0-01/P0-04、P0-05 的核心实现已归档；P0-07 recovery fence hardening 已通过确定性回归和 owner-fence fresh production 场景，存活 owner defer 会清理 fence 并允许 replacement/retry child，容量耗尽保持 fail-closed；P0-06 group 单一路径、P0-02/P0-03 仍是独立入口与安全边界任务；其中 stop 后消息不得污染后续 Run 必须与 P0-06 的 Message V2 单一路径保持同一事实源。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。
+P0-01/P0-04、P0-05、P0-07、P0-02 的核心实现与独立验收均已归档；P0-06 group 单一路径和 P0-03 仍是独立入口与安全边界任务。stop 后消息不得污染后续 Run，必须与 P0-06 的 Message V2 单一路径保持同一事实源。P0-03 Community 契约必须在 Community 真实验证前完成，但不阻塞与 Community 无关且依赖已满足的 P1 数据可靠性任务。每项任务完成后必须同步证据，并按规划规则归档已完成内容。

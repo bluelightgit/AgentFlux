@@ -31,6 +31,7 @@
     "p0-07-fanout": "local",
     "p0-07-long": "local",
     "p0-07-bound-resume": "local",
-    "p0-07-owner-fence": "local"
+    "p0-07-owner-fence": "local",
+    "p0-02-space-isolation": "local"
   }
 }
