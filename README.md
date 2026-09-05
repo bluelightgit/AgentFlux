@@ -75,7 +75,7 @@ npm run dogfood:restart
 
 切换 live 场景配置时使用 `AGENTFLUX_LIVE_PROFILE`；覆盖单个值使用 `AGENTFLUX_LIVE_PROVIDER_ID`、`AGENTFLUX_LIVE_MODEL`、`AGENTFLUX_LIVE_PLANNER_MODEL`、`AGENTFLUX_LIVE_WORKER_MODEL`、`AGENTFLUX_LIVE_JUDGE_MODEL` 和 `AGENTFLUX_LIVE_THINKING`，不要修改测试文件中的模型常量。
 
-P0-02 的空间互斥、精确 marker、Core 快照与完整输出 artifact 已通过独立复核；终态分类返工已用 typed deadline 信号、显式 `timedOut` 运行事实和逐场景 Task/Execution 断言修复普通冲突误报，确定性门禁已通过，当前待本轮 production-dist fresh Pi 重验。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
+P0-02 的空间互斥、精确 marker、Core 快照与完整输出 artifact 已通过独立复核；终态分类返工已用 typed deadline 信号、显式 `timedOut` 运行事实和逐场景 Task/Execution 断言修复普通冲突误报，确定性门禁与 clean production-dist fresh Pi 重验均已通过，当前待独立复核。P0-07 已在提交 `5371db2` 上通过第四次独立验收并归档。真实链路测试统一从 `tests/live/live-test-config.json` 选择 profile，模型/provider/thinking 不写死在测试代码中；必须同时检查 Registry、delivery、checkpoint、成本和失败原因。
 
 ## 文档
 

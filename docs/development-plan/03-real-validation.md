@@ -6,11 +6,11 @@
 
 ## P0-02 第三次独立验收返工
 
-- **状态**：实现与确定性返工已通过，待本轮 clean production-dist fresh Pi 重验；返工实现与验收要求见 `01-entry-and-safety.md`。
+- **状态**：实现、确定性返工和本轮 clean production-dist fresh Pi 重验已通过，待独立复核；返工实现与验收要求见 `01-entry-and-safety.md`。
 - **已通过证据**：当前工作树上的 `npm run verify`、typecheck、production build、diff check；P0-02 space isolation 37、DAG contracts 36。确定性对照证明未设置 deadline 的普通冲突（包括 holder 文本中的 `setTimeout`/`deadline`）为 `failed/failure`，自然 exit 124 也不因退出码单独成为 timeout。
 - **实现边界**：显式 deadline watchdog 才产生 `timedOut` 运行事实；typed `WorkflowDeadlineExceededError` 和 `QualityGateResult.timedOut` 用于 Workflow/DAG/quality-gate 映射，任意错误正文不再参与 timeout 判断。
-- **剩余门禁**：使用本轮 dist fresh Pi 重跑 `test:live:p0-02-space-isolation`，逐场景核对 Task/Execution status、outcome 和 deadline，确保普通冲突为 failed/failure、真实 deadline 为 timed_out/timeout，并保存 sourceCommit/changedFiles、Core/输出证据及失败报告。
-- **此前证据**：`.agentflux/test-results/p0-02-independent-third-audit-latest.json` 等历史报告保留用于追溯，不替代本轮报告。
+- **已完成门禁**：`AGENTFLUX_LIVE_BUILT=1 npm run test:live:p0-02-space-isolation` 已用本轮 dist fresh Pi 通过；报告逐场景核对 Task/Execution status、outcome 和 deadline，保存 sourceCommit/changedFiles、Core/输出证据、artifact 与失败报告。
+- **当前证据**：`.agentflux/test-results/p0-02-space-isolation-latest.json` 的 `passed=true`、`builtExtension=true`、`changedFiles=[]`，11 个 Task/Execution、3 个 Run、2 个 Agent、3 个 Issue、1 个 Workflow 均可核对；普通无 deadline 冲突为 `failed/failure`，输出/Core 一致性和 cleanup 通过，观察成本 `$0.01224412`、耗时 588.723 秒。`.agentflux/test-results/p0-02-independent-third-audit-latest.json` 等历史报告保留用于追溯。
 
 ## P2-01 Production Workflow
 

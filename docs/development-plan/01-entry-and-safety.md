@@ -6,11 +6,11 @@
 
 ## P0-02 空间冲突终态分类返工
 
-- **状态**：实现与确定性返工已通过，待以本轮 production dist fresh Pi 重验（2026-09-05）。上轮 marker 否定句、Core 快照缺失、截断输出不可复核三个阻断均已关闭。
-- **已验证**：active-context 25、P0-02 space isolation 37、DAG contracts 36、完整 `verify`、独立 typecheck/build 与 diff 检查通过；确定性对照覆盖普通文本、`setTimeout`、`deadline` 持有者和自然 exit 124。
+- **状态**：实现、确定性返工和 clean production-dist fresh Pi 重验已通过，待独立复核后归档（2026-09-05）。上轮 marker 否定句、Core 快照缺失、截断输出不可复核及普通冲突 timeout 误分类阻断均已关闭。
+- **已验证**：active-context 25、P0-02 space isolation 37、DAG contracts 36、完整 `verify`、独立 typecheck/build 与 diff 检查通过；确定性对照覆盖普通文本、`setTimeout`、`deadline` 持有者和自然 exit 124，fresh fixture 逐场景核对终态。
 - **实现**：`src/entry.ts` 只接受 typed `WorkflowDeadlineExceededError`；Agent runner 以仅由显式 deadline watchdog/绝对时限产生的 `result.timedOut` 作为可信运行事实，DAG、quality gate、Telemetry 和 Task/Execution 终态均消费该事实；任意任务、持有者或 provider 错误正文关键词不再改变分类。
 - **验收要求**：普通文本、`setTimeout`、`deadline` 持有者任务的空间冲突全部为 `failed/failure` 且 sibling lease 保留；自然 exit 124 无 deadline 仍为 failure；真实 deadline 正例为 `timed_out/timeout`。production fixture 按进程/marker 关联 Task/Execution，逐场景断言 status/outcome/deadline，并保留结构化错误与运行事实；fresh production 重验通过后再独立验收。
-- **证据**：此前独立审计与失败报告仍保留；本轮 fresh report 待生成。
+- **证据**：`.agentflux/test-results/p0-02-space-isolation-latest.json` 为 clean production-dist fresh Pi 报告，记录 `passed=true`、`builtExtension=true`、`changedFiles=[]`、三阶段通过、Core/输出一致性、全部终态和空 active-context；独立审计与失败报告仍保留。
 
 ## P0-03 Community 工具契约
 
