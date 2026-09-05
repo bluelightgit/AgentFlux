@@ -27,6 +27,7 @@ import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, s
 import { TelemetryWriter, type MainUsage } from "./telemetry/events";
 import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
 import { createWorkflowDefinition, deleteWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
+import { isWorkflowDeadlineExceededError } from "./workflows/workflow-errors";
 
 interface RuntimeContext {
 	cwd: string;
@@ -88,7 +89,10 @@ function dagResultSummary(r: DAGExecutionResult): string {
 }
 
 function isWorkflowTimeoutError(error: unknown): boolean {
-	return /(?:deadline|timed[ -]?out|timeout)/i.test(String(error instanceof Error ? error.message : error ?? ""));
+	// Only an explicit runtime deadline signal may produce timed_out. Error
+	// text is untrusted because active-context holder/task descriptions and
+	// provider messages may contain words such as "setTimeout" or "deadline".
+	return isWorkflowDeadlineExceededError(error);
 }
 
 function formatMessageGroups(groups: ReturnType<SharedBoard["listGroups"]>): string {
@@ -849,7 +853,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					void runAgentRecord(name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event), event => showSubagentHealth(name, event))
 						.then(result => {
 							const ok = result.exitCode === 0 && !result.errorMessage;
-							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
+							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.timedOut === true ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
 						})
 						.catch((error: any) => {
 							notify(uiCtx, `[subagent ${name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1);
@@ -879,7 +883,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (result.exitCode !== 0 || result.errorMessage) {
 					executionOutcome = result.exitCode === 130 || controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: result.errorMessage ?? "Agent cancelled", costUsd: result.usage.cost }
-						: result.exitCode === 124
+						: result.timedOut === true
 							? { action: "failed", status: "timeout", error: result.errorMessage ?? "Agent timed out", costUsd: result.usage.cost }
 							: { action: "failed", status: "failure", error: result.errorMessage ?? `Agent exited ${result.exitCode}`, costUsd: result.usage.cost };
 				} else {
@@ -955,6 +959,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit, review and resolve Community work.",
 		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("propose"), Type.Literal("support"), Type.Literal("oppose"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.Union([Type.Literal("pass"), Type.Literal("rework")])), proposalIds: Type.Optional(Type.Array(Type.String())), plan: Type.Optional(Type.String()), costUsd: Type.Optional(Type.Number()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
+			try {
 			if (!runtime) throw new Error("AgentFlux is not initialized");
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
 			if (params.action === "create") { const issue = createIssue(runtime.cwd, { title: params.title ?? "", description: params.body ?? "", acceptanceCriteria: params.acceptanceCriteria }); const taskId = ensureImplicitPlan()?.taskId; if (taskId) updateTaskMetadata(runtime.fluxDir, taskId, { resource: { type: "issue", id: issue.id } }); return { content: [{ type: "text", text: formatIssue(issue) }], details: { ok: true } }; }
@@ -973,6 +978,12 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (taskId) updateTaskMetadata(runtime.fluxDir, taskId, { resource: { type: "issue", id: issue.id } });
 			const timeline = params.action === "show" ? `\n\n${formatIssueTimeline(issue)}` : "";
 			return { content: [{ type: "text", text: formatIssue(issue) + timeline }], details: { ok: true } };
+			} catch (error: any) {
+				// A rejected Community operation is a business failure. Do not let a
+				// later assistant marker turn the parent Main task into success.
+				executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+				throw error;
+			}
 		},
 	});
 
@@ -1270,7 +1281,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 						void runAgentRecord(agent.name, task, persistentContext(), controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(agent.name, event), event => showSubagentHealth(agent.name, event))
 							.then(result => {
 								const ok = result.exitCode === 0 && !result.errorMessage;
-								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
+								notify(ctx, `[subagent ${agent.name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.timedOut === true ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
 							})
 							.catch((error: any) => notify(ctx, `[subagent ${agent.name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1))
 							.finally(() => { persistentControllers.delete(agent.name); updateSubagentStatusLine(); });

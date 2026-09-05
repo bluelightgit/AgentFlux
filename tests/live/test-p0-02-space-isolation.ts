@@ -7,7 +7,7 @@ import { createWorkflowDefinition } from "../../src/workflows/workflow-registry"
 import type { TaskDAG } from "../../src/workflows/dag-executor";
 import { loadLiveConfig, type LiveConfig } from "./live-config";
 import { hasAssistantFinalMarker, toolExecutionStarts } from "../helpers/pi-json-output";
-import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence } from "../helpers/p0-02-evidence";
+import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence, type ExpectedP002TerminalOutcome } from "../helpers/p0-02-evidence";
 
 /**
  * P0-02 真实多进程空间互斥：
@@ -41,6 +41,21 @@ const EXPECTED_MARKERS: Record<string, string> = {
 	workflow: "P0_02_WORKFLOW_OK",
 	"workflow-community-conflict": "P0_02_WORKFLOW_CONFLICT_OK",
 	"workflow-failure": "P0_02_WORKFLOW_FAILURE_OK",
+};
+
+const EXPECTED_TERMINAL_OUTCOMES: Record<string, ExpectedP002TerminalOutcome> = Object.fromEntries(
+	Object.entries(EXPECTED_MARKERS).map(([label, marker]) => [label, {
+		marker,
+		taskStatus: ["main-a", "main-b", "community-a", "community-b", "workflow"].includes(label) ? "completed" : "failed",
+		outcomeStatus: ["main-a", "main-b", "community-a", "community-b", "workflow"].includes(label) ? "success" : "failure",
+		deadline: "none",
+	}]),
+) as Record<string, ExpectedP002TerminalOutcome>;
+
+const TERMINAL_OUTCOME_PHASES: Record<"mainPhase" | "communityPhase" | "workflowPhase", string[]> = {
+	mainPhase: ["main-a", "main-b", "main-conflict", "main-failure"],
+	communityPhase: ["community-a", "community-b", "community-conflict", "community-failure"],
+	workflowPhase: ["workflow", "workflow-community-conflict", "workflow-failure"],
 };
 
 type ContextName = "main" | "workflow" | "community";
@@ -371,10 +386,9 @@ async function main(): Promise<void> {
 		const mainConflictWorkflowObservationPromise = waitForToolWhileContext(mainConflict, "flux_workflow", "main");
 		const mainConflictIssueObservationPromise = waitForToolWhileContext(mainConflict, "flux_issue", "main");
 		const mainFailure = launch("main-failure", extensionEntry, [
-			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
-			"1) action=create，name=p0-02-main-failure，role=implementer，scope=project。",
-			"2) action=run，agent=p0-02-main-failure，model=unknown-live-model，background=false，task=这次模型覆盖预期无效；记录 flux_agent 的显式错误后只回复 MAIN_FAILURE_RUN_DONE。",
-			"3) run 返回后只输出 P0_02_MAIN_FAILURE_OK。",
+			"必须实际调用 AgentFlux flux_issue 工具；这次操作预期失败，记录显式工具错误后只回复 MAIN_FAILURE_RUN_DONE。",
+			"调用 action=claim，issueId=\"missing-main-failure-issue\"，agent=\"main-failure\"，scope=\"failure\"。",
+			"收到错误后只输出 P0_02_MAIN_FAILURE_OK。",
 		].join("\n"), config);
 		handles.push(mainFailure);
 		const [mainFailureResult, mainConflictWorkflowObservation, mainConflictIssueObservation] = await Promise.all([
@@ -383,8 +397,8 @@ async function main(): Promise<void> {
 			mainConflictIssueObservationPromise,
 		]);
 		const activeAfterMainFailure = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
-		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_agent");
-		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "p0-02-main-failure");
+		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_issue");
+		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "main-failure");
 		const [mainConflictResult, mainAResult, mainBResult] = await Promise.all([mainConflict.result, mainA.result, mainB.result]);
 		const mainConflictWorkflowErrors = toolErrors(mainConflictResult.stdout, "flux_workflow");
 		const mainConflictIssueErrors = toolErrors(mainConflictResult.stdout, "flux_issue");
@@ -406,7 +420,7 @@ async function main(): Promise<void> {
 			passed: mainAResult.exitCode === 0 && mainBResult.exitCode === 0 && mainConflictResult.exitCode === 0 && mainFailureResult.exitCode === 0
 				&& !mainAResult.timedOut && !mainBResult.timedOut && !mainConflictResult.timedOut && !mainFailureResult.timedOut
 				&& marker(mainAResult, "P0_02_MAIN_A_OK") && marker(mainBResult, "P0_02_MAIN_B_OK") && marker(mainConflictResult, "P0_02_MAIN_CONFLICT_OK") && marker(mainFailureResult, "P0_02_MAIN_FAILURE_OK")
-				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Unknown model: unknown-live-model"))
+				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Issue not found: missing-main-failure-issue"))
 				&& mainFailureFacts.length === 0
 				&& activeAfterMainFailure.length >= 2 && activeAfterMainFailure.every(entry => entry.pid !== mainFailureResult.pid)
 				&& mainConflictWorkflowObservation.activeEntries.length >= 1
@@ -510,7 +524,14 @@ async function main(): Promise<void> {
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Workflow space lease cleanup");
 
-		const coreFacts = snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId);
+		const coreFacts = snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId, EXPECTED_TERMINAL_OUTCOMES);
+		const terminalChecksByLabel = new Map<string, any>((coreFacts.terminalOutcomes?.checks ?? []).map((check: any) => [check.label, check]));
+		for (const [phaseName, labels] of Object.entries(TERMINAL_OUTCOME_PHASES) as Array<[keyof typeof TERMINAL_OUTCOME_PHASES, string[]]>) {
+			const checks = labels.map(label => terminalChecksByLabel.get(label) ?? { label, passed: false, missing: true });
+			const phase = evidence[phaseName];
+			phase.terminalOutcomes = checks;
+			phase.passed = phase.passed === true && checks.every(check => check.passed === true);
+		}
 		const outputEvidence = [...outputEvidenceByLabel.values()];
 		const outputEvidenceConsistency = validateProcessOutputEvidence(outputEvidence, EXPECTED_MARKERS, sourceRoot);
 		Object.assign(evidence, coreFacts, { outputEvidence, outputEvidenceConsistency });
@@ -529,7 +550,7 @@ async function main(): Promise<void> {
 		evidence.outputEvidence = [...outputEvidenceByLabel.values()];
 		evidence.outputEvidenceConsistency = validateProcessOutputEvidence(evidence.outputEvidence, EXPECTED_MARKERS, sourceRoot);
 		try {
-			if (fixture) Object.assign(evidence, snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId));
+			if (fixture) Object.assign(evidence, snapshotP002CoreFacts(fixtureRoot, fixture.issueIds, fixture.workflowId, EXPECTED_TERMINAL_OUTCOMES));
 		} catch (snapshotError) {
 			evidence.coreFactsSnapshotError = String(snapshotError instanceof Error ? snapshotError.message : snapshotError);
 		}

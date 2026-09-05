@@ -96,6 +96,34 @@ try {
 		`${timeoutResult.status}/${timeoutRun?.status ?? "missing"}`);
 } finally { rmSync(timeoutNodeRoot, { recursive: true, force: true }); }
 
+const naturalExit124Root = mkdtempSync(join(tmpdir(), "agentflux-dag-natural-exit-124-"));
+try {
+	const naturalExit124Script = join(naturalExit124Root, "exit-124.cjs");
+	writeFileSync(naturalExit124Script, "process.exit(124);\n");
+	const naturalExitResult = await executeDAG(
+		{ description: "natural exit code 124 is not a deadline", nodes: [{ ...node("natural-124"), acceptanceCriteria: [] }] },
+		{
+			cwd: naturalExit124Root,
+			fluxDir: join(naturalExit124Root, ".agentflux"),
+			modelsConfig: { models: {}, roles: {} },
+			telemetry: new TelemetryWriter(join(naturalExit124Root, ".agentflux")),
+			prefixLayout: true,
+			sessionId: "pi-session",
+			executionId: "natural-exit-124",
+			maxWallClockMs: null,
+			maxRetries: 0,
+			enableQualityGate: false,
+			invocationOverride: { command: process.execPath, args: [naturalExit124Script] },
+		},
+	);
+	const naturalNodeResult = naturalExitResult.taskResults.get("natural-124")?.subagentResult;
+	const naturalRun = listAgentRuns(join(naturalExit124Root, ".agentflux"), { taskId: undefined })
+		.find(run => run.executionId === "natural-exit-124");
+	check("natural exit code 124 remains failed without a deadline fact",
+		naturalExitResult.status === "failed" && naturalNodeResult?.timedOut !== true && naturalRun?.status === "failed",
+		`${naturalExitResult.status}/${naturalNodeResult?.timedOut}/${naturalRun?.status ?? "missing"}`);
+} finally { rmSync(naturalExit124Root, { recursive: true, force: true }); }
+
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
 import { checkQualityGate, interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";

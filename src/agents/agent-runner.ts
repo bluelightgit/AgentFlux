@@ -368,6 +368,8 @@ export interface AgentRunResult {
 	/** 本次运行实际选择的角色。 */
 	role?: string;
 	exitCode: number;
+	/** True only when the runner observed and enforced an explicit deadline. */
+	timedOut?: boolean;
 	output: string;
 	usage: {
 		turns: number;
@@ -1242,9 +1244,11 @@ export async function runAgent(opts: {
 		if (attemptTimeoutMs !== undefined && attemptTimeoutMs <= 0) {
 			lastResult ??= {
 				agent: agent.name, exitCode: 124, output: "", usage: { ...aggregateUsage }, model: null,
+				timedOut: true,
 				errorMessage: "explicit deadline exhausted before child start", retryCount: Math.max(0, attemptCount - 1),
 			};
 			lastResult.exitCode = 124;
+			lastResult.timedOut = true;
 			lastResult.errorMessage = `explicit deadline (${deadlineLabel}) exhausted across retries/fallbacks`;
 			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: lastResult.errorMessage });
 			break;
@@ -1390,6 +1394,7 @@ export async function runAgent(opts: {
 				const requestTermination = (exitCode: number) => {
 					if (forcedExitCode !== null) return;
 					forcedExitCode = exitCode;
+					if (exitCode === 124) result.timedOut = true;
 					activeRunSnapshot(result.usage, {
 						phase: "stopping",
 						lastActivityAt: new Date().toISOString(),
@@ -1601,8 +1606,8 @@ export async function runAgent(opts: {
 
 		// 失败 → 判断是否应该重试
 		if ([74, 75, 130].includes(result.exitCode) || opts.signal?.aborted) break;
-		const isTimeout = result.exitCode === 124;
-		const isProcessError = result.exitCode !== 0 && result.exitCode !== 124;
+		const isTimeout = result.timedOut === true;
+		const isProcessError = result.exitCode !== 0 && !isTimeout;
 		const modelErr = isModelError(result.errorMessage);
 		const transientErr = isTransientError(result.errorMessage, result.output);
 		const providerCompatibilityErr = isProviderCompatibilityError(result.errorMessage);
@@ -1652,6 +1657,7 @@ export async function runAgent(opts: {
 			const remainingBeforeRetry = remainingDuration(deadline);
 			if (remainingBeforeRetry !== undefined && remainingBeforeRetry <= delay) {
 				result.exitCode = 124;
+				result.timedOut = true;
 				result.errorMessage = `explicit deadline (${deadlineLabel}) exhausted before retry`;
 				activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: result.errorMessage, model, provider });
 				break;
@@ -1742,6 +1748,7 @@ export async function runAgent(opts: {
 		cacheRead: finalResult.usage.cacheRead, cacheWrite: finalResult.usage.cacheWrite,
 		costUsd: Number(finalResult.usage.cost.toFixed(6)), contextTokens: finalResult.usage.contextTokens,
 		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: finalResult.exitCode,
+		timedOut: finalResult.timedOut,
 		persistent: opts.persistent ?? false, thinking: thinkingLevel,
 		retryCount: finalResult.retryCount,
 		communication: finalResult.communication ? {
@@ -1752,7 +1759,7 @@ export async function runAgent(opts: {
 		outcome: {
 			status: finalResult.exitCode === 0 && !finalResult.errorMessage ? "success"
 				: finalResult.exitCode === 130 ? "cancelled"
-				: finalResult.exitCode === 124 ? "timeout" : "failure",
+				: finalResult.timedOut === true ? "timeout" : "failure",
 			success: finalResult.exitCode === 0 && !finalResult.errorMessage,
 			exitCode: finalResult.exitCode,
 			retryCount: finalResult.retryCount,
@@ -1774,7 +1781,7 @@ export async function runAgent(opts: {
 			? "completed" as const
 			: finalResult.exitCode === 130
 				? "cancelled" as const
-				: finalResult.exitCode === 124
+				: finalResult.timedOut === true
 					? "timed_out" as const
 					: "failed" as const,
 		phase: "terminal" as const,

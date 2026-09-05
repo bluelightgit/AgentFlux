@@ -9,6 +9,18 @@ const MAX_EVENTS = 40;
 const MAX_TEXT = 64 * 1024;
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
+type ExpectedTaskStatus = "completed" | "failed" | "cancelled" | "timed_out";
+type ExpectedOutcomeStatus = "success" | "failure" | "partial" | "cancelled" | "timeout" | "unknown";
+
+export interface ExpectedP002TerminalOutcome {
+	/** A marker embedded in the process task prompt, used as a durable correlation key. */
+	marker: string;
+	taskStatus: ExpectedTaskStatus;
+	outcomeStatus: ExpectedOutcomeStatus;
+	/** Require the correlated Task/Execution to have no deadline or a valid one. */
+	deadline?: "none" | "required";
+}
+
 export interface ProcessOutputResult {
 	label: string;
 	pid?: number;
@@ -416,7 +428,12 @@ function aggregateExecutionUsage(executions: any[]): any {
 }
 
 /** 在 fixture workspace 删除前读取所有相关 Core Registry，并生成有界快照和一致性结论。 */
-export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: string[], workflowId: string): any {
+export function snapshotP002CoreFacts(
+	fixtureRoot: string,
+	expectedIssueIds: string[],
+	workflowId: string,
+	expectedTerminalOutcomes: Record<string, ExpectedP002TerminalOutcome> = {},
+): any {
 	const runtimeDir = join(fixtureRoot, ".agentflux", "runtime");
 	const taskStore = readJson(join(runtimeDir, "tasks.json")) ?? {};
 	const runStore = readJson(join(runtimeDir, "runs.json")) ?? {};
@@ -457,6 +474,36 @@ export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: str
 	const allTaskExecutionsTerminal = tasks.every(task => TERMINAL_TASK_STATUSES.has(task.status));
 	const allExecutionsTerminal = executions.every(execution => TERMINAL_TASK_STATUSES.has(execution.status));
 	const allRunsTerminal = runs.every(run => TERMINAL_TASK_STATUSES.has(run.status));
+	const terminalOutcomeChecks = Object.entries(expectedTerminalOutcomes).map(([label, expected]) => {
+		const matchingTasks = tasks.filter(task => typeof task.task === "string" && task.task.includes(expected.marker));
+		const task = matchingTasks.length === 1 ? matchingTasks[0] : undefined;
+		const execution = task ? executionById.get(task.executionId) : undefined;
+		const deadlineMatches = (expected.deadline === undefined || expected.deadline === "none")
+			? task?.deadlineAt == null && execution?.deadlineAt == null
+			: typeof task?.deadlineAt === "string" && Number.isFinite(Date.parse(task.deadlineAt))
+				&& typeof execution?.deadlineAt === "string" && Number.isFinite(Date.parse(execution.deadlineAt));
+		return {
+			label,
+			marker: expected.marker,
+			matchingTaskIds: matchingTasks.map(candidate => candidate.id),
+			taskId: task?.id ?? null,
+			executionId: execution?.id ?? null,
+			observedTaskStatus: task?.status ?? null,
+			observedExecutionStatus: execution?.status ?? null,
+			observedOutcomeStatus: execution?.outcome?.status ?? null,
+			observedTaskDeadlineAt: task?.deadlineAt ?? null,
+			observedExecutionDeadlineAt: execution?.deadlineAt ?? null,
+			expectedTaskStatus: expected.taskStatus,
+			expectedOutcomeStatus: expected.outcomeStatus,
+			expectedDeadline: expected.deadline ?? "none",
+			passed: matchingTasks.length === 1
+				&& task?.status === expected.taskStatus
+				&& execution?.status === expected.taskStatus
+				&& execution?.outcome?.status === expected.outcomeStatus
+				&& deadlineMatches,
+		};
+	});
+	const terminalOutcomesPassed = terminalOutcomeChecks.every(check => check.passed);
 	const consistencyChecks = {
 		tasksPresent: tasks.length > 0,
 		executionsPresent: executions.length > 0,
@@ -473,6 +520,7 @@ export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: str
 		allTaskExecutionsTerminal,
 		allExecutionsTerminal,
 		allRunsTerminal,
+		terminalOutcomes: terminalOutcomesPassed,
 		noActiveRuns: runs.every(run => !["starting", "running", "stop_requested"].includes(run.status)),
 		noActiveContextEntries: activeContextEntries.length === 0,
 	};
@@ -512,6 +560,11 @@ export function snapshotP002CoreFacts(fixtureRoot: string, expectedIssueIds: str
 		},
 		costUsdTotal: runUsage.costUsd + executionCost,
 		parentLineage,
+		terminalOutcomes: {
+			expected: expectedTerminalOutcomes,
+			checks: terminalOutcomeChecks,
+			passed: terminalOutcomesPassed,
+		},
 		coreFactConsistency: {
 			counts: { tasks: tasks.length, executions: executions.length, agents: agents.length, runs: runs.length, issues: issues.length, workflows: workflowDefinitions.length },
 			checks: consistencyChecks,

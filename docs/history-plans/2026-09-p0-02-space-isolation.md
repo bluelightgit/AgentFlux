@@ -1,6 +1,6 @@
 # P0-02 项目空间互斥与实例 lease
 
-状态：已完成（2026-09-05）；实现、确定性验证、production-dist 重验与可审计证据均通过
+状态：空间行为与三项审计证据返工已通过；终态分类返工的确定性实现已完成，fresh production 重验待完成（当前要求见开发规划）
 
 ## 目标摘要
 
@@ -41,10 +41,16 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 
 实现阶段报告、独立验收失败报告和本次重验前的失败尝试均作为历史证据保留；其中一次 environment profile 的 deepseek/off 运行因 provider 月度额度返回 429。
 
-## 重验与完成结论
+## 实现方重验结论
 
 2026-09-05 在 clean HEAD 上重新 build，并以 `local` profile 解析出的 `openai-codex/gpt-5.6-luna`、`thinking=max` 启动 11 个全新 production Pi。Main/Community sibling 分别保持 120/180 秒，Workflow 保持 180 秒；三阶段冲突均在真实 `tool_execution_start` 时核验目标 lease 仍活跃，显式 toolResult、进程退出和空 active-context 均一致，运行耗时与完整配置见当前报告。
 
 本轮修复并验证了三项独立验收阻断：最终 marker 使用 trim 后精确相等而非 substring；cleanup 前保存包含 Task/Execution/Agent/Run/Issue/Workflow、usage/cost、失败原因和父谱系的 Core 快照；完整输出保存为带哈希 artifact，并在报告中保留可解析的最终 assistant 与结构化事件证据。报告 `p0-02-space-isolation-latest.json` 记录 `passed=true`、`builtExtension=true`、`sourceCommit=HEAD`、`changedFiles=[]`、`outputEvidenceConsistency.passed=true`、`coreFactConsistency.passed=true`、`cleanup.workspaceRemoved=true` 和 `finalActiveEntries=[]`。
+
+## 第三次独立验收与终态分类返工
+
+2026-09-05 在 clean HEAD `ea0451a` 上独立复跑标准门禁和 562.625 秒 Luna/max production-dist，确认上轮三个证据阻断均已关闭：11 个 marker 精确相等、33 个 artifact 哈希/大小正确、Core 快照与谱系可复核，三阶段空间行为和清理通过。
+
+第三次验收发现 `main-conflict` 明确因空间冲突被拒且无 deadline，却因 holder 任务文本中的 `setTimeout`/`deadline` 被写成 `timed_out/timeout`；fixture 原先只检查终态集合。当前返工已改为 typed `WorkflowDeadlineExceededError`、runner 的显式 `timedOut` 运行事实和逐场景 Task/Execution 终态契约，并加入自然 exit 124 的 failure 对照；确定性验证与 fresh production 重验仍按开发规划执行。
 
 此前独立审计、实现方 passing 报告和所有带时间戳失败报告均保留用于追溯。P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。

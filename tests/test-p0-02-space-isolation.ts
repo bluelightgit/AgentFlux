@@ -3,10 +3,12 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import agentFlux from "../src/entry";
 import { createAgent, runAgentRecord, type AgentRunContext } from "../src/agents/agent-store";
 import { readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
+import { listTaskExecutions, listTasks } from "../src/core/task-registry";
 import { assistantFinalText, assistantMessageTexts, assistantOutputEvidence, hasAssistantFinalMarker, toolExecutionStarts } from "./helpers/pi-json-output";
-import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence } from "./helpers/p0-02-evidence";
+import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence, type ExpectedP002TerminalOutcome } from "./helpers/p0-02-evidence";
 
 let passed = 0;
 function check(value: unknown, message: string): void {
@@ -24,6 +26,21 @@ async function waitFor(predicate: () => boolean, attempts = 100): Promise<boolea
 }
 
 type ContextProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+type FakeHook = (event: any, ctx: any) => any;
+class FakePi {
+	hooks = new Map<string, FakeHook[]>();
+	tools = new Map<string, any>();
+	commands = new Map<string, any>();
+	on(name: string, handler: FakeHook): void { this.hooks.set(name, [...(this.hooks.get(name) ?? []), handler]); }
+	registerTool(tool: any): void { this.tools.set(tool.name, tool); }
+	registerCommand(name: string, command: any): void { this.commands.set(name, command); }
+	sendUserMessage(): void {}
+}
+
+async function emitFake(pi: FakePi, name: string, event: any, ctx: any): Promise<void> {
+	for (const hook of pi.hooks.get(name) ?? []) await hook(event, ctx);
+}
 
 function startContextProcess(root: string, context: "main" | "workflow" | "community", name: string, holdMs: number, mode: "normal" | "crash" = "normal"): ContextProcess {
 	return spawn(process.execPath, [
@@ -78,9 +95,79 @@ async function waitProcess(child: ContextProcess): Promise<number | null> {
 	return new Promise(resolveExit => child.once("exit", (code) => resolveExit(code)));
 }
 
+async function runMainConflictTerminalCase(holderTask: string): Promise<{
+	errorMessage: string;
+	taskStatus: string | undefined;
+	outcomeStatus: string | undefined;
+	deadlineAt: string | null | undefined;
+	executionDeadlineAt: string | null | undefined;
+	siblingPreserved: boolean;
+}> {
+	const caseRoot = mkdtempSync(join(tmpdir(), "agentflux-p0-02-terminal-classification-"));
+	const sessionId = "p0-02-terminal-classification";
+	const ctx: any = {
+		cwd: caseRoot,
+		hasUI: false,
+		mode: "print",
+		model: { id: "classification-test-model" },
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => "classification-session" },
+	};
+	const pi = new FakePi();
+	const lease = { leaseId: "" };
+	try {
+		mkdirSync(join(caseRoot, ".agentflux"), { recursive: true });
+		writeFileSync(join(caseRoot, ".agentflux", "agentflux.json"), JSON.stringify({ budget: { max_cost_per_task: 1, max_iterations: 2, max_wall_clock_seconds: null } }));
+		writeFileSync(join(caseRoot, ".agentflux", "models.json"), JSON.stringify({ models: {}, roles: {} }));
+		agentFlux(pi as any);
+		await emitFake(pi, "session_start", {}, ctx);
+		await emitFake(pi, "before_agent_start", { prompt: "attempt a workflow while Main is active", systemPrompt: "base", systemPromptOptions: {} }, ctx);
+		const registered = registerActiveContext(caseRoot, { name: "main-holder", context: "main", scope: "holder", task: holderTask });
+		lease.leaseId = registered.leaseId;
+		let errorMessage = "";
+		try {
+			await pi.tools.get("flux_workflow").execute("classification-conflict", { action: "run", task: "read README.md" });
+		} catch (error: any) {
+			errorMessage = String(error?.message ?? error);
+		}
+		await emitFake(pi, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, ctx);
+		await emitFake(pi, "agent_settled", {}, ctx);
+		const task = listTasks(join(caseRoot, ".agentflux"), sessionId)[0];
+		const execution = task ? listTaskExecutions(join(caseRoot, ".agentflux"), task.id)[0] : undefined;
+		const siblingPreserved = readActiveContext(caseRoot).entries.some(entry => entry.leaseId === lease.leaseId);
+		return {
+			errorMessage,
+			taskStatus: task?.status,
+			outcomeStatus: execution?.outcome?.status,
+			deadlineAt: task?.deadlineAt,
+			executionDeadlineAt: execution?.deadlineAt,
+			siblingPreserved,
+		};
+	} finally {
+		if (lease.leaseId) {
+			try { releaseActiveContext(caseRoot, lease.leaseId); } catch {}
+		}
+		try { await emitFake(pi, "session_shutdown", {}, ctx); } catch {}
+		rmSync(caseRoot, { recursive: true, force: true });
+	}
+}
+
 async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "agentflux-p0-02-space-"));
 	try {
+		for (const holderTask of [
+			"ordinary work",
+			"node -e \\\"setTimeout(() => {}, 120000)\\\"",
+			"review deadline requirements",
+		]) {
+			const result = await runMainConflictTerminalCase(holderTask);
+			check(result.errorMessage.includes("main 空间活跃")
+				&& result.taskStatus === "failed"
+				&& result.outcomeStatus === "failure"
+				&& result.deadlineAt == null
+				&& result.executionDeadlineAt == null
+				&& result.siblingPreserved,
+				`普通 Main 空间冲突（持有者文本：${holderTask}）保持 failed/failure 且保留 sibling lease`);
+		}
 		const echoedMarker = "P0_02_ECHO_ONLY_MARKER";
 		const echoedPromptOutput = JSON.stringify({
 			type: "agent_end",
@@ -115,6 +202,15 @@ async function main(): Promise<void> {
 			writeFileSync(join(runtime, "workflows.json"), JSON.stringify({ version: 1, definitions: [{ id: "workflow-a", name: "workflow-a", version: 1, description: "audit", dag: { description: "audit", nodes: [] }, createdAt: now, updatedAt: now }] }));
 			const coreEvidence = snapshotP002CoreFacts(coreRoot, ["issue-a"], "workflow-a");
 			check(coreEvidence.coreFactConsistency.passed === true && coreEvidence.tasks.length === 1 && coreEvidence.executions.length === 1 && coreEvidence.runs.length === 1 && coreEvidence.agents.length === 1 && coreEvidence.issues.length === 1 && coreEvidence.parentLineage.tasks[0].parentTaskId === null && typeof coreEvidence.costUsdTotal === "number", "报告保存 Task/Execution/Run/Agent/Issue、usage/cost 与父谱系事实");
+			const expectedFailure: Record<string, ExpectedP002TerminalOutcome> = {
+				"audit-case": { marker: "audit task", taskStatus: "failed", outcomeStatus: "failure", deadline: "none" },
+			};
+			const inconsistentEvidence = snapshotP002CoreFacts(coreRoot, ["issue-a"], "workflow-a", expectedFailure);
+			check(inconsistentEvidence.coreFactConsistency.passed === false
+				&& inconsistentEvidence.coreFactConsistency.failedChecks.includes("terminalOutcomes")
+				&& inconsistentEvidence.terminalOutcomes.checks[0].observedTaskStatus === "completed"
+				&& inconsistentEvidence.terminalOutcomes.checks[0].observedOutcomeStatus == null,
+				"错误的 Task/Execution 预期会令 Core 一致性判定失败");
 		} finally {
 			rmSync(coreRoot, { recursive: true, force: true });
 		}
@@ -172,7 +268,7 @@ async function main(): Promise<void> {
 		check(await waitFor(() => readActiveContext(root).entries.filter(entry => entry.context === "main").length === 2), "deadline 场景同时存在两个 Main lease");
 		const timedResult = await timeoutShortRun;
 		const afterTimeout = readActiveContext(root).entries;
-		check(timedResult.exitCode === 124 && afterTimeout.length === 1 && afterTimeout[0].scope === "p0-02-timeout-long", "deadline 超时只释放自身 lease，不误删 long sibling");
+		check(timedResult.exitCode === 124 && timedResult.timedOut === true && afterTimeout.length === 1 && afterTimeout[0].scope === "p0-02-timeout-long", "真实 deadline 超时带有可信 timedOut 运行事实且只释放自身 lease");
 		const timeoutLongResult = await timeoutLongRun;
 		check(timeoutLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "deadline long sibling 完成后清空剩余 lease");
 

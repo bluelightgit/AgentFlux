@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
 import type { RunHealthConfig } from "../core/run-health";
+import { isWorkflowDeadlineExceededError, WorkflowDeadlineExceededError } from "./workflow-errors";
 
 /**
  * 诊断日志 sink。默认 console.error；UI 模式下由宿主置空（setDagLogSink(null)），
@@ -244,6 +245,14 @@ Rules:
 		timeoutMs: opts.timeoutMs,
 	});
 
+	if (result.timedOut === true) {
+		// The runner sets this only after its deadline watchdog or absolute
+		// deadline check fired. Never infer a Workflow timeout from planner text.
+		throw new WorkflowDeadlineExceededError(
+			`DAG planner deadline exhausted${result.errorMessage ? `: ${result.errorMessage}` : ""}`,
+			opts.deadlineAt,
+		);
+	}
 	if (result.exitCode !== 0 || result.errorMessage || !result.output.trim()) {
 		throw new Error(`DAG planner failed: ${result.errorMessage ?? `exit ${result.exitCode} with no output`}`);
 	}
@@ -635,7 +644,7 @@ export async function executeDAG(
 				// executeNodeWithGate threw (spawn error, unexpected exception)
 				const node = ready[i];
 				const exceptionMessage = String(s.reason?.message ?? s.reason);
-				if (/deadline|timed[ -]?out|timeout/i.test(exceptionMessage)) timeoutObserved = true;
+				if (isWorkflowDeadlineExceededError(s.reason)) timeoutObserved = true;
 				dagLog(`[flux dag] ${node.id} threw exception: ${exceptionMessage}`);
 				batchResults.push({
 					node, result: { agent: `dag-${node.id}`, exitCode: -1, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, model: null, errorMessage: `exception: ${exceptionMessage}` },
@@ -645,9 +654,9 @@ export async function executeDAG(
 		}
 
 		for (const { node, result, gateResult, retryCount, passed, cost } of batchResults) {
-			if (result.exitCode === 124 || (gateResult?.status === "indeterminate" && /deadline|timed[ -]?out|timeout/i.test(gateResult.feedback))) {
-				timeoutObserved = true;
-			}
+			// These flags are emitted by the deadline watchdogs, not inferred from
+			// untrusted task/error/quality-gate text.
+			if (result.timedOut === true || gateResult?.timedOut === true) timeoutObserved = true;
 			totalCost += cost;
 			taskResults.set(node.id, { node, subagentResult: result, gateResult, retryCount, passed });
 			try {
@@ -693,7 +702,7 @@ export async function executeDAG(
 				currentTask: (node.description || node.title).slice(0, 200),
 				model: result.model ?? undefined,
 				outcome: {
-					status: passed ? "success" : result.exitCode === 130 ? "cancelled" : result.exitCode === 124 ? "timeout" : "failure",
+					status: passed ? "success" : result.exitCode === 130 ? "cancelled" : result.timedOut === true ? "timeout" : "failure",
 					success: passed,
 					exitCode: result.exitCode,
 					error: result.errorMessage,
@@ -829,7 +838,9 @@ async function executeNodeWithGate(
 		if (nodeDeadline !== undefined && Date.now() >= nodeDeadline) {
 			return {
 				node,
-				result: lastResult ?? { agent: agentDef.name, exitCode: 124, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: totalNodeCost, contextTokens: 0 }, model: null, errorMessage: "node explicit deadline exhausted" },
+				result: lastResult
+					? { ...lastResult, exitCode: 124, timedOut: true, errorMessage: "node explicit deadline exhausted" }
+					: { agent: agentDef.name, exitCode: 124, timedOut: true, output: "", usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: totalNodeCost, contextTokens: 0 }, model: null, errorMessage: "node explicit deadline exhausted" },
 				gateResult: lastGateResult, retryCount, passed: false, cost: totalNodeCost,
 			};
 		}
@@ -929,7 +940,7 @@ async function executeNodeWithGate(
 				return { node, result, gateResult: null, retryCount, passed: false, cost: totalNodeCost };
 			}
 			if (retryCount < maxRetries && (nodeDeadline === undefined || Date.now() < nodeDeadline)) {
-				const reason = result.exitCode === 124 ? "timeout" : result.errorMessage ?? `exit ${result.exitCode}`;
+				const reason = result.timedOut === true ? "timeout" : result.errorMessage ?? `exit ${result.exitCode}`;
 				dagLog(`[flux dag] ${node.id} failed (${reason}), retrying ${retryCount + 1}/${maxRetries}`);
 				retryCount++;
 				continue;
@@ -944,7 +955,7 @@ async function executeNodeWithGate(
 			if (nodeDeadline !== undefined && Date.now() >= nodeDeadline) {
 				return {
 					node,
-					result: { ...result, exitCode: 124, errorMessage: `node explicit deadline (${nodeTimeoutMs === undefined ? "unknown" : `${nodeTimeoutMs / 1000}s`}) exhausted before quality gate` },
+					result: { ...result, exitCode: 124, timedOut: true, errorMessage: `node explicit deadline (${nodeTimeoutMs === undefined ? "unknown" : `${nodeTimeoutMs / 1000}s`}) exhausted before quality gate` },
 					gateResult: null, retryCount, passed: false, cost: totalNodeCost,
 				};
 			}

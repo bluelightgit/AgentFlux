@@ -4,6 +4,14 @@
 
 本文件只记录需要 production dist、全新 Pi/Provider 或长时运行才能完成的验证任务。P2 不是实现完成后的末尾阶段：除 P2-05 长时 soak 外，各场景在对应 P0/P1 实现具备条件后立即执行，真实失败直接阻止该任务结项。
 
+## P0-02 第三次独立验收返工
+
+- **状态**：实现与确定性返工已通过，待本轮 clean production-dist fresh Pi 重验；返工实现与验收要求见 `01-entry-and-safety.md`。
+- **已通过证据**：当前工作树上的 `npm run verify`、typecheck、production build、diff check；P0-02 space isolation 37、DAG contracts 36。确定性对照证明未设置 deadline 的普通冲突（包括 holder 文本中的 `setTimeout`/`deadline`）为 `failed/failure`，自然 exit 124 也不因退出码单独成为 timeout。
+- **实现边界**：显式 deadline watchdog 才产生 `timedOut` 运行事实；typed `WorkflowDeadlineExceededError` 和 `QualityGateResult.timedOut` 用于 Workflow/DAG/quality-gate 映射，任意错误正文不再参与 timeout 判断。
+- **剩余门禁**：使用本轮 dist fresh Pi 重跑 `test:live:p0-02-space-isolation`，逐场景核对 Task/Execution status、outcome 和 deadline，确保普通冲突为 failed/failure、真实 deadline 为 timed_out/timeout，并保存 sourceCommit/changedFiles、Core/输出证据及失败报告。
+- **此前证据**：`.agentflux/test-results/p0-02-independent-third-audit-latest.json` 等历史报告保留用于追溯，不替代本轮报告。
+
 ## P2-01 Production Workflow
 
 - **状态**：部分完成（P0-01/P0-04 核心链路已验证）

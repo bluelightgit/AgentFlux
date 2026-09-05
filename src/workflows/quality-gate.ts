@@ -38,6 +38,8 @@ export interface QualityGateResult {
 	deadlineAt?: number;
 	/** Effective watchdog duration at attempt start, after applying the parent deadline. */
 	judgeTimeoutMs?: number;
+	/** True only when the judge watchdog observed an actual deadline expiry. */
+	timedOut?: boolean;
 }
 
 export interface QualityGateJudgement {
@@ -187,6 +189,7 @@ export async function checkQualityGate(
 		...interpretQualityGateJudgeExecution(execution, criteria),
 		deadlineAt: opts.deadlineAt,
 		judgeTimeoutMs: gateTimeoutMs,
+		timedOut: execution.timedOut === true,
 	});
 	if (gateTimeoutMs !== undefined && gateTimeoutMs <= 0) {
 		return finishGate({
