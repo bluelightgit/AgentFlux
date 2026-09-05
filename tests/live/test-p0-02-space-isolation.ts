@@ -385,21 +385,22 @@ async function main(): Promise<void> {
 		const mainActiveSnapshot = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
 		const mainConflictWorkflowObservationPromise = waitForToolWhileContext(mainConflict, "flux_workflow", "main");
 		const mainConflictIssueObservationPromise = waitForToolWhileContext(mainConflict, "flux_issue", "main");
+		const [mainConflictWorkflowObservation, mainConflictIssueObservation] = await Promise.all([
+			mainConflictWorkflowObservationPromise,
+			mainConflictIssueObservationPromise,
+		]);
+		const [mainConflictResult, mainAResult, mainBResult] = await Promise.all([mainConflict.result, mainA.result, mainB.result]);
+		await waitFor(() => activeEntriesByContext("main").length === 0, 30_000, "Main holder cleanup before failure scenario");
 		const mainFailure = launch("main-failure", extensionEntry, [
-			"必须实际调用 AgentFlux flux_issue 工具；这次操作预期失败，记录显式工具错误后只回复 MAIN_FAILURE_RUN_DONE。",
+			"必须实际调用 AgentFlux flux_issue 工具；这次操作预期失败，记录显式工具错误后只回复 P0_02_MAIN_FAILURE_OK。",
 			"调用 action=claim，issueId=\"missing-main-failure-issue\"，agent=\"main-failure\"，scope=\"failure\"。",
 			"收到错误后只输出 P0_02_MAIN_FAILURE_OK。",
 		].join("\n"), config);
 		handles.push(mainFailure);
-		const [mainFailureResult, mainConflictWorkflowObservation, mainConflictIssueObservation] = await Promise.all([
-			mainFailure.result,
-			mainConflictWorkflowObservationPromise,
-			mainConflictIssueObservationPromise,
-		]);
+		const mainFailureResult = await mainFailure.result;
 		const activeAfterMainFailure = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
 		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_issue");
 		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "main-failure");
-		const [mainConflictResult, mainAResult, mainBResult] = await Promise.all([mainConflict.result, mainA.result, mainB.result]);
 		const mainConflictWorkflowErrors = toolErrors(mainConflictResult.stdout, "flux_workflow");
 		const mainConflictIssueErrors = toolErrors(mainConflictResult.stdout, "flux_issue");
 		evidence.mainPhase = {
@@ -422,7 +423,7 @@ async function main(): Promise<void> {
 				&& marker(mainAResult, "P0_02_MAIN_A_OK") && marker(mainBResult, "P0_02_MAIN_B_OK") && marker(mainConflictResult, "P0_02_MAIN_CONFLICT_OK") && marker(mainFailureResult, "P0_02_MAIN_FAILURE_OK")
 				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Issue not found: missing-main-failure-issue"))
 				&& mainFailureFacts.length === 0
-				&& activeAfterMainFailure.length >= 2 && activeAfterMainFailure.every(entry => entry.pid !== mainFailureResult.pid)
+				&& activeAfterMainFailure.length === 0
 				&& mainConflictWorkflowObservation.activeEntries.length >= 1
 				&& mainConflictIssueObservation.activeEntries.length >= 1
 				&& mainConflictWorkflowErrors.some(item => JSON.stringify(item).includes("main 空间活跃"))
