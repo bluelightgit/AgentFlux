@@ -18,5 +18,6 @@
 | [2026-09-08-gc-message-validation.md](2026-09-08-gc-message-validation.md) | 阶段完成 | GC 共同引用 fence、消息强杀/ACK 丢失重投、同构建八类 live 最新通过；保留失败与 PID 复用证据 |
 | [2026-09-08-pid-identity-validation.md](2026-09-08-pid-identity-validation.md) | 局部阶段完成 | 出生字段/异步核验、启动异常与实际退出、Luna/max 验证；首次握手/接管/原子性仍开放 |
 | [2026-10-01-pi-099-migration.md](2026-10-01-pi-099-migration.md) | 必需迁移阶段完成 | Pi 0.99.1、原生账务/权限/协议/模型/session 适配、同候选八类 fresh 调用；可选接入/人工/跨 OS 等仍开放 |
+| [2026-10-06-v0.1.3-release.md](2026-10-06-v0.1.3-release.md) | 发布/拉取限定完成 | main/tag/四CI/Publish/Release/npm真实拉取及下载包双backend；远程Live外部Provider配置仍失败 |
 | [2026-10-02-dual-runtime.md](2026-10-02-dual-runtime.md) | 初阶段完成 | Pi1.0、Host SDK facade、配置驱动process/SDK、两模式各10类真实验证/本地安装；UI/故障/平台/长期组合仍开放 |
 | [2026-09-plan-v1.md](2026-09-plan-v1.md) | 已替代 | 旧版集中任务规划迁移到主题化当前规划 |

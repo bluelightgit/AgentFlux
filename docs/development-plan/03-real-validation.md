@@ -2,15 +2,14 @@
 
 更新：2026-10-06。只维护未完成或待重验范围；已完成/被替代批次见 [阶段摘要](../history-plans/2026-09-08-review-validation-progress.md)。当前逐功能事实见 [功能与测试报告](../reviews/2026-09-08-function-validation.md)。
 
-## RELEASE-01 / P0：v0.1.3 发布门禁与远程验收（进行中）
+## RELEASE-LIVE-01 / P1：远程真实 Provider 配置修复（外部配置待更新）
 
-用户授权在各场景确认无误后合入main、打tag，并检查GitHub Actions及npm更新。当前npm/latest与远程tag均0.1.2；候选0.1.3，证据 `.agentflux/test-results/release-0.1.3-2026-10-06/`。保存现有工作树/分支/HEAD，不覆盖既有改动或重写历史。
+v0.1.3的main/tag/Publish/Release/npm拉取和实际下载包两backend调用已完成，详见[发布摘要](../history-plans/2026-10-06-v0.1.3-release.md)及[验证报告](../reviews/2026-10-06-v0.1.3-release.md)。不得将发布成功扩展为Live全部绿色。
 
-- 同候选重跑最小/verify/独立typecheck/build/pack，核对依赖锁、Host wrapper/两个业务入口/preload、无敏感或本机runtime文件；两后端production真实Core/Agent/planner/node/judge/Community、history、fork、消息、resume、telemetry、并发/取消及自动安装范围。人工UI/未支持平台/不合作工具/长soak不伪造PASS，发行说明列边界。
-- 修复已知Node20工作流基线，CI最低22.19及24/Linux与Windows；发布检查tag=manifest、构建/测试/包布局通过才publish。Live区分配置缺失失败与真实Provider失败，不用skipped代替通过；不暴露API key。
-- 确认origin/main关系、无版本/tag冲突，提交审核过的源/测试/文档/manifest；不提交本机证据、token/凭据、node_modules/dist。只允许正常合并/fast-forward与非force推送，不移动既有tag。
-- 按用户原文“各场景测试无误后推main/tag，完了看Actions/npm”的顺序：本地同候选两模式各12类fresh及包/安全门禁、main四CI成功后可推v0.1.3，观察Publish/GitHub Release与Live结果分别汇报，不能声称所有Actions通过。2026-10-06远程Live的仓库Provider旧模型404、当前alias不支持、目录返回空；这是外部配置阻碍，保留失败，不自动换模型、不复制本机凭据或放宽断言。发布身份先以dry-run npm whoami实际验证，失败暂停真正publish、告知用户更新NPM_TOKEN。npm必须实际查询新版本/latest并下载包检查integrity/版本/资产与隔离安装/Host加载，不以Publish job名或本地npm pack证明远程可拉取。
-- 完成报告保存commit/tag/Actions URL及结论/npm dist/完整性/关键证据与未认证范围；完成后归档该任务，不扩展为所有产品场景认证。
+- GitHub仓库现Live Provider对旧Secret模型oa/deepseek-v4-flash返回404，新原生alias显式短试返回不支持，/models HTTP200但data空；默认process/sdk四场景失败日志与artifact保留。不是产品fallback/默认deadline修复需求，不猜模型/把错误改PASS。
+- 需配置维护者提供该CI endpoint/API key允许的明确模型，更新AGENTFLUX_LIVE_MODEL_PRO/FLASH，必要时更新BASE_URL/API_KEY；不要在对话公开密钥或复制本机OAuth。未经明确配置不静默借用其他Provider。
+- 配置闭合后同一个当前main分别process/sdk完整四场景production真实调用，核验Main/Run/费用/权限/session/消息/checkpoint及artifact；校验失败实际原因，成功后记新的run URL及证据，不删旧失败。
+- 人工UI/macOS/强杀/soak等仍由原主题验收，Linux基础CI success只证明确定性+mock/build/包，不冒充Linux Provider业务认证。
 
 ## PLATFORM-01 / P1：Linux 原生验收与 macOS 生命周期缺口（待实施 / 验证）
 

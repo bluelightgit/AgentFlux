@@ -15,7 +15,7 @@
 
 ## 当前事实
 
-- 用户已授权v0.1.3合入main/tag及Actions/npm核验。候选本地verify/typecheck/build/包与两模式各12类fresh通过，92 Runs/70 Executions；main四Linux/Windows CI已通过，远程Live因Provider模型配置失败、tag/npm尚待证明（不能说所有Actions成功），见[发布报告](../reviews/2026-10-06-v0.1.3-release.md)。具体任务只在03 RELEASE-01，不提前称发布成功。
+- v0.1.3已正常推main/tag（tag commit6697d62），四CI/真实Publish/GitHub Release成功，npm latest=0.1.3并真实下载及Pi1.0.4包内双backend通过；本地两模式各12类/92 Runs/70 Executions，见[发布报告](../reviews/2026-10-06-v0.1.3-release.md)及[归档](../history-plans/2026-10-06-v0.1.3-release.md)。远程Live因仓库Provider模型配置失败，**不是全部Actions绿色**；剩余任务只在03 RELEASE-LIVE-01。
 - Pi1.0/双后端初阶段已实施：新分支 `feat/dual-agent-runtime-2026-10-02`，`subagent_runtime=process|sdk`（默认process），同一Core+Host公共loader facade/逻辑owner；两模式各10类fresh Provider/本地安装验证通过，64 Runs/54 Executions，限定估计$0.09401536。见[实施报告](../reviews/2026-10-02-dual-runtime-validation.md)与[历史摘要](../history-plans/2026-10-02-dual-runtime.md)。用户10月6日重启后两模式短验收通过，运行期跟随全局Pi1.0.4（dev1.0.0不变），见[重启报告](../reviews/2026-10-06-dual-runtime-post-restart.md)，不再需要重启；旧工作树不清理，未冒称TUI/故障/平台/全部Provider认证；剩余只看04。
 - [子代理生态调研](../reviews/2026-10-01-pi-subagent-survey.md)已核验六个社区执行链：三个同进程SDK、一个混合、两个独立Pi进程；官方0.99.2示例仍spawn。较热门实现支持SDK候选方向，但不能据非随机样本宣称全生态多数；生态调研不代表运行认证；AgentFlux自己的SDK实现及限定实测已由上述实施替代，剩余验收只在04。
 - 用户重启后发现全局0.99.2与项目SDK/child0.99.1漂移，已修真实入口manifest/bin/realpath验证及SDK版本拒绝，开发包对齐0.99.2。完整门禁与八类fresh全局0.99.2生产调用/费用/27 Runs/51记录PID对账通过，见[补丁报告](../reviews/2026-10-01-pi-0992-restart-validation.md)。10月1日再次重启后当时Main/child同一全局0.99.2 CLI短调用通过，该候选无需再重启的结论不适用于10月2日全局1.0.0漂移；当时SDK统一宿主绑定尚未实现，已由本轮Host wrapper阶段替代。Linux实现基础/原生验收、macOS明确缺出生身份及旧Node20 CI待修，见[最新Host与平台报告](../reviews/2026-10-01-host-binding-platform.md)；首次失败与旧候选保留，不冒称自动patch兼容或跨OS认证。
