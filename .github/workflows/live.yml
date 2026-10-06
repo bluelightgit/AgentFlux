@@ -128,8 +128,9 @@ jobs:
           const response = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${process.env.AGENTFLUX_LIVE_API_KEY}` }, signal: AbortSignal.timeout(30000) });
           if (!response.ok) throw new Error(`Provider catalog HTTP ${response.status}`);
           const body = await response.json();
-          const ids = (Array.isArray(body.data) ? body.data : []).map(m => m.id).filter(id => typeof id === 'string');
-          if (!ids.length) throw new Error('Provider catalog contains no model IDs');
+          const rows = Array.isArray(body) ? body : Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : Array.isArray(body.data?.models) ? body.data.models : Array.isArray(body.data?.items) ? body.data.items : [];
+          const ids = rows.map(m => typeof m === 'string' ? m : m.id).filter(id => typeof id === 'string');
+          if (!ids.length) throw new Error(`Provider catalog contains no model IDs; keys=${Object.keys(body)}; dataKeys=${body.data && typeof body.data === 'object' ? Object.keys(body.data) : ''}`);
           mkdirSync('.agentflux/test-results', { recursive: true });
           writeFileSync('.agentflux/test-results/provider-model-ids.json', JSON.stringify({ ids, at: new Date().toISOString(), generationRequests: 0 }, null, 2));
           console.log(JSON.stringify({ relevant: ids.filter(id => /deepseek|flash|luna/i.test(id)).slice(0, 100), generationRequests: 0 }));

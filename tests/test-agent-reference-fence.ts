@@ -104,7 +104,8 @@ function waitWorker(handle: WorkerHandle, timeoutMs = 12_000): Promise<{ code: n
 			clearTimeout(timer);
 			reject(error);
 		});
-		handle.child.once("exit", (code, signalCode) => {
+		// Wait for inherited stdio handles as well as process exit before removing its cwd.
+		handle.child.once("close", (code, signalCode) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
@@ -423,7 +424,7 @@ async function main(): Promise<void> {
 						const result = await runFenceRace(sourceRoot, tsxCli, workerScript, workerEnv, fixture.root, kind, deleteMode, phase, fixture.data);
 						verifyRace(fixture, phase, result, beforeSource);
 					} finally {
-						rmSync(fixture.root, { recursive: true, force: true });
+						rmSync(fixture.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 					}
 				}
 			}
@@ -645,7 +646,7 @@ async function main(): Promise<void> {
 		if (previousEnv.HOME === undefined) delete process.env.HOME; else process.env.HOME = previousEnv.HOME;
 		if (previousEnv.USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = previousEnv.USERPROFILE;
 		if (previousEnv.PI_CODING_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousEnv.PI_CODING_AGENT_DIR;
-		rmSync(sandbox, { recursive: true, force: true });
+		rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}
 }
 

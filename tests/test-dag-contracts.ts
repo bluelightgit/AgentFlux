@@ -91,7 +91,8 @@ try {
 			prefixLayout: true,
 			sessionId: "pi-session",
 			executionId: timeoutExecutionId,
-			deadlineAt: Date.now() + 100,
+			// Exercise a started child, not a pre-start deadline under slow Windows CI startup.
+			deadlineAt: Date.now() + 10_000,
 			maxWallClockMs: null,
 			maxRetries: 0,
 			enableQualityGate: false,
