@@ -45,6 +45,11 @@ jobs:
       - name: Verify package and offline Host loader
         run: npm run check:package
 
+      - name: Verify registry authentication (also in dry-run)
+        run: npm whoami --registry https://registry.npmjs.org/
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish to npm
         if: ${{ !inputs.dry-run }}
         run: npm publish --access public

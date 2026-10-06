@@ -9,14 +9,14 @@
 - 同候选重跑最小/verify/独立typecheck/build/pack，核对依赖锁、Host wrapper/两个业务入口/preload、无敏感或本机runtime文件；两后端production真实Core/Agent/planner/node/judge/Community、history、fork、消息、resume、telemetry、并发/取消及自动安装范围。人工UI/未支持平台/不合作工具/长soak不伪造PASS，发行说明列边界。
 - 修复已知Node20工作流基线，CI最低22.19及24/Linux与Windows；发布检查tag=manifest、构建/测试/包布局通过才publish。Live区分配置缺失失败与真实Provider失败，不用skipped代替通过；不暴露API key。
 - 确认origin/main关系、无版本/tag冲突，提交审核过的源/测试/文档/manifest；不提交本机证据、token/凭据、node_modules/dist。只允许正常合并/fast-forward与非force推送，不移动既有tag。
-- main CI/Live通过后打v0.1.3并推送，观察Publish/GitHub Release；若失败保留日志并修真实原因。npm必须实际查询新版本/latest并下载包检查integrity/版本/资产与隔离安装/Host加载，不以Publish job名或本地npm pack证明远程可拉取。
+- 按用户原文“各场景测试无误后推main/tag，完了看Actions/npm”的顺序：本地同候选两模式各12类fresh及包/安全门禁、main四CI成功后可推v0.1.3，观察Publish/GitHub Release与Live结果分别汇报，不能声称所有Actions通过。2026-10-06远程Live的仓库Provider旧模型404、当前alias不支持、目录返回空；这是外部配置阻碍，保留失败，不自动换模型、不复制本机凭据或放宽断言。发布身份先以dry-run npm whoami实际验证，失败暂停真正publish、告知用户更新NPM_TOKEN。npm必须实际查询新版本/latest并下载包检查integrity/版本/资产与隔离安装/Host加载，不以Publish job名或本地npm pack证明远程可拉取。
 - 完成报告保存commit/tag/Actions URL及结论/npm dist/完整性/关键证据与未认证范围；完成后归档该任务，不扩展为所有产品场景认证。
 
 ## PLATFORM-01 / P1：Linux 原生验收与 macOS 生命周期缺口（待实施 / 验证）
 
 2026-10-01源码调查：Windows当前候选有真实证据；Linux已有/proc boot_id+starttime和POSIX process group逻辑，但缺本候选原生全链路认证。macOS/darwin在process-identity中明确unsupported，停止/锁/GC/orphan路径只能保守unknown，不是仅缺一次测试。证据见[Host与平台报告](../reviews/2026-10-01-host-binding-platform.md)。
 
-- CI基线先修：ci.yml的Node20/22及live/publish Node20与Node>=22.19不符；更新最低22.19与受支持LTS矩阵，Linux/Windows分别运行，macOS先在出生身份契约闭合后纳入完整支持。工作流配置不能当实际PASS。
+- CI基线已修：Linux/Windows的Node22.19与24四job于2026-10-06真实verify/build/pack/offline Host全部成功；job事实见v0.1.3发布报告。仅确定性/模拟认证，远程Live因外部Provider配置失败，不能扩展为Linux全业务实测。macOS仍须出生身份闭合后纳入完整支持。
 - Linux：独立Linux node_modules、真实/proc与PID namespace/权限/zombie、取消进程组/锁释放、fork/恢复/Message V2与费用；production dist的fresh Provider证明。不能用WindowsNode/共享Windows依赖/模拟platform代替Linux执行。本机WSL Ubuntu22.04可读/proc，但未找到原生Linuxnode，本次未安装系统运行时或认证Linux。
 - macOS：先设计并实现精确OS出生身份（原生进程信息与boot identity），不得只凭PID或秒级ps lstart，也不将unsupported改成已退出。同步schema/validator/旧历史兼容、权限失败unknown、停止前重核验、锁/GC/recovery；再运行macOS真实正常/取消/崩溃/编号复用及production业务链路。
 - 分工：Core/process-identity与OS适配提供事实；runner继续定向停止并等待实际退出；TUI只显示，Host策略不等于OS沙箱。与02已有PID首次握手/原子性/owner强杀任务共享契约，不另造执行器。
