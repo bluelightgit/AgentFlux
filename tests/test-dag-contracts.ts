@@ -96,7 +96,7 @@ try {
 			maxWallClockMs: null,
 			maxRetries: 0,
 			enableQualityGate: false,
-			invocationOverride: { command: process.execPath, args: ["-e", "setTimeout(() => {}, 1000)"] },
+			invocationOverride: { command: process.execPath, args: ["-e", "setTimeout(() => {}, 60_000)", "--"] },
 		},
 	);
 	const timeoutRun = listAgentRuns(join(timeoutNodeRoot, ".agentflux"), { taskId: undefined })
