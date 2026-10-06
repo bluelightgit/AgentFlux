@@ -77,6 +77,7 @@
 
 - **已完成部分**：出生字段、异步观察/迟到绑定、未知保留、启动异常/实际退出收敛、14+13 项身份回归和 4 组清理故障、完整门禁及两轮五类 fresh 验证见 [局部阶段摘要](../history-plans/2026-09-08-pid-identity-validation.md)。真正 OS 编号复用来自旧 GC 核验器，Core 尚未复现实际误杀；不能以合成出生不符测试冒充真实复用压力验收。
 - **首次捕获与启动握手**：独立 reviewer 仍质疑首次观察到本地 exit 事件之间的窗口，见 `pid-identity-closure/reviewer-final-facts.json` / `review-disposition.md`。设计 child 自报/父授权及物理实例句柄，证明登记失败时不提前执行模型；不能仅把同步查询前移就声称原子性，也不能恢复阻塞 stdout/deadline 的旧实现。
+- **2026-10-06 Windows cold-CIM事实**：v0.1.3/tag四CI与真实包调用通过后，main仅文档追加的Windows Node22正向SDK单测首次2秒CIM探针超时，按设计exit72/零Run拒绝，其他三job成功。不能放宽unknown门禁或扩大产品探针/模型deadline；正向test-subagent-runtime先最多三次异步真实OS观察并断言alive，再测试SDK，身份/权限/失败断言保持。完整产品cold-start预热/可见重试与启动握手仍在本节未完成范围，不以单测准备关闭它。
 - **未知与恢复控制**：缺 PID/owner 的 starting 记录目前只是保守推迟。完善有界的 cleanup-pending 呈现与后台收敛，在不伪造终态或释放保护的前提下处理长期拒绝；重启后仅写 stop 文件可能没有消费者，需核验真正的控制接管。不增加不安全 Registry-PID 强杀入口，不猜补 legacy 身份。
 - **锁与性能**：stale-lock token/generation 的原子 claim/CAS、外部观察在短 F 临界区外批量完成仍待实现。当前 positive-only 缓存只能推迟回收，强杀始终新鲜核对；单纯 rename/unlink 和出生字段不提供多文件或内核原子性。
 - **剩余验收**：Linux/其他平台及 PID namespace 边界、真实编号复用/句柄控制、父 owner hard-kill→接管→resume/retry、更广进程树与权限/探测超时压力。此门禁优先于扩大 owner 强杀恢复。

@@ -13,6 +13,7 @@ import { listAgentRuns, markAgentRunRunning, markSdkAgentRunRunning, registerAge
 import { createSdkRunOwner, activateSdkRunOwner, retireSdkRunOwner, isSdkRunOwnerActive } from "../src/core/runtime-owner";
 import { SharedBoard } from "../src/core/shared-board";
 import { readActiveContext } from "../src/core/active-context";
+import { observeProcessAsync } from "../src/core/process-identity";
 
 const root = mkdtempSync(join(tmpdir(), "flux-dual-runtime-"));
 const fluxDir = join(root, ".agentflux"); mkdirSync(fluxDir);
@@ -29,6 +30,15 @@ let binding: ReturnType<typeof bindPiSdkHost> | undefined;
 const template = { name: "sdk-worker", role: "tester", description: "fixture", systemPrompt: "Short fixture only", model: "fixture", provider: "dual-fixture", tools: ["read"], skills: [], source: "test" };
 const base = { cwd: root, agent: template, sessionId: "parent", prefixLayout: false, maxRetries: 0, thinking: "off" as const };
 try {
+	// This positive SDK suite requires an OS-verified Main identity. A cold
+	// Windows CIM helper can exceed its unchanged per-probe bound on CI;
+	// retry observation only, never start a Run with an invented/unknown birth.
+	let mainBirth = await observeProcessAsync(process.pid);
+	for (let attempt = 1; attempt < 3 && mainBirth.state === "unknown"; attempt++) {
+		await new Promise(resolve => setTimeout(resolve, 100));
+		mainBirth = await observeProcessAsync(process.pid);
+	}
+	assert.equal(mainBirth.state, "alive", `SDK fixture requires a verified Main birth: ${JSON.stringify(mainBirth)}`);
 	assert.equal(resolveSubagentRuntime(undefined), "process"); assert.equal(resolveSubagentRuntime("sdk"), "sdk");
 	assert.throws(() => resolveSubagentRuntime("auto"), /subagent_runtime/);
 	assert.equal(loadSubagentRuntime(root), "process");
