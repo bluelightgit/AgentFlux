@@ -23,8 +23,8 @@ on:
   workflow_dispatch:
     inputs:
       base-url:
-        description: "Provider base URL（对应 models.json providers.<id>.baseUrl）"
-        required: true
+        description: "Optional provider base URL override; otherwise use repository Secret"
+        required: false
         type: string
       api-key:
         description: "API key（会被日志打码；也可省略改用 Secrets.AGENTFLUX_LIVE_API_KEY）"
@@ -54,7 +54,7 @@ on:
         default: off
         type: string
       cases:
-        description: "Cases: direct,agents,workflow,community,history,workflow-reuse,workflow-modify"
+        description: "Cases: direct,agents,workflow,community,history,workflow-reuse,workflow-modify,catalog (no model generation)"
         required: false
         default: direct,agents,workflow,community
         type: string
@@ -121,6 +121,20 @@ jobs:
             case "$case" in
               direct|agents|workflow|community)
                 AGENTFLUX_LIVE_CASES="$case" npm run test:live || FAILED=1 ;;
+              catalog)
+                node --input-type=module <<'NODE'
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          const base = process.env.AGENTFLUX_LIVE_BASE_URL.replace(/\/+$/, '');
+          const response = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${process.env.AGENTFLUX_LIVE_API_KEY}` }, signal: AbortSignal.timeout(30000) });
+          if (!response.ok) throw new Error(`Provider catalog HTTP ${response.status}`);
+          const body = await response.json();
+          const ids = (Array.isArray(body.data) ? body.data : []).map(m => m.id).filter(id => typeof id === 'string');
+          if (!ids.length) throw new Error('Provider catalog contains no model IDs');
+          mkdirSync('.agentflux/test-results', { recursive: true });
+          writeFileSync('.agentflux/test-results/provider-model-ids.json', JSON.stringify({ ids, at: new Date().toISOString(), generationRequests: 0 }, null, 2));
+          console.log(JSON.stringify({ relevant: ids.filter(id => /deepseek|flash|luna/i.test(id)).slice(0, 100), generationRequests: 0 }));
+          NODE
+                ;;
               history)
                 npm run test:live:history || FAILED=1 ;;
               workflow-reuse)

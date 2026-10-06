@@ -74,7 +74,8 @@ try {
 	const { runAgent } = await import("../src/agents/agent-runner");
 	const terminated = await runAgent({ cwd, sessionId: "alpha", agent: { name: "external-signal", role: "reviewer", description: "Signal classification fixture", systemPrompt: "Reply briefly.", tools: ["read"] },
 		task: "External process termination is a failure, not a user cancellation.", prefixLayout: false, maxRetries: 0,
-		invocationOverride: { command: process.execPath, args: ["-e", "process.kill(process.pid, 'SIGTERM')"] } });
+		// Runner appends Pi flags; terminate Node option parsing so the fixture actually executes.
+		invocationOverride: { command: process.execPath, args: ["-e", "process.kill(process.pid, 'SIGTERM')", "--"] } });
 	assert.notEqual(terminated.exitCode, 0); assert.notEqual(terminated.exitCode, 130);
 	const runs = JSON.parse(readFileSync(join(runtime, "runs.json"), "utf8")).runs;
 	assert.equal(runs.at(-1).status, "failed");
