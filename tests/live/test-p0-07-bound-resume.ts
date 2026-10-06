@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Production-dist Workflow coverage for the remaining bound-Agent and checkpoint
@@ -12,7 +12,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-bound-resume-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-bound-resume-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const config = loadLiveConfig("p0-07-bound-resume");
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
 			budget: { max_cost_per_task: 0.5, max_iterations: 4, max_wall_clock_seconds: null, max_parallel_agents: 2 },
 			pricing: { enable_remote_fetch: false },
 		}, null, 2));
-		const extensionEntry = join(fixtureRoot, "dist", "extension", "entry.js");
+		const extensionEntry = join(fixtureRoot, "dist", "extension", "host-entry.ts");
 
 		seedPi = launch("bound-agent-seed", extensionEntry, "bound-agent-seed", [
 			"严格只调用一次 AgentFlux flux_agent 工具，不要调用其他工具。",

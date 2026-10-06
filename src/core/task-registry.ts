@@ -1,7 +1,14 @@
 import { join } from "node:path";
-import { readJsonStore, updateJsonStore } from "./json-store";
+import { isDeepStrictEqual } from "node:util";
+import { readJsonStore } from "./json-store";
+import { updateReferenceStore as updateJsonStore } from "./agent-reference-fence";
+import { assertAgentReference } from "./agent-reference-target";
+import { dirname } from "node:path";
 import type { TaskOperation, TaskExecutionPlan } from "./task-execution";
 import { assertSafeOpaqueId } from "./safe-path";
+import type { InvocationOutcome } from "./task-outcome";
+import { withWorkflowReference } from "../workflows/workflow-registry";
+import { getProcessIdentity, type ProcessIdentity } from "./process-identity";
 
 export type TaskStatus = "created" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
 
@@ -18,7 +25,9 @@ export interface TaskRecord {
 	/** Absolute execution deadline; absent means no hard wall-clock limit. */
 	deadlineAt?: string;
 	resource?: { type: "issue" | "workflow"; id: string; version?: number };
-	team?: Array<{ name: string; role?: string; persistent?: boolean }>;
+	/** 单次 Workflow 的显式执行正文；不重写活动父 Task 或重新分配预算。 */
+	workflowRequest?: { task: string; action: "run" | "reuse" | "modify"; selector?: string };
+	team?: Array<{ name: string; agentId?: string; role?: string; persistent?: boolean }>;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -28,6 +37,7 @@ export interface TaskExecutionRecord {
 	taskId: string;
 	/** PID of the Main/Workflow process that owns this execution while running. */
 	ownerPid?: number;
+	ownerIdentity?: ProcessIdentity;
 	sessionId: string;
 	operation: TaskOperation;
 	parentTaskId?: string;
@@ -37,6 +47,10 @@ export interface TaskExecutionRecord {
 	deadlineAt?: string;
 	budget?: TaskExecutionPlan["budget"];
 	costUsd: number;
+	/** 工具调用终态回执；同一 toolCallId 幂等，不另建执行器/账本。 */
+	invocationOutcomes?: Array<InvocationOutcome & { id: string }>;
+	/** complete 仅表示本地回执齐全，不证明 Provider 价格正确。 */
+	costAccounting?: { mainCostUsd: number; invocationCostUsd: number; complete: boolean; attributionComplete?: boolean; provisional?: boolean };
 	/** Main 会话侧逐轮累计 usage（turn_end 从 pi message_end 读取） */
 	usage?: {
 		input: number;
@@ -153,6 +167,7 @@ export function registerTask(
 	if (options.ownerPid !== undefined && (!Number.isInteger(options.ownerPid) || options.ownerPid <= 0)) {
 		throw new Error("Task execution ownerPid must be a positive integer");
 	}
+	const ownerIdentity = options.ownerPid === undefined ? undefined : getProcessIdentity(options.ownerPid);
 	if (plan.parentTaskId) assertSafeOpaqueId(plan.parentTaskId, "parentTaskId");
 	if (plan.parentExecutionId) assertSafeOpaqueId(plan.parentExecutionId, "parentExecutionId");
 	return updateStore(fluxDir, store => {
@@ -169,6 +184,12 @@ export function registerTask(
 			}
 			if (existing.sessionId !== sessionId || existing.executionId !== plan.executionId) {
 				throw new Error(`Task identity conflict: ${plan.taskId}`);
+			}
+			const priorOwner = store.executions.find(item => item.id === plan.executionId);
+			if (options.ownerPid !== undefined && priorOwner?.ownerPid !== undefined
+				&& (priorOwner.ownerPid !== options.ownerPid
+					|| (priorOwner.ownerIdentity !== undefined && !isDeepStrictEqual(priorOwner.ownerIdentity, ownerIdentity)))) {
+				throw new Error(`Task execution process owner is immutable: ${plan.executionId}`);
 			}
 			existing.task = plan.task;
 			existing.selectedBy = plan.selectedBy;
@@ -203,7 +224,10 @@ export function registerTask(
 			if (TERMINAL_STATUSES.has(execution.status) && execution.status !== status) {
 				throw new Error(`Historical execution is immutable: ${plan.executionId} is ${execution.status}`);
 			}
-			if (execution.ownerPid === undefined && options.ownerPid !== undefined) execution.ownerPid = options.ownerPid;
+			if (execution.ownerPid === undefined && options.ownerPid !== undefined) {
+				execution.ownerPid = options.ownerPid;
+				execution.ownerIdentity = ownerIdentity;
+			}
 			execution.operation = plan.operation;
 			execution.parentTaskId = plan.parentTaskId;
 			execution.parentExecutionId = plan.parentExecutionId;
@@ -217,6 +241,7 @@ export function registerTask(
 				taskId: plan.taskId,
 				sessionId,
 				ownerPid: options.ownerPid,
+				ownerIdentity,
 				operation: plan.operation,
 				parentTaskId: plan.parentTaskId,
 				parentExecutionId: plan.parentExecutionId,
@@ -232,6 +257,28 @@ export function registerTask(
 	});
 }
 
+/** Main 在线绝对快照；历史终态不回写，预算读取与子 Run 共享同一 Execution 事实。 */
+export function updateTaskMainUsage(fluxDir: string, taskId: string, usage: NonNullable<TaskExecutionRecord["usage"]>, coverage?: { complete: boolean; attributionComplete: boolean; provisional: boolean }): boolean {
+	for (const key of ["input", "output", "cacheRead", "cacheWrite", "costUsd"] as const) {
+		if (!Number.isFinite(usage[key]) || usage[key] < 0) throw new Error(`Invalid Main usage ${key}`);
+	}
+	return updateStore(fluxDir, store => {
+		const task = store.tasks.find(item => item.id === taskId);
+		const execution = task ? store.executions.find(item => item.id === task.executionId) : undefined;
+		if (!task || !execution || TERMINAL_STATUSES.has(task.status) || TERMINAL_STATUSES.has(execution.status)) return false;
+		execution.usage = { ...usage };
+		execution.costUsd = usage.costUsd + (execution.invocationOutcomes ?? []).reduce((sum, item) => sum + (item.costUsd ?? 0), 0);
+		if (coverage) {
+			const invocations = execution.invocationOutcomes ?? [];
+			execution.costAccounting = { mainCostUsd: usage.costUsd, invocationCostUsd: invocations.reduce((sum, item) => sum + (item.costUsd ?? 0), 0),
+				complete: coverage.complete && invocations.every(item => item.costUsd !== undefined && item.costComplete === true),
+				attributionComplete: coverage.attributionComplete && invocations.every(item => item.attributionComplete === true), provisional: coverage.provisional };
+		}
+		execution.updatedAt = task.updatedAt = new Date().toISOString();
+		return true;
+	});
+}
+
 export function updateTaskStatus(
 	fluxDir: string,
 	taskId: string,
@@ -240,6 +287,7 @@ export function updateTaskStatus(
 		executionId?: string;
 		costUsd?: number;
 		usage?: TaskExecutionRecord["usage"];
+		costAccounting?: TaskExecutionRecord["costAccounting"];
 		outcome?: TaskExecutionRecord["outcome"];
 	} = {},
 ): TaskRecord | undefined {
@@ -256,6 +304,17 @@ export function updateTaskStatus(
 		if (TERMINAL_STATUSES.has(execution.status) && execution.status !== status) {
 			throw new Error(`Historical execution is immutable: ${executionId} is ${execution.status}`);
 		}
+		if (TERMINAL_STATUSES.has(task.status) || TERMINAL_STATUSES.has(execution.status)) {
+			const same = (value: unknown, stored: unknown) => value === undefined
+				|| isDeepStrictEqual(JSON.parse(JSON.stringify(value)), stored);
+			if (task.status !== status || execution.status !== status
+				|| !same(details.costUsd, execution.costUsd) || !same(details.usage, execution.usage)
+				|| !same(details.costAccounting, execution.costAccounting)
+				|| !same(details.outcome, execution.outcome)) {
+				throw new Error(`Historical execution is immutable: ${executionId} terminal facts differ`);
+			}
+			return task; // 相同事实幂等重放，不刷新终态时间。
+		}
 		const now = new Date().toISOString();
 		task.status = status;
 		task.updatedAt = now;
@@ -263,21 +322,62 @@ export function updateTaskStatus(
 		execution.updatedAt = now;
 		if (details.costUsd !== undefined) execution.costUsd = details.costUsd;
 		if (details.usage) execution.usage = details.usage;
+		if (details.costAccounting) execution.costAccounting = details.costAccounting;
 		if (details.outcome) execution.outcome = details.outcome;
 		if (TERMINAL_STATUSES.has(status)) execution.finishedAt = now;
 		return task;
 	});
 }
 
-export function updateTaskMetadata(fluxDir: string, taskId: string, metadata: Pick<TaskRecord, "resource" | "team">): TaskRecord | undefined {
+export function recordTaskInvocationOutcome(fluxDir: string, taskId: string, id: string, outcome: InvocationOutcome): void {
+	updateStore(fluxDir, store => {
+		const task = store.tasks.find(item => item.id === taskId);
+		const execution = store.executions.find(item => item.id === task?.executionId);
+		if (!task || !execution) throw new Error(`Task invocation parent missing: ${taskId}`);
+		const record = JSON.parse(JSON.stringify({ id, action: outcome.action, status: outcome.status, error: outcome.error, costUsd: outcome.costUsd, costComplete: outcome.costComplete, attributionComplete: outcome.attributionComplete }));
+		if (typeof id !== "string" || !id.trim() || !["success", "failure", "cancelled", "timeout"].includes(record.status)
+			|| (record.costComplete !== undefined && typeof record.costComplete !== "boolean")
+			|| (record.attributionComplete !== undefined && typeof record.attributionComplete !== "boolean")
+			|| (record.error !== undefined && typeof record.error !== "string")
+			|| record.action !== (record.status === "success" ? "completed" : record.status === "cancelled" ? "cancelled" : "failed")
+			|| (record.costUsd !== undefined && (!Number.isFinite(record.costUsd) || record.costUsd < 0))) throw new Error("Invalid invocation outcome");
+		const previous = execution.invocationOutcomes?.find(item => item.id === id);
+		if (previous) {
+			if (!isDeepStrictEqual(previous, record)) throw new Error(`Invocation outcome is immutable: ${id}`);
+			return;
+		}
+		if (TERMINAL_STATUSES.has(task.status) || TERMINAL_STATUSES.has(execution.status)) throw new Error(`Historical execution is immutable: ${execution.id}`);
+		(execution.invocationOutcomes ??= []).push(record);
+	});
+}
+
+export function updateTaskMetadata(fluxDir: string, taskId: string, metadata: Pick<TaskRecord, "resource" | "team" | "workflowRequest">): TaskRecord | undefined {
+	if (metadata.resource?.type === "workflow") return withWorkflowReference(fluxDir, metadata.resource, () => updateTaskMetadataInternal(fluxDir, taskId, metadata));
+	return updateTaskMetadataInternal(fluxDir, taskId, metadata);
+}
+
+function updateTaskMetadataInternal(fluxDir: string, taskId: string, metadata: Pick<TaskRecord, "resource" | "team" | "workflowRequest">): TaskRecord | undefined {
 	return updateStore(fluxDir, store => {
 		const task = store.tasks.find(item => item.id === taskId);
 		if (!task) return undefined;
 		if (TERMINAL_STATUSES.has(task.status)) {
 			throw new Error(`Historical task is immutable: ${taskId} is ${task.status}`);
 		}
-		if (metadata.resource) task.resource = metadata.resource;
-		if (metadata.team) task.team = metadata.team;
+		if (metadata.workflowRequest) {
+			const request = JSON.parse(JSON.stringify(metadata.workflowRequest));
+			if (!request.task?.trim() || !["run", "reuse", "modify"].includes(request.action)) throw new Error("Invalid Workflow request");
+			if (task.workflowRequest && !isDeepStrictEqual(task.workflowRequest, request)) throw new Error("Workflow request is immutable for this invocation");
+			task.workflowRequest = request;
+		}
+		if (metadata.resource) {
+			if (task.resource?.type === "workflow" && !isDeepStrictEqual(task.resource, metadata.resource)) throw new Error("Active Workflow binding cannot be replaced");
+			task.resource = metadata.resource;
+		}
+		if (metadata.team) task.team = metadata.team.map(member => {
+			if (member.agentId === undefined) return { ...member }; // 兼容逻辑队员；persistent 并非注册身份的证明。
+			const agent = assertAgentReference(dirname(fluxDir), member.agentId, task.sessionId);
+			return { ...member, name: agent.name };
+		});
 		task.updatedAt = new Date().toISOString();
 		return task;
 	});

@@ -1,7 +1,6 @@
 /** pi 会话树 fork 的最小适配层。fork 是 Agent 创建来源，不是工作模式。 */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { randomUUID } from "node:crypto";
 import type { TelemetryWriter } from "../telemetry/events";
 
 export function registerSessionFork(pi: ExtensionAPI, getState: () => { sessionId: string; telemetry: TelemetryWriter | null }) {
@@ -14,21 +13,10 @@ export function registerSessionFork(pi: ExtensionAPI, getState: () => { sessionI
 		const targetId = event.targetEntryId ?? event.entryId ?? "unknown";
 		telemetry.writeContextEvent({
 			sessionId, turnIndex: -1, // fork 不是常规轮次
-			action: "fork_created",
+			action: "fork_attempted",
 			detail: `fork from ${targetId}`,
 			contextPercentBefore: null,
 			contextPercentAfter: null,
-		});
-		telemetry.writeAgentLifecycle({
-			sessionId,
-			agentId: `agent-${randomUUID()}`,
-			agent: `fork-${String(targetId).slice(0, 12)}`,
-			kind: "main",
-			origin: "fork",
-			status: "idle",
-			action: "forked",
-			parentAgentId: sessionId,
-			forkPoint: String(targetId),
 		});
 		console.error(`[flux] fork: from entry ${targetId}`);
 		return undefined;
@@ -39,7 +27,7 @@ export function registerSessionFork(pi: ExtensionAPI, getState: () => { sessionI
 	pi.on("session_before_tree", async (event: any, _ctx: any) => {
 		const { sessionId, telemetry } = getState();
 		if (!telemetry) return undefined;
-		const targetId = event.targetEntryId ?? event.targetId ?? "unknown";
+		const targetId = event.preparation?.targetId ?? "unknown";
 		telemetry.writeContextEvent({
 			sessionId, turnIndex: -1,
 			action: "tree_navigate",
@@ -83,7 +71,7 @@ export async function handleForkCommand(args: string[], ctx: any): Promise<strin
 
 	if (args.length === 0) {
 		// 列出 fork 候选点
-		const lines = ["Available fork points (最近 5 条用户消息):", "─".repeat(50)];
+		const lines = ["Available fork points (last 5 user messages):", "─".repeat(50)];
 		for (let i = candidates.length - 1; i >= 0; i--) {
 			const c = candidates[i];
 			lines.push(`  [${i}] ${c.entryId.slice(0, 12)}  ${c.preview}`);
@@ -108,7 +96,7 @@ export async function handleForkCommand(args: string[], ctx: any): Promise<strin
 
 	const result = await ctx.fork(targetEntryId, {
 		withSession: async (newCtx: any) => {
-			newCtx.ui?.notify?.("AgentFlux fork: 已创建新分支", "info");
+			newCtx.ui?.notify?.("AgentFlux fork: new branch created", "info");
 		},
 	});
 
@@ -116,5 +104,5 @@ export async function handleForkCommand(args: string[], ctx: any): Promise<strin
 		return "fork cancelled (possibly intercepted by another extension)";
 	}
 
-	return `fork success: from ${targetEntryId.slice(0, 12)} created new branch. Current session switched to new branch.`;
+	return `Fork succeeded: created a new branch from ${targetEntryId.slice(0, 12)}. The current session switched to the new branch.`;
 }

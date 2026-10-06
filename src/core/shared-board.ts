@@ -13,13 +13,15 @@
  */
 
 import {
-	readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, appendFileSync,
+	readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync,
 	unlinkSync, openSync, closeSync, realpathSync, renameSync,
 } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { assertSafeOpaqueId } from "./safe-path";
-import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
+import { isProcessInstanceActive, parseOwnerPid, stealStaleLock } from "./fs-lock";
+import { getProcessIdentity } from "./process-identity";
+import { isSdkRunOwnerActive, type SdkRunOwner } from "./runtime-owner";
 
 const PROCESS_OWNER_ID = `${process.pid}-${randomUUID()}`;
 
@@ -93,6 +95,7 @@ export interface AgentInfo {
 	instanceId?: string;
 	/** PID is observational only; instanceId remains the ownership boundary. */
 	runtimePid?: number;
+	runtimeOwner?: SdkRunOwner;
 	heartbeatAt?: string;
 	lastSeen: string;
 	registeredAt: string;
@@ -104,7 +107,7 @@ export class SharedBoard {
 	private readonly sharedDir: string;
 	private readonly projectRoot: string;
 
-	constructor(fluxDir: string, options: { ensureDirs?: boolean } = {}) {
+	constructor(fluxDir: string, private readonly options: { ensureDirs?: boolean; runtimeOwner?: SdkRunOwner } = {}) {
 		this.sharedDir = join(fluxDir, "shared");
 		this.projectRoot = dirname(resolve(fluxDir));
 		if (options.ensureDirs !== false) this.ensureDirs();
@@ -133,6 +136,7 @@ export class SharedBoard {
 	 * 不能继续用旧快照覆盖其他进程刚写入的数据。
 	 */
 	private withMutex<T>(name: string, operation: () => T, timeoutMs = 2_000): T {
+		getProcessIdentity(); // Warm the current process identity before the lock deadline.
 		const deadline = Date.now() + timeoutMs;
 		const waiter = new Int32Array(new SharedArrayBuffer(4));
 		do {
@@ -154,7 +158,7 @@ export class SharedBoard {
 			let fd: number | null = null;
 			try {
 				fd = openSync(path, "wx");
-				writeFileSync(fd, JSON.stringify({ token, ownerId: PROCESS_OWNER_ID, timestamp: now }));
+				writeFileSync(fd, JSON.stringify({ token, ownerId: PROCESS_OWNER_ID, ownerIdentity: getProcessIdentity(), timestamp: now }));
 				return true;
 			} catch (error: any) {
 				// Windows may report EPERM/EACCES/EBUSY instead of EEXIST while another
@@ -182,7 +186,7 @@ export class SharedBoard {
 			// 时间超时 且 持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
 			const pid = typeof existing.ownerId === "string" ? parseOwnerPid(existing.ownerId) : undefined;
 			if (typeof existing.timestamp !== "number" || now - existing.timestamp <= ttlMs) return null;
-			if (pid === undefined || isProcessAlive(pid)) return null;
+			if (pid === undefined || isProcessInstanceActive(pid, existing.ownerIdentity)) return null;
 			stealStaleLock(path);
 			if (!create()) return null;
 		}
@@ -251,18 +255,9 @@ export class SharedBoard {
 	// ── Tasks ──
 	// ── Messages ──
 
-	sendMessage(from: string, to: string, type: string, content: string): AgentMessage {
-		const id = `msg-${randomUUID()}`;
-		const msg: AgentMessage = {
-			id, from, to, type, content,
-			timestamp: new Date().toISOString(),
-			read: false,
-		};
-		// 文件名: {id}__{from}-{to}.json (便于按收件人过滤；避免 → 等非 ASCII 字符)
-		const safeName = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_");
-		const filename = `${id}__${safeName(from)}-${safeName(to)}.json`;
-		writeFileSync(join(this.sharedDir, "messages", filename), JSON.stringify(msg, null, 2));
-		return msg;
+	/** @deprecated V1 只保留历史读取；新消息必须拥有 V2 recipient delivery。 */
+	sendMessage(_from: string, _to: string, _type: string, _content: string): AgentMessage {
+		throw new Error("Legacy message writes are disabled; use MessageBus.sendDirect/sendBroadcast");
 	}
 
 	/** 获取指定 agent 的收件箱 (发给它的 + 广播) */
@@ -288,26 +283,9 @@ export class SharedBoard {
 		return this.getInbox(agentName).filter(m => !m.read);
 	}
 
-	/** 标记消息为已读 */
-	markMessageRead(msgId: string): void {
-		const dir = join(this.sharedDir, "messages");
-		if (!existsSync(dir)) return;
-		this.withMutex("messages", () => {
-			for (const file of readdirSync(dir)) {
-				if (!file.endsWith(".json") || !file.startsWith(msgId)) continue;
-				const path = join(dir, file);
-				if (!existsSync(path)) continue;
-				let msg: AgentMessage;
-				try {
-					msg = JSON.parse(readFileSync(path, "utf-8")) as AgentMessage;
-				} catch {
-					continue;
-				}
-				msg.read = true;
-				this.writeJsonAtomic(path, msg);
-				break;
-			}
-		});
+	/** @deprecated 不再用 V1 的全局 read 标记代替每位收件人的 ACK。 */
+	markMessageRead(_msgId: string): void {
+		throw new Error("Legacy message writes are disabled; use MessageBus.acknowledge");
 	}
 
 	/** 列出所有消息 */
@@ -394,27 +372,9 @@ export class SharedBoard {
 		return this.listGroups().filter(g => g.members.includes(agentName) || g.type === "all");
 	}
 
-	/** 向群组发送消息 */
-	sendGroupMessage(from: string, groupId: string, content: string): GroupMessage {
-		assertSafeOpaqueId(groupId, "groupId");
-		const groups = this.listGroups();
-		const group = groups.find(g => g.id === groupId);
-		if (!group) throw new Error(`Group ${groupId} not found`);
-		if (!group.members.includes(from) && group.type !== "all") {
-			throw new Error(`${from} is not a member of group ${groupId}`);
-		}
-
-		const groupDir = join(this.sharedDir, "groups", groupId);
-		if (!existsSync(groupDir)) mkdirSync(groupDir, { recursive: true });
-
-		const msgFile = join(groupDir, "messages.jsonl");
-		const msg: GroupMessage = {
-			id: `gm-${randomUUID()}`,
-			groupId, from, content,
-			timestamp: new Date().toISOString(),
-		};
-		appendFileSync(msgFile, JSON.stringify(msg) + "\n");
-		return msg;
+	/** @deprecated 群成员仍由此注册表管理，但消息只有 V2 一个写路径。 */
+	sendGroupMessage(_from: string, _groupId: string, _content: string): GroupMessage {
+		throw new Error("Legacy message writes are disabled; use MessageBus.sendGroup");
 	}
 
 	/** 获取群组消息 (支持 sinceTs 增量读取) */
@@ -457,7 +417,7 @@ export class SharedBoard {
 					members: [...new Set(agentNames)],
 					created: new Date().toISOString(),
 					createdBy,
-					description: "全 agent 公开沟通频道",
+					description: "Public channel for all Agents",
 				};
 				this.writeJsonAtomic(join(this.sharedDir, "groups", "_registry.json"), [...groups, allGroup]);
 				mkdirSync(join(this.sharedDir, "groups", "all"), { recursive: true });
@@ -520,7 +480,7 @@ export class SharedBoard {
 			const active = existing && ["idle", "running", "blocked"].includes(existing.status);
 			const lastSeenMs = existing ? Date.parse(existing.heartbeatAt ?? existing.lastSeen) : 0;
 			const leaseFresh = Number.isFinite(lastSeenMs) && now.getTime() - lastSeenMs < leaseMs;
-			if (active && existing?.instanceId !== info.instanceId && leaseFresh) {
+			if (active && existing?.instanceId !== info.instanceId && (leaseFresh || (existing?.runtimeOwner && isSdkRunOwnerActive(this.projectRoot, existing.runtimeOwner)))) {
 				throw new Error(`runtime name already leased: ${info.name} by ${existing?.instanceId ?? "legacy-instance"}`);
 			}
 			const timestamp = now.toISOString();
@@ -569,6 +529,7 @@ export class SharedBoard {
 			const removed = registry.filter(agent => {
 				if (!requested.has(agent.name) || agent.role !== "rpc-runtime" || !agent.instanceId || !agent.heartbeatAt) return false;
 				if (!["idle", "running", "blocked"].includes(agent.status)) return false;
+				if (agent.runtimeOwner && isSdkRunOwnerActive(this.projectRoot, agent.runtimeOwner)) return false;
 				const heartbeat = Date.parse(agent.heartbeatAt);
 				return Number.isFinite(heartbeat) && heartbeat <= cutoff;
 			});
@@ -641,7 +602,7 @@ export class SharedBoard {
 	}
 
 	private lockOwner(agentName: string): string {
-		return `${agentName}:${PROCESS_OWNER_ID}`;
+		return `${agentName}${this.options.runtimeOwner ? `:sdk-${this.options.runtimeOwner.generation}` : ""}:${PROCESS_OWNER_ID}`;
 	}
 
 	/** 从锁 ownerId（`<agent>:<pid>-<uuid>`）解析持有者 pid；解析不出返回 undefined。
@@ -660,6 +621,8 @@ export class SharedBoard {
 		const payload = {
 			agent: agentName,
 			ownerId,
+			ownerIdentity: getProcessIdentity(),
+			runtimeOwner: this.options.runtimeOwner,
 			filePath,
 			canonicalPath,
 			timestamp: now,
@@ -691,7 +654,7 @@ export class SharedBoard {
 			// 持有者进程仍存活时不偷锁（与 fs-lock 的“活进程锁不可偷”一致）——
 			// ownerId 格式 `<agent>:<pid>-<uuid>`，解析出 pid 后做存活检查
 			const ownerPid = this.lockOwnerPid(String(lock.ownerId ?? ""));
-			if (ownerPid !== undefined && isProcessAlive(ownerPid)) return false;
+			if (lock.runtimeOwner ? isSdkRunOwnerActive(this.projectRoot, lock.runtimeOwner) : ownerPid === undefined || isProcessInstanceActive(ownerPid, lock.ownerIdentity)) return false;
 			unlinkSync(lp);
 		} catch {
 			// 损坏或读取竞争时 fail-closed，不能把潜在活锁当成成功。
@@ -707,6 +670,7 @@ export class SharedBoard {
 			const lock = JSON.parse(readFileSync(lp, "utf-8"));
 			const ownedByProcess = typeof lock.ownerId === "string" && lock.ownerId.endsWith(`:${PROCESS_OWNER_ID}`);
 			if (!ownedByProcess || (agentName && lock.ownerId !== this.lockOwner(agentName))) return false;
+			if (lock.runtimeOwner && lock.runtimeOwner.generation !== this.options.runtimeOwner?.generation) return false;
 			unlinkSync(lp);
 			return true;
 		} catch { return false; }
@@ -764,7 +728,7 @@ export function formatMessages(msgs: AgentMessage[]): string {
 	if (msgs.length === 0) return "No messages.";
 	const lines = ["Messages:", ""];
 	for (const m of msgs) {
-		const readIcon = m.read ? "✓" : "●";
+		const readIcon = m.read ? "[READ]" : "[UNREAD]";
 		lines.push(`  ${readIcon} ${m.id}: ${m.from}→${m.to} [${m.type}] ${m.content.slice(0, 80)}`);
 	}
 	return lines.join("\n");
@@ -775,7 +739,7 @@ export function formatGroups(groups: AgentGroup[]): string {
 	if (groups.length === 0) return "No groups.";
 	const lines = ["Groups:", ""];
 	for (const g of groups) {
-		const typeIcon = { all: "📢", team: "👥", direct: "💬" }[g.type];
+		const typeIcon = { all: "[ALL]", team: "[TEAM]", direct: "[DIRECT]" }[g.type];
 		lines.push(`  ${typeIcon} ${g.id}: ${g.name} [${g.type}] (${g.members.length} members: ${g.members.join(", ")})`);
 	}
 	return lines.join("\n");
@@ -794,7 +758,7 @@ export function formatAgents(agents: AgentInfo[]): string {
 	if (agents.length === 0) return "No registered agents.";
 	const lines = ["Agents:", ""];
 	for (const a of agents) {
-		const icon = { idle: "○", running: "●", blocked: "⚠", done: "✓", failed: "✗", cancelled: "⊘" }[a.status] ?? "?";
+		const icon = { idle: "[IDLE]", running: "[RUNNING]", blocked: "[BLOCKED]", done: "[DONE]", failed: "[FAILED]", cancelled: "[CANCELLED]" }[a.status] ?? "[UNKNOWN]";
 		lines.push(`  ${icon} ${a.name} (${a.role}) — ${a.status}`);
 		if (a.currentTask) lines.push(`    task: ${a.currentTask.slice(0, 80)}`);
 		if (a.model) lines.push(`    model: ${a.model}${a.thinking ? ` [${a.thinking}]` : ""}`);

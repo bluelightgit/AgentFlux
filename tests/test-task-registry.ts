@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_CONFIG } from "../src/core/types";
 import { createTaskExecutionPlan, formatTaskExecutionPlan } from "../src/core/task-execution";
+import { createWorkflowDefinition, reviseWorkflowDefinition } from "../src/workflows/workflow-registry";
 import { getTask, getTaskExecution, listTaskExecutions, listTasks, registerTask, resolveTask, updateTaskMetadata, updateTaskStatus } from "../src/core/task-registry";
 
 let passed = 0;
@@ -15,7 +16,9 @@ try {
 	const first = createTaskExecutionPlan({ taskId: "task-one", task: "review module", selectedBy: "user", budget: DEFAULT_CONFIG.budget });
 	registerTask(root, "pi-session-1", first);
 	updateTaskMetadata(root, first.taskId, { team: [{ name: "reviewer", role: "reviewer" }, { name: "tester", persistent: true }] });
-	updateTaskMetadata(root, first.taskId, { resource: { type: "workflow", id: "workflow-one", version: 2 } });
+	const definition = createWorkflowDefinition(root, { name: "workflow-one", dag: { description: "task binding", nodes: [] } });
+	reviseWorkflowDefinition(root, definition.id, { dag: definition.dag });
+	updateTaskMetadata(root, first.taskId, { resource: { type: "workflow", id: definition.id, version: 2 } });
 	updateTaskStatus(root, first.taskId, "completed", {
 		executionId: first.executionId,
 		costUsd: 0.25,
@@ -48,6 +51,17 @@ try {
 		assert.throws(() => updateTaskMetadata(root, first.taskId, { team: [{ name: "replacement" }] }), /Historical task is immutable/);
 		assert.equal(getTask(root, first.taskId)?.status, "completed");
 		assert.deepEqual(getTask(root, first.taskId)?.team?.map(item => item.name), ["reviewer", "tester"]);
+	});
+	check("Same-terminal replay is immutable and idempotent", () => {
+		const path = join(root, "runtime", "tasks.json");
+		const before = readFileSync(path, "utf8");
+		for (const details of [{ costUsd: 99 }, { outcome: { status: "failure" as const } }, { usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 42 } }]) {
+			assert.throws(() => updateTaskStatus(root, first.taskId, "completed", details), /Historical execution is immutable/);
+			assert.equal(readFileSync(path, "utf8"), before);
+		}
+		updateTaskStatus(root, first.taskId, "completed", { costUsd: 0.25, outcome: { status: "success" } });
+		updateTaskStatus(root, first.taskId, "completed");
+		assert.equal(readFileSync(path, "utf8"), before);
 	});
 	check("Task Registry preserves reusable Team structure", () => assert.deepEqual(getTask(root, "task-one")?.team?.map(item => item.name), ["reviewer", "tester"]));
 	check("Task Registry preserves the exact Workflow version", () => assert.equal(getTask(root, first.taskId)?.resource?.version, 2));

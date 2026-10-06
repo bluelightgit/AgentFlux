@@ -5,6 +5,8 @@ import {
 	type TaskNode,
 } from "../src/workflows/dag-executor";
 
+import { hasProductCopyViolation } from "./helpers/product-copy";
+
 // ─── Helpers ───
 
 const checks: Array<[string, boolean, string]> = [];
@@ -78,26 +80,23 @@ function contains(haystack: string, needle: string): boolean {
 }
 
 // ─────────────────────────────────────────────────────
-//  1. All statuses – each should render correct emoji + badge
+//  1. All statuses render an English badge without icons
 // ─────────────────────────────────────────────────────
 
 (function testAllStatuses() {
 	const statuses: Array<DAGExecutionResult["status"]> = [
 		"passed", "failed", "cancelled", "budget_exceeded", "timed_out",
 	];
-	const expectedEmoji: Record<string, string> = {
-		passed: "✅", failed: "❌", cancelled: "🚫", budget_exceeded: "💰", timed_out: "⏰",
-	};
 
 	for (const status of statuses) {
 		const r = makeResult({ status, passedNodes: ["t1"], executionId: `status-${status}` });
 		const out = formatWorkflowSummary(r, "test-label");
-		const emojiOk = contains(out, expectedEmoji[status]);
+		const plainText = !hasProductCopyViolation(out);
 		const badgeOk = contains(out, `\`${status.toUpperCase()}\``);
 		check(
-			`status "${status}" renders correct emoji + badge`,
-			emojiOk && badgeOk,
-			`emoji=${expectedEmoji[status]} badge=\`${status.toUpperCase()}\``,
+			`status "${status}" renders an English badge without icons`,
+			plainText && badgeOk,
+			`plainText=${plainText} badge=\`${status.toUpperCase()}\``,
 		);
 	}
 })();
@@ -116,7 +115,7 @@ function contains(haystack: string, needle: string): boolean {
 		executionId: "zero-nodes",
 	});
 	const out = formatWorkflowSummary(r, "no-nodes");
-	const noTables = !contains(out, "### ✅") && !contains(out, "### ❌");
+	const noTables = !contains(out, "### Passed") && !contains(out, "### Failed");
 	const zeroBreakdown = contains(out, "0 passed / 0 failed / 0 total");
 	check("0-node DAG does not crash and shows zero counts", noTables && zeroBreakdown, "no tables, 0/0/0");
 })();
@@ -132,8 +131,8 @@ function contains(haystack: string, needle: string): boolean {
 		failedNodes: [],
 	});
 	const out = formatWorkflowSummary(r, "all-good");
-	const hasPassedTable = contains(out, "### ✅ Passed");
-	const noFailedTable = !contains(out, "### ❌");
+	const hasPassedTable = contains(out, "### Passed");
+	const noFailedTable = !contains(out, "### Failed");
 	const countOk = contains(out, "2 passed / 0 failed / 2 total");
 	check("all-passed shows Passed table, no Failed table", hasPassedTable && noFailedTable && countOk, "✅ table present, ❌ table absent");
 })();
@@ -149,8 +148,8 @@ function contains(haystack: string, needle: string): boolean {
 		failedNodes: ["t1", "t2"],
 	});
 	const out = formatWorkflowSummary(r, "all-bad");
-	const hasFailedTable = contains(out, "### ❌ Failed");
-	const noPassedTable = !contains(out, "### ✅");
+	const hasFailedTable = contains(out, "### Failed");
+	const noPassedTable = !contains(out, "### Passed");
 	const countOk = contains(out, "0 passed / 2 failed / 2 total");
 	check("all-failed shows Failed table, no Passed table", hasFailedTable && noPassedTable && countOk, "❌ table present, ✅ table absent");
 })();
@@ -167,7 +166,7 @@ function contains(haystack: string, needle: string): boolean {
 		roles: { t1: "implementer", t2: "reviewer" },
 	});
 	const out = formatWorkflowSummary(r, "mixed");
-	const bothTables = contains(out, "### ✅ Passed") && contains(out, "### ❌ Failed");
+	const bothTables = contains(out, "### Passed") && contains(out, "### Failed");
 	const countOk = contains(out, "1 passed / 1 failed / 2 total");
 	check("mixed result shows both Passed and Failed tables", bothTables && countOk, "both tables present");
 })();
@@ -332,17 +331,17 @@ function contains(haystack: string, needle: string): boolean {
 })();
 
 // ─────────────────────────────────────────────────────
-// 16. Non-standard status (unexpected string) shows "❓"
+// 16. Non-standard status remains visible without an icon
 // ─────────────────────────────────────────────────────
 
 (function testUnknownStatus() {
-	// Cast a fake status to test the fallback emoji
+	// Cast a non-standard status to test forward-compatible presentation
 	const r: DAGExecutionResult = {
 		...makeResult({ status: "passed", passedNodes: ["t1"] }),
 		status: "unknown_status" as DAGExecutionResult["status"],
 	};
 	const out = formatWorkflowSummary(r, "weird");
-	check("unknown status shows ❓ fallback emoji", contains(out, "❓"), "emoji=❓");
+	check("unknown status remains visible without an icon", contains(out, "`UNKNOWN_STATUS`") && !hasProductCopyViolation(out), "UNKNOWN_STATUS badge");
 })();
 
 // ─────────────────────────────────────────────────────

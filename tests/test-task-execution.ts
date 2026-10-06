@@ -6,6 +6,7 @@ import { strict as assert } from "node:assert";
 import {
 	createTaskExecutionPlan,
 	formatTaskExecutionPlan,
+	resolvePreparedTaskText,
 	type TaskExecutionPlan,
 } from "../src/core/task-execution";
 import { DEFAULT_CONFIG, type BudgetConfig } from "../src/core/types";
@@ -23,6 +24,16 @@ function check(description: string, fn: () => void): void {
 		console.log(`  ✗ ${description}: ${error.message}`);
 	}
 }
+
+check("prepared lineage uses source text rather than the current tool-instruction prompt", () => {
+	for (const operation of ["continue", "reuse", "retry", "resume"] as const) {
+		assert.equal(resolvePreparedTaskText(operation, "source", undefined, "current prompt"), "source");
+	}
+	assert.equal(resolvePreparedTaskText("new", undefined, undefined, "current prompt"), "current prompt");
+	assert.equal(resolvePreparedTaskText("retry", "source", "explicit change", "current prompt"), "explicit change");
+	assert.equal(resolvePreparedTaskText("resume", "source", " source "), "source");
+	assert.throws(() => resolvePreparedTaskText("resume", "source", "changed"), /Resume cannot replace/);
+});
 
 const budget: BudgetConfig = { max_cost_per_task: 2, max_iterations: 5, max_wall_clock_seconds: 600 };
 

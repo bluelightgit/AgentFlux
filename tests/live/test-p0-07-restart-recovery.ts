@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Built-extension restart/orphan validation. Pi A starts a real persistent Run,
@@ -12,7 +12,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-restart-recovery-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-restart-recovery-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
 interface ProcessTerminationEvidence {
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
 		const extensionDir = join(fixtureRoot, "dist", "extension");
 		mkdirSync(extensionDir, { recursive: true });
 		cpSync(join(sourceRoot, "dist", "extension"), extensionDir, { recursive: true });
-		const extensionEntry = join(extensionDir, "entry.js");
+		const extensionEntry = join(extensionDir, "host-entry.ts");
 		first = launch(config, extensionEntry, "restart-live", [
 			"严格只调用 AgentFlux flux_agent 工具。",
 			"1) action=create，name=restart-live，role=implementer，scope=project。",

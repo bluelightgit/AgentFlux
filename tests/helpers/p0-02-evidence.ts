@@ -15,6 +15,8 @@ type ExpectedOutcomeStatus = "success" | "failure" | "partial" | "cancelled" | "
 export interface ExpectedP002TerminalOutcome {
 	/** A marker embedded in the process task prompt, used as a durable correlation key. */
 	marker: string;
+	/** 新真实进程优先用启动回执 PID 对照 Core ownerPid，不依赖 Task 正文包含 marker。 */
+	ownerPid?: number;
 	taskStatus: ExpectedTaskStatus;
 	outcomeStatus: ExpectedOutcomeStatus;
 	/** Require the correlated Task/Execution to have no deadline or a valid one. */
@@ -92,6 +94,8 @@ function auditExecution(execution: any): any {
 		deadlineAt: execution?.deadlineAt ?? null,
 		budget: execution?.budget ?? null,
 		costUsd: numberOrZero(execution?.costUsd),
+		costAccounting: execution?.costAccounting ? { ...execution.costAccounting } : null,
+		invocationOutcomes: boundedArray(execution?.invocationOutcomes).map((receipt: any) => ({ id: receipt.id, action: receipt.action, status: receipt.status, costUsd: receipt.costUsd, costComplete: receipt.costComplete, attributionComplete: receipt.attributionComplete })),
 		observedCostUsd: Math.max(numberOrZero(execution?.costUsd), numberOrZero(execution?.usage?.costUsd)),
 		usage: execution?.usage ? {
 			input: numberOrZero(execution.usage.input),
@@ -123,6 +127,12 @@ function auditRun(run: any): any {
 		model: run?.model ?? null,
 		provider: run?.provider ?? null,
 		kind: run?.kind ?? null,
+		backend: run?.backend ?? "process",
+		sdkOwner: run?.sdkOwner ?? null,
+		sdkSessionId: run?.sdkSessionId ?? null,
+		invocation: run?.invocation ?? null,
+		processIdentity: run?.processIdentity ?? null,
+		costAccounting: run?.costAccounting ?? null,
 		status: run?.status ?? null,
 		pid: run?.pid ?? null,
 		attempt: numberOrZero(run?.attempt),
@@ -475,7 +485,9 @@ export function snapshotP002CoreFacts(
 	const allExecutionsTerminal = executions.every(execution => TERMINAL_TASK_STATUSES.has(execution.status));
 	const allRunsTerminal = runs.every(run => TERMINAL_TASK_STATUSES.has(run.status));
 	const terminalOutcomeChecks = Object.entries(expectedTerminalOutcomes).map(([label, expected]) => {
-		const matchingTasks = tasks.filter(task => typeof task.task === "string" && task.task.includes(expected.marker));
+		const matchingTasks = tasks.filter(task => expected.ownerPid !== undefined
+			? executionById.get(task.executionId)?.ownerPid === expected.ownerPid
+			: typeof task.task === "string" && task.task.includes(expected.marker));
 		const task = matchingTasks.length === 1 ? matchingTasks[0] : undefined;
 		const execution = task ? executionById.get(task.executionId) : undefined;
 		const deadlineMatches = (expected.deadline === undefined || expected.deadline === "none")
@@ -485,6 +497,8 @@ export function snapshotP002CoreFacts(
 		return {
 			label,
 			marker: expected.marker,
+			expectedOwnerPid: expected.ownerPid ?? null,
+			observedOwnerPid: execution?.ownerPid ?? null,
 			matchingTaskIds: matchingTasks.map(candidate => candidate.id),
 			taskId: task?.id ?? null,
 			executionId: execution?.id ?? null,

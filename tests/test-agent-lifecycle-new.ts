@@ -325,7 +325,7 @@ async function main(): Promise<void> {
 		registerTask(join(root, ".agentflux"), "test", {
 			taskId: orphanTaskId, executionId: orphanExecutionId, task: "orphan parent", selectedBy: "user", operation: "new",
 			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
-		});
+		}, "running", { ownerPid: 99999999 });
 		registerAgentRun(join(root, ".agentflux"), {
 			id: "orphan-parent-run", sessionId: "test", agent: "orphan-parent-agent", role: "implementer",
 			currentTask: "orphan parent", kind: "persistent", taskId: orphanTaskId, executionId: orphanExecutionId,
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
 		registerTask(join(root, ".agentflux"), "test", {
 			taskId: liveSiblingTaskId, executionId: liveSiblingExecutionId, task: "orphan with live sibling", selectedBy: "user", operation: "new",
 			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 2 },
-		});
+		}, "running", { ownerPid: 99999999 });
 		registerAgentRun(join(root, ".agentflux"), {
 			id: "orphan-dead-with-live-sibling", sessionId: "test", agent: "orphan-dead", role: "implementer",
 			currentTask: "dead sibling", kind: "persistent", taskId: liveSiblingTaskId, executionId: liveSiblingExecutionId,
@@ -395,14 +395,14 @@ async function main(): Promise<void> {
 			&& liveOwnerReplacementRegistered,
 			"存活 Main/Workflow owner 推迟 orphan recovery 时释放 fence 且允许 replacement child 注册");
 
-		// 没有 ownerPid 的旧执行通过精确 active-context scope 同样必须释放
-		// recovery fence，不能阻塞后续 replacement/retry child。
+		// 已确认旧 owner 退出时，精确 active-context scope 仍须保护存活执行。
+		// recovery fence 不得阻塞后续 replacement/retry child。
 		const activeContextTaskId = "orphan-active-context-task";
 		const activeContextExecutionId = "orphan-active-context-execution";
 		registerTask(join(root, ".agentflux"), "test", {
 			taskId: activeContextTaskId, executionId: activeContextExecutionId, task: "orphan with active context owner", selectedBy: "user", operation: "new",
 			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
-		}, "running");
+		}, "running", { ownerPid: 99999999 });
 		registerActiveContext(root, { name: "workflow:active-context-owner", context: "workflow", scope: activeContextExecutionId, task: "live workflow owner", pid: process.pid });
 		try {
 			registerAgentRun(join(root, ".agentflux"), {
@@ -440,7 +440,7 @@ async function main(): Promise<void> {
 		registerTask(fenceCapacityFluxDir, "test", {
 			taskId: capacityTaskId, executionId: capacityExecutionId, task: "recovery fence capacity", selectedBy: "user", operation: "new",
 			budget: { maxCostUsd: 1, maxIterations: 1, maxTurns: 2, maxInputTokens: 1000, maxParallel: 1 },
-		}, "running");
+		}, "running", { ownerPid: 99999999 });
 		registerAgentRun(fenceCapacityFluxDir, {
 			id: "recovery-capacity-dead-run", sessionId: "test", agent: "recovery-capacity-agent", role: "implementer",
 			currentTask: "capacity dead child", kind: "persistent", taskId: capacityTaskId, executionId: capacityExecutionId,
@@ -580,9 +580,22 @@ async function main(): Promise<void> {
 		const createdDefault = createAgent(root, { name: "worker-x", modelsConfig: { models: {} } });
 		check(createdDefault.role === "assistant" && createdDefault.lineage.origin === "fresh", "默认创建路径使用内置 assistant 模板");
 		const duplicate = createAgent(root, { name: "reviewer-main", role: "reviewer", modelsConfig: { models: {} } });
-		check(duplicate.name === "reviewer-main(1)", "重名创建自动后缀去重");
-		const fork = createAgent(root, { name: "fork-worker", forkFrom: "reviewer-main", modelsConfig: { models: {} } });
-		check(fork.lineage.origin === "fork" && fork.sessionId === created.sessionId, "会话树分叉继承源 Agent 会话记忆");
+		check(duplicate.name === "reviewer-main-2", "重名创建使用可路由的安全后缀");
+		const duplicateRun = await runAgentRecord(duplicate.id, "name regression", { cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "names", prefixLayout: true, invocationOverride });
+		check(duplicateRun.exitCode === 0, "自动去重 Agent 能经过 capability gate 实际启动测试子进程");
+		const boundary = "a".repeat(80);
+		const boundaryAgent = createAgent(root, { name: boundary, modelsConfig: { models: {} } });
+		const boundaryDuplicate = createAgent(root, { name: boundary, modelsConfig: { models: {} } });
+		check(boundaryDuplicate.name.length === 80 && boundaryDuplicate.name.endsWith("-2"), "80 字符边界预留后缀空间");
+		let tooLongRejected = false;
+		try { createAgent(root, { name: boundary + "a", modelsConfig: { models: {} } }); } catch { tooLongRejected = true; }
+		check(tooLongRejected, "超长名字在持久化前拒绝");
+		deleteAgent(root, boundaryAgent.id);
+		deleteAgent(root, boundaryDuplicate.id);
+		let unprovenForkRejected = false;
+		try { createAgent(root, { name: "fork-worker", forkFrom: "reviewer-main", modelsConfig: { models: {} } }); }
+		catch (error) { unprovenForkRejected = /real Pi session/.test(String(error)); }
+		check(unprovenForkRejected && findAgents(root, "fork-worker").length === 0, "没有真实源会话的 fork 拒绝且不创建伪分支；原生分支正例见独立 SDK 测试");
 		check(findAgents(root, "reviewer-main").length === 1 && findAgents(root, "worker-x")[0].id === createdDefault.id, "按 name 查询返回匹配 Agent；id 精确匹配");
 		let unknownTemplateRejected = false;
 		try { createAgent(root, { name: "bad", role: "no-such-role", modelsConfig: { models: {} } }); } catch { unknownTemplateRejected = true; }
@@ -636,7 +649,8 @@ async function main(): Promise<void> {
 		createAgent(root, { name: "gc-c", modelsConfig: { models: {} } });
 		createAgent(root, { name: "gc-d", modelsConfig: { models: {} } });
 		const removed = gcAgents(root, 3, new Set());
-		check(removed.includes("gc-a") && removed.length === 6, "GC 删除无引用且非最新 k 个创建的 Agent");
+		// 未经证明的 fork 已不再创建第六个假 Agent，显式核对全部应删除身份。
+		check(JSON.stringify([...removed].sort()) === JSON.stringify(["gc-a", "queued-agent", "reviewer-main", "reviewer-main-2", "worker-x"].sort()), "GC 精确删除无引用且非最新 k 个创建的 Agent");
 		const kept = listAgents(root).map(agent => agent.name);
 		check(!kept.includes("gc-a") && kept.includes("gc-b") && kept.includes("gc-c") && kept.includes("gc-d"), "GC 保留最新 k 个");
 		// 手动删除（用 GC 保留的 agent）
@@ -664,17 +678,18 @@ async function main(): Promise<void> {
 		const enterAgent = createAgent(root, { name: "enter-me", modelsConfig: { models: {} } });
 		const sessionsDir = join(root, ".agentflux", "runtime", "sessions");
 		mkdirSync(sessionsDir, { recursive: true });
-		writeFileSync(join(sessionsDir, "2026-01-01T00-00-00-000Z_agent-enter-me-cap-abc123.jsonl"), "{\"type\":\"session\",\"version\":3}\n");
+		writeFileSync(join(sessionsDir, "2026-01-01T00-00-00-000Z_agent-enter-me-cap-abc123.jsonl"), JSON.stringify({ type: "session", version: 3, id: "agent-enter-me-cap-abc123", cwd: root, timestamp: "2026-01-01T00:00:00.000Z" }) + "\n");
 		const enterCmd = formatAgentSessionCommand(root, enterAgent);
 		check(enterCmd?.includes("agent-enter-me-cap-abc123.jsonl") === true && enterCmd.startsWith("npx pi --session"), "启动命令单行输出（npx pi --session + 会话文件）");
 		const listText = formatAgents(listAgents(root), root);
 		check(listText.includes("npx pi --session") && listText.includes("agent-enter-me-cap-abc123.jsonl"), "agent 列表详情最下方显示 npx pi --session 启动命令");
 		// 最后说的话：读会话文件最后一条 assistant 文本（message 事件类型，非 message_end）
 		writeFileSync(join(sessionsDir, "2026-01-01T00-00-00-000Z_agent-talker-cap-abc123.jsonl"), [
-			JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello" }] } }),
-			JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "报告写好了，共 12 个问题。" }] } }),
-			JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:03.000Z", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "(no output)" }] } }),
-			JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:04.000Z", message: { role: "assistant", content: [{ type: "text", text: "汇总完毕。" }] } }),
+			JSON.stringify({ type: "session", version: 3, id: "agent-talker-cap-abc123", cwd: root, timestamp: "2026-01-01T00:00:00.000Z" }),
+			JSON.stringify({ type: "message", id: "history-user", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "hello" }] } }),
+			JSON.stringify({ type: "message", id: "history-answer-1", parentId: "history-user", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "报告写好了，共 12 个问题。" }] } }),
+			JSON.stringify({ type: "message", id: "history-tool", parentId: "history-answer-1", timestamp: "2026-01-01T00:00:03.000Z", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "(no output)" }] } }),
+			JSON.stringify({ type: "message", id: "history-answer-2", parentId: "history-tool", timestamp: "2026-01-01T00:00:04.000Z", message: { role: "assistant", content: [{ type: "text", text: "汇总完毕。" }] } }),
 		].join("\n"), "utf8");
 		const lastMessage = readAgentLastMessage(root, { ...enterAgent, name: "talker", sessionId: "agent-talker" });
 		check(lastMessage === "汇总完毕。", "Talk 展示最后一条 assistant 文本（跳过 user/toolResult 与旧消息）");
@@ -744,11 +759,16 @@ async function main(): Promise<void> {
 				"pro-model": { provider: "octopus-anthropic", contextWindow: 128000, pricing: { input: 1, output: 2 } },
 			},
 		};
+		const inheritanceCatalog = { models: {
+			"main-selected-model": { provider: "main-selected-provider" },
+			"role-selected-model": { provider: "role-selected-provider" },
+			"acceptor-model": { provider: "acceptor-provider" },
+		} };
 		const inheritedCapture = join(root, "main-model-capture.json");
 		process.env.AGENTFLUX_TEST_CAPTURE = inheritedCapture;
 		const inheritedAgent = createAgent(root, { name: "inherits-main", modelsConfig: { models: {} } });
 		const inheritedRun = await runAgentRecord("inherits-main", "inherit main model", {
-			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			cwd: root, modelsConfig: inheritanceCatalog, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
 			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
 		});
 		const inheritedArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
@@ -770,7 +790,7 @@ async function main(): Promise<void> {
 		].join("\n"));
 		const roleAgent = createAgent(root, { name: "role-provider-agent", role: "role-provider", modelsConfig: { models: {} } });
 		const roleRun = await runAgentRecord("role-provider-agent", "use role model", {
-			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			cwd: root, modelsConfig: inheritanceCatalog, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
 			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
 		});
 		const roleArgs = JSON.parse(readFileSync(inheritedCapture, "utf-8"));
@@ -796,7 +816,7 @@ async function main(): Promise<void> {
 			&& multiRoleAgent.model === undefined,
 		"同一 Agent 可绑定多个角色且不把首个角色模型固化到身份");
 		const acceptanceRun = await runAgentRecord("multi-role-agent", "accept the result", {
-			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			cwd: root, modelsConfig: inheritanceCatalog, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
 			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
 		}, undefined, undefined, { role: "role-acceptor" });
 		const afterAcceptance = listAgents(root).find(agent => agent.name === "multi-role-agent")!;
@@ -807,7 +827,7 @@ async function main(): Promise<void> {
 			&& !acceptanceArgs.argv.includes("main-selected-model"),
 		"多角色 Agent 按本次 Run 选择验收角色并使用该角色的模型/provider");
 		const planningRun = await runAgentRecord("multi-role-agent", "plan the next change", {
-			cwd: root, modelsConfig: { models: {} }, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
+			cwd: root, modelsConfig: inheritanceCatalog, telemetry, sessionId: "persistent", sharedSkills: [], prefixLayout: true,
 			defaultModel: "main-selected-model", defaultProvider: "main-selected-provider", invocationOverride,
 		}, undefined, undefined, { role: "role-provider" });
 		const afterPlanning = listAgents(root).find(agent => agent.name === "multi-role-agent")!;

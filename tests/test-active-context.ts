@@ -21,14 +21,14 @@ async function main(): Promise<void> {
 		try {
 			registerActiveContext(root, { name: "dag-1", context: "workflow", task: "dag task" });
 		} catch (error: any) {
-			workflowRejected = String(error?.message ?? "").includes("main 空间活跃");
+			workflowRejected = String(error?.message ?? "").includes("active main space");
 		}
 		check(workflowRejected, "main 活跃时启动 workflow 被拒绝并提示活跃者");
 		let communityRejected = false;
 		try {
 			registerActiveContext(root, { name: "issue:x", context: "community", task: "issue task" });
 		} catch (error: any) {
-			communityRejected = String(error?.message ?? "").includes("main 空间活跃");
+			communityRejected = String(error?.message ?? "").includes("active main space");
 		}
 		check(communityRejected, "main 活跃时启动 community 被拒绝");
 
@@ -64,6 +64,9 @@ async function main(): Promise<void> {
 		check(readActiveContext(root).entries.length === 1, "超过 stale 阈值但 pid 存活的条目仍视为活跃（长运行空间保留）");
 		raw.entries[0].pid = 999999;
 		writeFileSync(statePath, JSON.stringify(raw));
+		check(readActiveContext(root).entries.length === 1, "PID 与出生身份不一致时保守保留条目");
+		delete raw.entries[0].processIdentity; // Legacy dead-owner fixture, not contradictory metadata.
+		writeFileSync(statePath, JSON.stringify(raw));
 		check(readActiveContext(root).entries.length === 0, "超过 stale 阈值且 pid 消失的条目视为崩溃残留");
 
 		// ─── workflow 运行中 community claim 被拒（社区入口集成） ───
@@ -73,7 +76,7 @@ async function main(): Promise<void> {
 		try {
 			claimIssue(root, issue.id, "worker", "scope-a");
 		} catch (error: any) {
-			claimRejected = String(error?.message ?? "").includes("workflow 空间活跃");
+			claimRejected = String(error?.message ?? "").includes("active workflow space");
 		}
 		check(claimRejected, "workflow 活跃时社区 claim 被拒绝（community.ts 抛互斥错误）");
 		releaseActiveContext(root, "workflow:task-1");

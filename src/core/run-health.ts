@@ -5,6 +5,7 @@ export type AgentRunHealth =
 	| "healthy"
 	| "waiting_provider"
 	| "waiting_tool"
+	| "waiting_user"
 	| "quiet"
 	| "suspected_stall"
 	| "suspected_loop"
@@ -80,6 +81,7 @@ export function assessRunHealth(
 	config: RunHealthConfig = DEFAULT_RUN_HEALTH_CONFIG,
 ): RunHealthAssessment {
 	const nowMs = observation.nowMs ?? Date.now();
+	if (observation.phase === "waiting_user") return assessment("waiting_user", "waiting for user input");
 	const percent = contextPercent(observation);
 	if (percent !== undefined && percent >= config.context_pressure_percent) {
 		return assessment("context_pressure", `context usage ${(percent * 100).toFixed(1)}%`);

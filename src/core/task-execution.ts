@@ -65,6 +65,18 @@ export function createTaskExecutionPlan(input: {
 	};
 }
 
+/** 恢复重放原 Task 需求；不能让新提示正文悄悄替换 checkpoint 的执行语义。 */
+export function resolvePreparedTaskText(operation: TaskOperation, sourceTask: string | undefined, explicitTask?: string, fallbackTask?: string): string {
+	if (operation === "resume") {
+		if (!sourceTask?.trim()) throw new Error("Resume requires a source task");
+		if (explicitTask !== undefined && explicitTask.trim() !== sourceTask.trim()) {
+			throw new Error("Resume cannot replace the source task; use new, continue or reuse for changed requirements");
+		}
+		return sourceTask.trim();
+	}
+	return explicitTask?.trim() || sourceTask || fallbackTask || "";
+}
+
 export function formatTaskExecutionPlan(plan: TaskExecutionPlan): string {
 	return [
 		`Task ${plan.taskId}`,

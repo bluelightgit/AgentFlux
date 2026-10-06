@@ -145,7 +145,7 @@ export function evaluateCommunicationContract(input: {
 	injectedMessageIds?: string[];
 }): CommunicationContractReport {
 	const sent = input.bus.listEnvelopes()
-		.filter((envelope: MessageEnvelopeV2) => envelope.from === input.sender && envelope.correlationId === input.runId);
+		.filter((envelope: MessageEnvelopeV2) => envelope.from === input.sender && (envelope.senderRunId ?? envelope.correlationId) === input.runId);
 	const sentTo = [...new Set(sent.map(envelope => channelTarget(envelope.channel)))];
 	const missingSendTo = input.policy.requiredSendTo.filter(target => !sentTo.includes(target));
 	const injectedMessageIds = input.injectedMessageIds ?? [];

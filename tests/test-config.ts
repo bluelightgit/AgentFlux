@@ -3,8 +3,13 @@
  * Tests: validateConfig, parseWorkStyle, resolveSharedSkills, merge function internals
  */
 import { strict as assert } from "node:assert";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createTaskExecutionPlan } from "../src/core/task-execution";
 import {
 	validateConfig,
+	loadConfig,
 	resolveSharedSkills,
 } from "../src/core/config";
 import { DEFAULT_CONFIG, type FluxConfig } from "../src/core/types";
@@ -103,6 +108,25 @@ check("validates aggregate turn/input/concurrency budgets", () => {
 	assert.equal(warnings.filter(warning => warning.includes("max_turns_per_task")).length, 1);
 	assert.equal(warnings.filter(warning => warning.includes("max_input_tokens_per_task")).length, 1);
 	assert.equal(warnings.filter(warning => warning.includes("max_parallel_agents")).length, 1);
+});
+
+check("disk config defaults to no deadline, explicit null removes 600 without disabling other controls", () => {
+	const root = mkdtempSync(join(tmpdir(), "flux-optional-deadline-"));
+	try {
+		assert.equal(loadConfig(root).budget.max_wall_clock_seconds, null);
+		mkdirSync(join(root, ".agentflux"));
+		const path = join(root, ".agentflux", "agentflux.json");
+		const budget = { max_cost_per_task: 2, max_iterations: 8, max_turns_per_task: 12, max_input_tokens_per_task: 4000, max_parallel_agents: 2 };
+		for (const deadline of [600, null, undefined]) {
+			writeFileSync(path, JSON.stringify({ budget: { ...budget, max_wall_clock_seconds: deadline } }));
+			const config = loadConfig(root);
+			assert.deepEqual(validateConfig(config), []);
+			assert.deepEqual(config.health, DEFAULT_CONFIG.health);
+			const plan = createTaskExecutionPlan({ task: "optional deadline", selectedBy: "user", budget: config.budget });
+			assert.deepEqual(plan.budget, { maxCostUsd: 2, maxIterations: 8, maxTurns: 12, maxInputTokens: 4000, maxParallel: 2, maxWallClockMs: deadline === 600 ? 600000 : undefined });
+		}
+		assert.equal(DEFAULT_CONFIG.budget.max_wall_clock_seconds, null, "加载显式覆盖不能污染默认配置");
+	} finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 // ─── resolveSharedSkills ─────────────────────────────────────────────

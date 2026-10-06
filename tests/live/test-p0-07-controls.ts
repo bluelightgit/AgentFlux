@@ -1,7 +1,9 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
+import { hasAssistantFinalMarker } from "../helpers/pi-json-output";
+import { isProcessAlive } from "../../src/core/fs-lock";
 
 /**
  * P0-07 真实双 Pi 控制面链路：Pi A 先启动一个无 deadline Run，
@@ -12,8 +14,9 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-controls-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-controls-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
+const uniqueReportPath = join(sourceRoot, ".agentflux", "test-results", `p0-07-controls-${Date.now()}-${process.pid}.json`);
 
 interface PiResult {
 	label: string;
@@ -44,7 +47,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function stopTree(child: ChildProcess): void {
-	if (!child.pid) return;
+	if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
 	if (process.platform === "win32") {
 		spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
 	} else {
@@ -62,11 +65,14 @@ function launch(label: string, extensionEntry: string, prompt: string, config: R
 		windowsHide: true,
 		stdio: ["ignore", "pipe", "pipe"],
 		env: config.env,
+		detached: process.platform !== "win32",
 	});
+	writeFileSync(join(fixtureRoot, `${label}.stdout.jsonl`), "");
+	writeFileSync(join(fixtureRoot, `${label}.stderr.log`), "");
 	let stdout = "";
 	let stderr = "";
-	child.stdout?.on("data", value => { stdout += value.toString(); });
-	child.stderr?.on("data", value => { stderr += value.toString(); });
+	child.stdout?.on("data", value => { stdout += value.toString(); appendFileSync(join(fixtureRoot, `${label}.stdout.jsonl`), value); });
+	child.stderr?.on("data", value => { stderr += value.toString(); appendFileSync(join(fixtureRoot, `${label}.stderr.log`), value); });
 	const result = new Promise<PiResult>(resolveResult => {
 		let settled = false;
 		const timer = setTimeout(() => {
@@ -222,13 +228,13 @@ async function main(): Promise<void> {
 		// fixture needs a real long-running shell tool in the implementer Run.
 		liveModels.roles.implementer.tools = ["read", "grep", "find", "ls", "bash"];
 		writeFileSync(join(fixtureRoot, ".agentflux", "models.json"), JSON.stringify(liveModels, null, 2));
-		const extensionEntry = join(fixtureRoot, "dist", "extension", "entry.js");
+		const extensionEntry = join(fixtureRoot, "dist", "extension", "host-entry.ts");
 		mainPi = launch("main", extensionEntry, [
 			"只能按顺序调用 AgentFlux flux_agent 工具，不要调用其他工具。",
 			"1) action=create，name=control-live，role=implementer，scope=project。",
 			"2) action=run，agent=control-live，background=false，task=必须调用 bash 执行 node -e \"setTimeout(() => {}, 15000)\"；在收到 operator 的 steer 指令前不要结束，收到后只回复 STEER_SEEN。",
 			"3) 上一次 run 返回后，立即 action=run，agent=control-live，background=false，task=必须调用 bash 执行 node -e \"setTimeout(() => {}, 60000)\"，在命令结束前不要回复；命令结束后只回复 CONTROL_CHILD_DONE。",
-			"主 Agent 不要自行完成子任务；第二次 run 返回后输出 CONTROL_MAIN_DONE。",
+			"主 Agent 不要自行完成子任务；第二次 run 会被外部操作员取消，这是预期控制场景，不要重试；返回后最终正文必须恰好是 CONTROL_MAIN_DONE，不附加解释。",
 		].join("\n"), config, 300_000);
 
 		let activeRun: any;
@@ -297,7 +303,7 @@ async function main(): Promise<void> {
 			"2) action=stop，agent=control-live。",
 			"3) stop 返回后立即 action=steer，agent=control-live，task=STOP_RACE_MUST_BE_REJECTED；这次调用必须失败关闭，不能接受或排队。",
 			"4) action=inspect，agent=control-live，last=3。",
-			"四次调用后只输出 P0_07_CONTROLS_OK。",
+			"第三次工具错误是预期拒绝，不重试；四次调用后最终正文必须恰好是 P0_07_CONTROLS_OK，不附加错误解释。",
 		].join("\n"), config, 120_000);
 		stopOperatorResult = await stopOperatorPi.result;
 		mainResult = await mainPi.result;
@@ -324,10 +330,16 @@ async function main(): Promise<void> {
 		// must have emitted an actual flux_agent steer tool call and received an
 		// explicit error result after stop.
 		const stopSteerRejected = postStopSteer.attempted && postStopSteer.rejected && stopSteerDeliveries.length === 0;
-		const stopMarker = stopOperatorResult.stdout.includes("P0_07_CONTROLS_OK") || stopOperatorResult.stderr.includes("P0_07_CONTROLS_OK");
-		const steerMarker = steerOperatorResult.stdout.includes("P0_07_STEER_SENT") || steerOperatorResult.stderr.includes("P0_07_STEER_SENT");
+		const stopMarker = hasAssistantFinalMarker(stopOperatorResult.stdout, stopOperatorResult.stderr, "P0_07_CONTROLS_OK");
+		const steerMarker = hasAssistantFinalMarker(steerOperatorResult.stdout, steerOperatorResult.stderr, "P0_07_STEER_SENT");
+		const mainMarker = hasAssistantFinalMarker(mainResult.stdout, mainResult.stderr, "CONTROL_MAIN_DONE");
+		const tasks = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json"));
+		const parent = tasks?.tasks?.find((task: any) => task.id === stopRun?.taskId);
+		const execution = tasks?.executions?.find((item: any) => item.id === stopRun?.executionId);
+		const parentCancelled = parent?.status === "cancelled" && execution?.status === "cancelled"
+			&& execution?.outcome?.status === "cancelled" && steerRun?.taskId === parent?.id;
 		const passed = steerOperatorResult.exitCode === 0 && stopOperatorResult.exitCode === 0 && mainResult.exitCode === 0
-			&& steerMarker && stopMarker && steerConsumed && steerAcked && steerRun?.status === "completed"
+			&& steerMarker && stopMarker && mainMarker && parentCancelled && steerConsumed && steerAcked && steerRun?.status === "completed"
 			&& Boolean(terminal) && stopRun?.status === "cancelled" && stopObserved && noDeadline && stopSteerRejected;
 		const evidence = {
 			updatedAt: new Date().toISOString(),
@@ -345,7 +357,7 @@ async function main(): Promise<void> {
 			stopOperator: { pid: stopOperatorResult.pid, exitCode: stopOperatorResult.exitCode, timedOut: stopOperatorResult.timedOut },
 			wallClockMs: Date.now() - startedAt,
 			steerMarker,
-			stopMarker,
+			stopMarker, mainMarker, parentCancelled, parent, execution,
 			steerConsumed,
 			steerAcked,
 			stopSteerRejected,
@@ -431,7 +443,18 @@ async function main(): Promise<void> {
 		if (mainPi) stopTree(mainPi.child);
 		if (steerOperatorPi) stopTree(steerOperatorPi.child);
 		if (stopOperatorPi) stopTree(stopOperatorPi.child);
-		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch (error) { console.warn(`control fixture cleanup deferred: ${String(error)}`); }
+		const handles = [mainPi, steerOperatorPi, stopOperatorPi].filter((h): h is PiHandle => !!h);
+		const until = Date.now() + 10_000;
+		while (handles.some(h => h.child.exitCode === null && h.child.signalCode === null) && Date.now() < until) await sleep(50);
+		const evidence = readJson(reportPath) ?? { passed: false, error: "No final control evidence" };
+		evidence.fixtureRoot = fixtureRoot;
+		evidence.uniqueReportPath = uniqueReportPath;
+		evidence.cleanup = { workspaceRetained: true, processes: handles.map(h => ({ pid: h.child.pid,
+			exited: h.child.exitCode !== null || h.child.signalCode !== null,
+			alive: h.child.pid ? isProcessAlive(h.child.pid) : false })) };
+		if (evidence.cleanup.processes.some((p: any) => !p.exited || p.alive)) { evidence.passed = false; process.exitCode = 1; }
+		writeFileSync(uniqueReportPath, JSON.stringify(evidence, null, 2));
+		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		config.cleanup();
 	}
 }

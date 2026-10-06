@@ -170,8 +170,8 @@ try {
 		submitClaim(root, issue.id, claim.id);
 		reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "");
 		assert.strictEqual(getIssue(root, issue.id)!.stallStreak, 3);
-		assert.throws(() => submitClaim(root, issue.id, claim.id), /无进展/);
-		assert.throws(() => claimIssue(root, issue.id, "b", "s2"), /无进展/);
+		assert.throws(() => submitClaim(root, issue.id, claim.id), /no progress/);
+		assert.throws(() => claimIssue(root, issue.id, "b", "s2"), /no progress/);
 	});
 
 	check("rework with repeated identical feedback also accumulates stall", () => {
@@ -187,7 +187,7 @@ try {
 		submitClaim(root, issue.id, claim.id);
 		reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "needs more detail");
 		assert.strictEqual(getIssue(root, issue.id)!.stallStreak, 3);
-		assert.throws(() => submitClaim(root, issue.id, claim.id), /无进展/);
+		assert.throws(() => submitClaim(root, issue.id, claim.id), /no progress/);
 	});
 
 	check("new distinct feedback resets the stall streak", () => {
@@ -229,9 +229,9 @@ try {
 		submitClaim(root, issue.id, claim.id);
 		reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "");
 		// streak=3 → 后续 claim 被拒绝
-		assert.throws(() => claimIssue(root, issue.id, "c", "s3"), /无进展/);
-		assert.throws(() => submitClaim(root, issue.id, getIssue(root, issue.id)!.claims[1].id), /无进展/);
-		assert.ok(nextActions(getIssue(root, issue.id)!).some(action => action.includes("停止条件已触发")));
+		assert.throws(() => claimIssue(root, issue.id, "c", "s3"), /no progress/);
+		assert.throws(() => submitClaim(root, issue.id, getIssue(root, issue.id)!.claims[1].id), /no progress/);
+		assert.ok(nextActions(getIssue(root, issue.id)!).some(action => action.includes("Stop condition reached")));
 	});
 
 	// ─── 停止条件：预算超支 ────────────────────────────────────────
@@ -247,7 +247,7 @@ try {
 		reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "fix it");
 		claim = getIssue(root, issue.id)!.claims[0];
 		// 1.2 + 1.0 > 2.0 → 拒绝
-		assert.throws(() => submitClaim(root, issue.id, claim.id, undefined, 1.0), /预算已超限/);
+		assert.throws(() => submitClaim(root, issue.id, claim.id, undefined, 1.0), /budget exceeded/);
 		assert.ok(Math.abs((getIssue(root, issue.id)!.costUsd ?? 0) - 1.2) < 1e-9);
 		// 0.5 可以（1.7 <= 2.0）
 		submitClaim(root, issue.id, claim.id, undefined, 0.5);
@@ -277,7 +277,7 @@ try {
 			submitClaim(root, issue.id, claim.id);
 			reviewClaim(root, issue.id, claim.id, "pass", "reviewer");
 		}
-		assert.throws(() => claimIssue(root, issue.id, "a6", "s6"), /最大轮次已超限/);
+		assert.throws(() => claimIssue(root, issue.id, "a6", "s6"), /round limit exceeded/);
 		assert.strictEqual(getIssue(root, issue.id)!.rounds, 5);
 	});
 
@@ -295,7 +295,7 @@ try {
 			reviewClaim(root, issue.id, claim.id, "rework", "reviewer", "");
 		}
 		assert.strictEqual(getIssue(root, issue.id)!.stallStreak, 3);
-		assert.throws(() => submitClaim(root, issue.id, claim.id), /无进展/);
+		assert.throws(() => submitClaim(root, issue.id, claim.id), /no progress/);
 		// 停摆状态下人工 resolve 放行（兜底：跳过 active claim 校验）
 		const resolved = resolveIssue(root, issue.id, "人工评估后直接解决");
 		assert.strictEqual(resolved.status, "resolved");

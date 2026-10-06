@@ -1,11 +1,12 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createIssue } from "../../src/core/community";
 import { readActiveContext } from "../../src/core/active-context";
+import { isProcessAlive } from "../../src/core/fs-lock";
 import { createWorkflowDefinition } from "../../src/workflows/workflow-registry";
 import type { TaskDAG } from "../../src/workflows/dag-executor";
-import { loadLiveConfig, type LiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig, type LiveConfig } from "./live-config";
 import { hasAssistantFinalMarker, toolExecutionStarts } from "../helpers/pi-json-output";
 import { buildProcessOutputEvidence, snapshotP002CoreFacts, validateProcessOutputEvidence, type ExpectedP002TerminalOutcome } from "../helpers/p0-02-evidence";
 
@@ -22,9 +23,9 @@ const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-02-space-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-02-space-isolation-latest.json");
 const failureReportPath = join(sourceRoot, ".agentflux", "test-results", `p0-02-space-isolation-failed-${Date.now()}-${process.pid}.json`);
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
-const MAIN_HOLD_MS = 120_000;
+const MAIN_HOLD_MS = 240_000;
 const COMMUNITY_HOLD_MS = 180_000;
 const WORKFLOW_HOLD_MS = 180_000;
 const CONFLICT_WAIT_MS = 240_000;
@@ -34,6 +35,7 @@ const EXPECTED_MARKERS: Record<string, string> = {
 	"main-b": "P0_02_MAIN_B_OK",
 	"main-conflict": "P0_02_MAIN_CONFLICT_OK",
 	"main-failure": "P0_02_MAIN_FAILURE_OK",
+	"main-issue-failure": "P0_02_MAIN_ISSUE_FAILURE_OK",
 	"community-a": "P0_02_COMMUNITY_A_OK",
 	"community-b": "P0_02_COMMUNITY_B_OK",
 	"community-conflict": "P0_02_COMMUNITY_CONFLICT_OK",
@@ -53,7 +55,7 @@ const EXPECTED_TERMINAL_OUTCOMES: Record<string, ExpectedP002TerminalOutcome> = 
 ) as Record<string, ExpectedP002TerminalOutcome>;
 
 const TERMINAL_OUTCOME_PHASES: Record<"mainPhase" | "communityPhase" | "workflowPhase", string[]> = {
-	mainPhase: ["main-a", "main-b", "main-conflict", "main-failure"],
+	mainPhase: ["main-a", "main-b", "main-conflict", "main-failure", "main-issue-failure"],
 	communityPhase: ["community-a", "community-b", "community-conflict", "community-failure"],
 	workflowPhase: ["workflow", "workflow-community-conflict", "workflow-failure"],
 };
@@ -93,7 +95,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function stopTree(child: ChildProcess): void {
-	if (!child.pid) return;
+	if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
 	if (process.platform === "win32") {
 		spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
 	} else {
@@ -109,10 +111,13 @@ function launch(
 	model = config.mainModel,
 	timeoutMs = 180_000,
 ): PiHandle {
+	const finalInstruction = EXPECTED_MARKERS[label]
+		? `\n工具错误和 Registry 由外部监督器自动保存，不要在最终回复中复述或解释。严格执行上述工具调用后，最终正文必须只有这一行（不得加引号/说明/列表）：${EXPECTED_MARKERS[label]}`
+		: "";
 	const args = [
 		piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
 		"--no-skills", "--tools", "read,grep,find,ls,bash,flux_agent,flux_workflow,flux_issue",
-		...config.cliArgs(model), prompt,
+		...config.cliArgs(model), prompt + finalInstruction,
 	];
 	const child = spawn(process.execPath, args, {
 		cwd: fixtureRoot,
@@ -120,6 +125,7 @@ function launch(
 		stdio: ["ignore", "pipe", "pipe"],
 		env: config.env,
 	});
+	if (child.pid && EXPECTED_TERMINAL_OUTCOMES[label]) EXPECTED_TERMINAL_OUTCOMES[label].ownerPid = child.pid;
 	let stdout = "";
 	let stderr = "";
 	child.stdout?.on("data", value => { stdout += value.toString(); });
@@ -243,10 +249,12 @@ async function waitForToolWhileContext(
 	toolName: string,
 	context: ContextName,
 	timeoutMs = CONFLICT_WAIT_MS,
+	action?: string,
 ): Promise<ConflictObservation> {
 	let observation: ConflictObservation | undefined;
 	await waitFor(() => {
-		const starts = toolExecutionStarts(handle.snapshot().stdout, toolName);
+		const starts = toolExecutionStarts(handle.snapshot().stdout, toolName)
+			.filter(event => action === undefined || (event.args ?? toolArguments(event))?.action === action);
 		if (starts.length === 0) return false;
 		const activeEntries = activeEntriesByContext(context);
 		observation = {
@@ -354,13 +362,15 @@ async function main(): Promise<void> {
 	if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js"))) throw new Error("production dist entry is missing; run npm run build first");
 	try {
 		fixture = setup(config);
-		const extensionEntry = join(fixtureRoot, "dist", "extension", "entry.js");
+		const extensionEntry = join(fixtureRoot, "dist", "extension", "host-entry.ts");
 
+		// Supervisor barrier 保持两个 siblings 活着；不能用更长 sleep 猜模型耗时。
+		const mainHoldTask = (marker: string) => `必须调用 bash 执行 node -e "const fs=require('fs'); const d=setTimeout(()=>{clearInterval(t);process.exitCode=1},${MAIN_HOLD_MS}); const t=setInterval(()=>{if(fs.existsSync('.agentflux/main-holders-release')){clearInterval(t);clearTimeout(d)}},250)"，命令成功后只回复 ${marker}。`;
 		// Phase 1: Main space, then a real cross-space rejection and a same-space parallel Run.
 		const mainA = launch("main-a", extensionEntry, [
 			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
 			"1) action=create，name=p0-02-main-a，role=implementer，scope=project。",
-			`2) action=run，agent=p0-02-main-a，background=false，task=必须调用 bash 执行 node -e "setTimeout(() => {}, ${MAIN_HOLD_MS})"，等待命令完成后只回复 MAIN_SPACE_A_RUN_DONE。`,
+			`2) action=run，agent=p0-02-main-a，background=false，task=${mainHoldTask("MAIN_SPACE_A_RUN_DONE")}`,
 			"3) run 返回后只输出 P0_02_MAIN_A_OK。",
 		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(mainA);
@@ -377,30 +387,45 @@ async function main(): Promise<void> {
 		const mainB = launch("main-b", extensionEntry, [
 			"必须实际调用 AgentFlux flux_agent 工具，不要自行完成任务。",
 			"1) action=create，name=p0-02-main-b，role=implementer，scope=project。",
-			`2) action=run，agent=p0-02-main-b，background=false，task=必须调用 bash 执行 node -e "setTimeout(() => {}, ${MAIN_HOLD_MS})"，等待命令完成后只回复 MAIN_SPACE_B_RUN_DONE。`,
+			`2) action=run，agent=p0-02-main-b，background=false，task=${mainHoldTask("MAIN_SPACE_B_RUN_DONE")}`,
 			"3) run 返回后只输出 P0_02_MAIN_B_OK。",
 		].join("\n"), config, config.mainModel, CONFLICT_WAIT_MS + 60_000);
 		handles.push(mainB);
 		await waitFor(() => activeEntriesByContext("main").length >= 2, 90_000, "parallel Main space leases");
 		const mainActiveSnapshot = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
+		const mainFailure = launch("main-failure", extensionEntry, [
+			"必须实际调用 AgentFlux 工具；预期的错误不能改用其他工具替代。",
+			"1) flux_agent action=create，name=main-failure，role=implementer，不传 model。",
+			"2) flux_agent action=run，agent=main-failure，background=false，model=nonexistent-p0-02-model，task=预期模型校验失败。",
+			"3) 收到 Unknown model 错误后只输出 P0_02_MAIN_FAILURE_OK。",
+		].join("\n"), config);
+		handles.push(mainFailure);
+		const mainFailureObservation = await waitForToolWhileContext(mainFailure, "flux_agent", "main", CONFLICT_WAIT_MS, "run");
+		const mainFailureResult = await mainFailure.result;
+		const activeAfterMainFailure = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
+		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_agent");
+		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "main-failure");
+		const siblingsPreserved = mainActiveSnapshot.length >= 2 && mainActiveSnapshot.every(before =>
+			mainFailureObservation.activeEntries.some((entry: any) => entry.leaseId === before.leaseId && entry.pid === before.pid)
+			&& activeAfterMainFailure.some(entry => entry.leaseId === before.leaseId && entry.pid === before.pid)
+			&& isProcessAlive(before.pid));
 		const mainConflictWorkflowObservationPromise = waitForToolWhileContext(mainConflict, "flux_workflow", "main");
 		const mainConflictIssueObservationPromise = waitForToolWhileContext(mainConflict, "flux_issue", "main");
 		const [mainConflictWorkflowObservation, mainConflictIssueObservation] = await Promise.all([
 			mainConflictWorkflowObservationPromise,
 			mainConflictIssueObservationPromise,
 		]);
-		const [mainConflictResult, mainAResult, mainBResult] = await Promise.all([mainConflict.result, mainA.result, mainB.result]);
+		const mainConflictResult = await mainConflict.result;
+		writeFileSync(join(fixtureRoot, ".agentflux", "main-holders-release"), "release after failure and conflicts observed");
+		const [mainAResult, mainBResult] = await Promise.all([mainA.result, mainB.result]);
 		await waitFor(() => activeEntriesByContext("main").length === 0, 30_000, "Main holder cleanup before failure scenario");
-		const mainFailure = launch("main-failure", extensionEntry, [
-			"必须实际调用 AgentFlux flux_issue 工具；这次操作预期失败，记录显式工具错误后只回复 P0_02_MAIN_FAILURE_OK。",
-			"调用 action=claim，issueId=\"missing-main-failure-issue\"，agent=\"main-failure\"，scope=\"failure\"。",
-			"收到错误后只输出 P0_02_MAIN_FAILURE_OK。",
+		const mainIssueFailure = launch("main-issue-failure", extensionEntry, [
+			"必须调用 flux_issue action=claim，issueId=missing-main-failure-issue，agent=main-issue-failure，scope=failure。",
+			"收到 Issue not found 错误后只输出 P0_02_MAIN_ISSUE_FAILURE_OK。",
 		].join("\n"), config);
-		handles.push(mainFailure);
-		const mainFailureResult = await mainFailure.result;
-		const activeAfterMainFailure = activeEntriesByContext("main").map(entry => ({ leaseId: entry.leaseId, name: entry.name, pid: entry.pid, context: entry.context }));
-		const mainFailureErrors = toolErrors(mainFailureResult.stdout, "flux_issue");
-		const mainFailureFacts = runtimeSnapshot().runs.filter((run: any) => run.agent === "main-failure");
+		handles.push(mainIssueFailure);
+		const mainIssueFailureResult = await mainIssueFailure.result;
+		const mainIssueFailureErrors = toolErrors(mainIssueFailureResult.stdout, "flux_issue");
 		const mainConflictWorkflowErrors = toolErrors(mainConflictResult.stdout, "flux_workflow");
 		const mainConflictIssueErrors = toolErrors(mainConflictResult.stdout, "flux_issue");
 		evidence.mainPhase = {
@@ -408,6 +433,9 @@ async function main(): Promise<void> {
 			activeAfterFailedRun: activeAfterMainFailure,
 			failedRunErrors: mainFailureErrors,
 			failedRunFacts: mainFailureFacts,
+			failedRunObservation: mainFailureObservation,
+			siblingsPreserved,
+			issueFailure: { process: compactResult(mainIssueFailureResult, EXPECTED_MARKERS["main-issue-failure"]), errors: mainIssueFailureErrors },
 			processes: [compactResult(mainAResult, EXPECTED_MARKERS["main-a"]), compactResult(mainBResult, EXPECTED_MARKERS["main-b"]), compactResult(mainConflictResult, EXPECTED_MARKERS["main-conflict"]), compactResult(mainFailureResult, EXPECTED_MARKERS["main-failure"])],
 			parallelMainCountObserved: 2,
 			conflict: {
@@ -421,13 +449,16 @@ async function main(): Promise<void> {
 			passed: mainAResult.exitCode === 0 && mainBResult.exitCode === 0 && mainConflictResult.exitCode === 0 && mainFailureResult.exitCode === 0
 				&& !mainAResult.timedOut && !mainBResult.timedOut && !mainConflictResult.timedOut && !mainFailureResult.timedOut
 				&& marker(mainAResult, "P0_02_MAIN_A_OK") && marker(mainBResult, "P0_02_MAIN_B_OK") && marker(mainConflictResult, "P0_02_MAIN_CONFLICT_OK") && marker(mainFailureResult, "P0_02_MAIN_FAILURE_OK")
-				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Issue not found: missing-main-failure-issue"))
+				&& mainFailureErrors.some(item => JSON.stringify(item).includes("Unknown model: nonexistent-p0-02-model"))
 				&& mainFailureFacts.length === 0
-				&& activeAfterMainFailure.length === 0
+				&& siblingsPreserved && activeAfterMainFailure.length >= 2
+				&& mainIssueFailureResult.exitCode === 0 && !mainIssueFailureResult.timedOut
+				&& marker(mainIssueFailureResult, EXPECTED_MARKERS["main-issue-failure"])
+				&& mainIssueFailureErrors.some(item => JSON.stringify(item).includes("Issue not found: missing-main-failure-issue"))
 				&& mainConflictWorkflowObservation.activeEntries.length >= 1
 				&& mainConflictIssueObservation.activeEntries.length >= 1
-				&& mainConflictWorkflowErrors.some(item => JSON.stringify(item).includes("main 空间活跃"))
-				&& mainConflictIssueErrors.some(item => JSON.stringify(item).includes("main 空间活跃")),
+				&& mainConflictWorkflowErrors.some(item => JSON.stringify(item).includes("active main space"))
+				&& mainConflictIssueErrors.some(item => JSON.stringify(item).includes("active main space")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Main space lease cleanup");
 
@@ -478,7 +509,7 @@ async function main(): Promise<void> {
 				&& communityFailureErrors.some(item => JSON.stringify(item).includes("Scope already claimed"))
 				&& communityAfterFailedClaim.length >= 2
 				&& communityConflictObservation.activeEntries.length >= 2
-				&& communityWorkflowErrors.some(item => JSON.stringify(item).includes("community 空间活跃")),
+				&& communityWorkflowErrors.some(item => JSON.stringify(item).includes("active community space")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Community space lease cleanup");
 
@@ -521,7 +552,7 @@ async function main(): Promise<void> {
 				&& workflowFailureErrors.some(item => JSON.stringify(item).includes("Workflow not found"))
 				&& workflowAfterFailedRun.length >= 1
 				&& workflowConflictObservation.activeEntries.length >= 1
-				&& workflowIssueErrors.some(item => JSON.stringify(item).includes("workflow 空间活跃")),
+				&& workflowIssueErrors.some(item => JSON.stringify(item).includes("active workflow space")),
 		};
 		await waitFor(() => activeEntries().length === 0, 30_000, "Workflow space lease cleanup");
 
@@ -568,26 +599,23 @@ async function main(): Promise<void> {
 	} finally {
 		persistPartialOutputEvidence(handles);
 		for (const handle of handles) stopTree(handle.child);
-		let workspaceRemoved = false;
 		let cleanupError: string | undefined;
 		try {
-			rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-			workspaceRemoved = !existsSync(fixtureRoot);
-		} catch (error) {
-			cleanupError = String(error instanceof Error ? error.message : error);
-			console.warn(`P0-02 fixture cleanup deferred: ${cleanupError}`);
-		}
-		try { config.cleanup(); } catch (error) { cleanupError = cleanupError ?? String(error instanceof Error ? error.message : error); }
+			await waitFor(() => handles.every(handle => !handle.child.pid || !isProcessAlive(handle.child.pid)), 10_000, "owned Pi process exit");
+			config.cleanup();
+		} catch (error) { cleanupError = String(error instanceof Error ? error.message : error); }
 		evidence.cleanup = {
 			workspacePath: fixtureRoot,
-			workspaceRemoved,
+			workspaceRemoved: false,
+			workspaceRetainedForAudit: true,
+			processes: handles.map(handle => ({ label: handle.label, pid: handle.child.pid, alive: handle.child.pid ? isProcessAlive(handle.child.pid) : false })),
 			artifactDirectory: outputArtifactRoot,
-			passed: workspaceRemoved && !cleanupError,
+			passed: !cleanupError,
 			error: cleanupError ?? null,
 		};
-		if ((!workspaceRemoved || cleanupError) && evidence.passed) {
+		if (cleanupError && evidence.passed) {
 			evidence.passed = false;
-			evidence.error = cleanupError ?? `fixture workspace was not removed: ${fixtureRoot}`;
+			evidence.error = cleanupError;
 		}
 		try {
 			writeFileSync(reportPath, JSON.stringify(evidence, null, 2));

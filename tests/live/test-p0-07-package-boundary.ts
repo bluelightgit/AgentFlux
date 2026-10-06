@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Production package/resource boundary validation. npm pack must contain only
@@ -12,7 +12,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-package-boundary-latest.json");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-package-boundary-${process.pid}`);
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const npmCommand = process.platform === "win32" ? process.execPath : "npm";
 const npmArgs = (args: string[]): string[] => process.platform === "win32"
 	? [join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js"), ...args]
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
 		const extraction = spawnSync("tar", ["-xzf", archiveName, "-C", "unpack"], { cwd: packageStage, encoding: "utf8", windowsHide: true, timeout: 60_000 });
 		if (extraction.status !== 0) throw new Error(`tar extraction failed: ${tail(extraction.stderr)}`);
 		const extractedPackage = join(unpackRoot, "package");
-		const packageEntry = join(extractedPackage, "dist", "extension", "entry.js");
+		const packageEntry = join(extractedPackage, "dist", "extension", "host-entry.ts");
 		const subagentEntry = join(extractedPackage, "dist", "extension", "subagent-entry.js");
 		if (!existsSync(packageEntry) || !existsSync(subagentEntry)) throw new Error("packed extension entries are incomplete");
 		// External peer/dev modules remain host-provided at runtime. A junction is

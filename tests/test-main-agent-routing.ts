@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import agentFlux from "../src/entry";
 import { createAgentFluxTaskEnvelope, encodeAgentFluxTaskEnvelope } from "../src/core/task-envelope";
-import { getTask } from "../src/core/task-registry";
+import { getTask, listTasks } from "../src/core/task-registry";
 import { readActiveContext, registerActiveContext, releaseActiveContext } from "../src/core/active-context";
 import { createWorkflowDefinition, reviseWorkflowDefinition } from "../src/workflows/workflow-registry";
 
@@ -28,6 +28,8 @@ async function checkRejects(action: () => Promise<unknown>, pattern: RegExp, mes
 async function emit(pi: FakePi, name: string, event: any, ctx: any): Promise<any[]> {
 	const results = [];
 	for (const hook of pi.hooks.get(name) ?? []) results.push(await hook(event, ctx));
+	// 新版 prompt options 是原位 mutation；这里显式观察输入事件，不模拟不存在的返回契约。
+	if (name === "before_agent_start") results.push({ systemPromptOptions: event.systemPromptOptions });
 	return results;
 }
 
@@ -46,10 +48,11 @@ async function main(): Promise<void> {
 			sourceTaskId: "seed-task",
 		});
 		const promptResults = await emit(pi, "before_agent_start", { prompt: "检查一个小问题并回答", systemPrompt: "base", systemPromptOptions: {} }, ctx);
-		const systemPrompt = promptResults.find(result => result?.systemPrompt)?.systemPrompt ?? "";
+		const systemPrompt = promptResults.find(result => result?.systemPromptOptions)?.systemPromptOptions?.sections?.agentflux ?? "";
 		check(systemPrompt.includes("no work-style modes") && systemPrompt.includes("flux_workflow") && systemPrompt.includes("flux_issue"), "自然任务注入稳定执行协议（无模式体系）");
 		check(systemPrompt.includes("never ask them to explain AgentFlux"), "提示词明确用户无需解释 AgentFlux");
 		check(!systemPrompt.includes("task-"), "稳定系统提示词不包含动态 taskId");
+		check((await emit(pi, "session_before_switch", { reason: "new" }, ctx)).some(result => result?.cancel === true), "活跃父任务在会话替换前拒绝跨 context 串接");
 		await emit(pi, "agent_end", { messages: [{ role: "assistant", stopReason: "error" }] }, ctx);
 		const routingEventPath = join(root, ".agentflux", "events.jsonl");
 		const routingEvents = existsSync(routingEventPath)
@@ -63,11 +66,14 @@ async function main(): Promise<void> {
 		const mainSpaceLease = registerActiveContext(root, { name: "main-workflow-conflict", context: "main", scope: "main-workflow-conflict", task: "main dispatch" });
 		await checkRejects(
 			() => pi.tools.get("flux_workflow").execute("workflow-space-conflict", { action: "reuse", workflow: savedWorkflow.id, task: "workflow conflict" }),
-			/main 空间活跃/,
+			/active main space/,
 			"Workflow 入口使用统一 active-context 拒绝活跃 Main 空间",
 		);
 		check(readActiveContext(root).entries.some(entry => entry.leaseId === mainSpaceLease.leaseId), "Workflow 冲突不会误删 Main lease");
 		releaseActiveContext(root, mainSpaceLease.leaseId);
+		await emit(pi, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, ctx);
+		await emit(pi, "agent_settled", {}, ctx);
+		check(listTasks(join(root, ".agentflux"))[0]?.status === "failed", "空间拒绝的 Workflow invocation 独立收敛，不被下一轮覆盖");
 		const workflowList = await pi.tools.get("flux_workflow").execute("workflow-list", { action: "list" });
 		check(workflowList.content[0].text.includes("empty-review"), "Main 可列出已保存 Workflow");
 		const workflowShow = await pi.tools.get("flux_workflow").execute("workflow-show", { action: "show", workflow: savedWorkflow.id });
@@ -100,7 +106,12 @@ async function main(): Promise<void> {
 		await emit(pi, "agent_settled", {}, ctx);
 		const retriedEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
 		check(retriedEvents.some(event => event.type === "task.execution" && event.operation === "retry" && event.parentTaskId === "desktop-failed-1" && event.action === "completed"), "失败任务可精确重试并保留父任务关系");
-		await pi.tools.get("flux_task").execute("task-resume", { action: "resume", selector: "desktop-failed-1", task: "继续失败的任务" });
+		await checkRejects(
+			() => pi.tools.get("flux_task").execute("task-resume-changed", { action: "resume", selector: "desktop-failed-1", task: "继续失败的任务" }),
+			/Resume cannot replace/,
+			"resume 不把新的谈话正文当作原执行需求",
+		);
+		await pi.tools.get("flux_task").execute("task-resume", { action: "resume", selector: "desktop-failed-1" });
 		await emit(pi, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, ctx);
 		await emit(pi, "agent_settled", {}, ctx);
 		const resumedEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
@@ -129,7 +140,7 @@ async function main(): Promise<void> {
 		const inputResults = await emit(pi, "input", { text: desktopPrompt, images: undefined }, ctx);
 		check(inputResults.some(result => result?.action === "transform" && result.text === "并行检查实现与测试"), "任务信封在 Pi 持久化和 provider 请求前剥离");
 		const desktopResults = await emit(pi, "before_agent_start", { prompt: "并行检查实现与测试", systemPrompt: "base", systemPromptOptions: {} }, ctx);
-		const desktopSystemPrompt = desktopResults.find(result => result?.systemPrompt)?.systemPrompt ?? "";
+		const desktopSystemPrompt = desktopResults.find(result => result?.systemPromptOptions)?.systemPromptOptions?.sections?.agentflux ?? "";
 		check(desktopSystemPrompt.includes("no work-style modes") && !desktopSystemPrompt.includes("desktop-team-1"), "信封任务使用稳定系统提示词且不污染 taskId");
 		await checkRejects(
 			() => pi.tools.get("flux_task").execute("self-continue", { action: "continue", selector: "desktop-team-1" }),
@@ -157,7 +168,7 @@ async function main(): Promise<void> {
 		const secondTeamPrompt = encodeAgentFluxTaskEnvelope(createAgentFluxTaskEnvelope({ taskId: "desktop-team-2", task: "另一个完全不同的任务" }));
 		await emit(pi, "input", { text: secondTeamPrompt }, ctx);
 		const secondTeamResults = await emit(pi, "before_agent_start", { prompt: "另一个完全不同的任务", systemPrompt: "base", systemPromptOptions: {} }, ctx);
-		const secondTeamSystemPrompt = secondTeamResults.find(result => result?.systemPrompt)?.systemPrompt ?? "";
+		const secondTeamSystemPrompt = secondTeamResults.find(result => result?.systemPromptOptions)?.systemPromptOptions?.sections?.agentflux ?? "";
 		check(secondTeamSystemPrompt === desktopSystemPrompt, "跨任务复用完全一致的稳定 system prompt");
 		await emit(pi, "agent_end", { messages: [{ role: "assistant", stopReason: "stop" }] }, ctx);
 		await emit(pi, "agent_settled", {}, ctx);

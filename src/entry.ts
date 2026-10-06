@@ -1,31 +1,39 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import * as defaultPiSdk from "@earendil-works/pi-coding-agent";
+import { bindPiSdkHost, releasePiSdkHost, type PiSdkFacade, type PiSdkHostBinding } from "./core/pi-sdk";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { formatAgentRunResult, runAgent, type AgentRunResult, type AgentTemplate } from "./agents/agent-runner";
 import { createAgent, deleteAgent, deleteSessionAgents, enqueueAgentInstruction, findAgents, formatAgents, formatAgentSessionCommand, formatSubagentStatusLine, gcAgents, getAgentRoles, listAgents, readAgentLastMessage, readAgentLastMessages, rejectQueuedAgentInstructions, resetAgentStatus, runAgentRecord, sortAgentsByActivity, type AgentRunContext } from "./agents/agent-store";
 import { getForkCandidates, handleForkCommand, registerSessionFork } from "./agents/session-fork";
 import { requestAgentRunStop } from "./agents/agent-run-control";
 import { loadAllRoles } from "./agents/templates";
+import { withAgentReferenceFence } from "./core/agent-reference-fence";
 import { createIssue, claimIssue, commentOnIssue, deleteIssue, formatIssue, formatIssueTimeline, getIssue, listIssues, opposeProposal, proposeIssue, resolveIssue, reviewClaim, setCommunityLimits, submitClaim, supportProposal, type CommunityIssue } from "./core/community";
 import { loadConfig, loadModelsConfig, resolveSharedSkills, validateConfig } from "./core/config";
+import { toJsonValue, toolDetailsFailed } from "./core/tool-result";
+import { runDurationMs } from "./core/run-duration";
+import { inspectPiRuntime } from "./core/pi-runtime";
 import { MessageBus, type DeliveredMessageV2 } from "./core/message-bus";
 import { SharedBoard } from "./core/shared-board";
 import { formatLifecycleGcReport, runLifecycleGc } from "./core/lifecycle-gc";
 import { formatActiveContext, pruneStaleActiveContext, readActiveContext, registerActiveContext, releaseActiveContext } from "./core/active-context";
 import { loadPricing, type PricingTable } from "./core/pricing";
-import { createTaskExecutionPlan, formatTaskExecutionPlan, type TaskExecutionPlan } from "./core/task-execution";
+import { UsageAccounting } from "./core/usage-accounting";
+import { createTaskExecutionPlan, formatTaskExecutionPlan, resolvePreparedTaskText, type TaskExecutionPlan } from "./core/task-execution";
 import { resolvePathInsideExistingRoot } from "./core/safe-path";
 import { listAgentRuns, markAgentRunStopRequested, reconcileStaleAgentRuns, type AgentRunRecord } from "./core/run-registry";
 import { parseAgentFluxTaskEnvelope, type AgentFluxTaskEnvelope } from "./core/task-envelope";
-import { formatTasks, getTask, listTasks, registerTask, resolveTask, updateTaskMetadata, updateTaskStatus, type TaskStatus } from "./core/task-registry";
+import { agentInvocationOutcome, aggregateInvocationOutcomes, type InvocationOutcome } from "./core/task-outcome";
+import { formatTasks, getTask, getTaskExecution, listTasks, registerTask, resolveTask, recordTaskInvocationOutcome, updateTaskMainUsage, updateTaskMetadata, updateTaskStatus, type TaskStatus } from "./core/task-registry";
 import { analyzeCompaction, formatCompactionAdvice, registerCompactionAdvisor } from "./extension/compaction-advisor";
 import { FLUX_HELP, getFluxArgumentCompletions, parseAgentFlags, parseFluxCommand } from "./extension/commands";
 import { applyPrefixLayout } from "./extension/prefix-layout";
 import { showAgentTuiMenu, showFluxTuiMenu, showForkTuiMenu, showIssueTuiMenu, showMessageTuiMenu, showTaskTuiMenu, showWorkflowTuiMenu, type FluxTuiMenuData } from "./extension/tui-menu";
 import { TelemetryWriter, type MainUsage } from "./telemetry/events";
-import { executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
+import { bindWorkflowInvocation, executeDAG, formatDAGResult, generateTaskDAG, resolveDAGRoleModel, setDagLogSink, type DAGExecutionResult, type TaskDAG } from "./workflows/dag-executor";
 import { createWorkflowDefinition, deleteWorkflowDefinition, formatWorkflowDefinitions, getWorkflowDefinition, listWorkflowDefinitions, reviseWorkflowDefinition } from "./workflows/workflow-registry";
 import { isWorkflowDeadlineExceededError } from "./workflows/workflow-errors";
 
@@ -39,6 +47,7 @@ interface RuntimeContext {
 	mainModel?: string;
 	mainProvider?: string;
 	pricing?: PricingTable;
+	hostProvenance?: ReturnType<typeof inspectPiRuntime>;
 }
 function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "info", maxLines = 1): void {
 	try {
@@ -46,7 +55,7 @@ function notify(ctx: any, text: string, level: "info" | "warning" | "error" = "i
 		if (ctx.hasUI) {
 			// 统一走 info 级: pi 的 showStatus 在对话最底部渲染浅灰色小字（dim）,
 			// 连续通知会原地更新不堆积; warning/error 级别用前缀区分（不用彩色大字）
-			const prefixed = level === "error" ? `⚠ ${cleaned}` : level === "warning" ? `△ ${cleaned}` : cleaned;
+			const prefixed = level === "error" ? `[error] ${cleaned}` : level === "warning" ? `[warning] ${cleaned}` : cleaned;
 			ctx.ui.notify(prefixed, "info");
 		} else (level === "error" ? console.error : console.log)(cleaned);
 	} catch { /* 会话已销毁时后台回调的通知尽力而为 */ }
@@ -79,7 +88,7 @@ function safeParseEnvelope(text: string): AgentFluxTaskEnvelope | null {
 function cleanNotifyText(text: string, maxLines: number): string {
 	const lines = String(text ?? "").split("\n").map(line => line.length > 200 ? `${line.slice(0, 200)}…` : line);
 	if (lines.length <= maxLines) return lines.join("\n");
-	return [...lines.slice(0, maxLines), `…（共 ${lines.length} 行, 已折叠）`].join("\n");
+	return [...lines.slice(0, maxLines), `... (${lines.length} lines; collapsed)`].join("\n");
 }
 
 /** DAG 执行结果一行摘要 (完整详情在 checkpoint/artifact 文件中)。 */
@@ -126,7 +135,8 @@ function formatAgentInspection(
 		`Agent ${agent.name} (${agent.id})`,
 		`status=${run?.status ?? agent.status} role=${run?.role ?? agent.role}${agent.roles?.length ? ` roles=${agent.roles.join("|")}` : ""}`,
 		`run=${run?.id ?? "-"} phase=${run?.phase ?? "-"} health=${run?.health ?? "-"}${run?.healthReason ? ` reason=${run.healthReason}` : ""}`,
-		`elapsed=${age(run?.createdAt)} liveness=${age(run?.heartbeatAt)} progress=${age(run?.lastProgressAt)} activity=${age(run?.lastActivityAt)} deadline=${run?.deadlineAt ?? "none"}`,
+		`backend=${run?.backend ?? "process"}${run?.backend === "sdk" ? ` host_pid=${run.sdkOwner?.host.pid ?? "-"} sdk_session=${run.sdkSessionId ?? "-"} generation=${run.sdkOwner?.generation ?? "-"}` : ` child_pid=${run?.pid ?? "-"}`}`,
+		`duration=${runDurationMs(run) === undefined ? "-" : `${Math.floor(runDurationMs(run)! / 1000)}s`} liveness=${age(run?.heartbeatAt)} progress=${age(run?.lastProgressAt)} activity=${age(run?.lastActivityAt)} deadline=${run?.deadlineAt ?? "none"}`,
 		`usage turns=${run?.turns ?? 0} input=${run?.input ?? 0} output=${run?.output ?? 0} context=${run?.contextTokens ?? 0} cost=$${(run?.costUsd ?? 0).toFixed(6)}`,
 		`model=${run?.model ?? agent.model ?? "default"} provider=${run?.provider ?? agent.provider ?? "-"}`,
 		`last progress=${run?.lastProgressType ?? "-"}: ${run?.lastProgressSummary ?? "-"}`,
@@ -174,7 +184,14 @@ function templateFromRole(runtime: RuntimeContext, roleName: string, name = role
 	};
 }
 
-export default function agentFlux(pi: ExtensionAPI) {
+export default function agentFlux(pi: ExtensionAPI, hostSdk: PiSdkFacade = defaultPiSdk) {
+	let sdkHostBinding: PiSdkHostBinding | undefined;
+	function registerControlTool<TParams extends TSchema>(tool: ToolDefinition<TParams>) {
+		pi.registerTool({ ...tool, exposure: "model-only", executionMode: "sequential", async execute(...args) {
+			const result = await tool.execute(...args);
+			return { ...result, details: toJsonValue(result.details), isError: result.isError ?? toolDetailsFailed(result.details) };
+		} });
+	}
 	let runtime: RuntimeContext | null = null;
 	let telemetry: TelemetryWriter | null = null;
 	let sessionId = "main";
@@ -182,20 +199,40 @@ export default function agentFlux(pi: ExtensionAPI) {
 	let currentPlan: TaskExecutionPlan | null = null;
 	let implicitPlan: TaskExecutionPlan | null = null;
 	let implicitTask: { taskId: string; task: string } | null = null;
-	let lastAgentRunFailed = false;
-	type ExecutionOutcome = { action: "completed" | "failed" | "cancelled"; status: "success" | "failure" | "cancelled" | "timeout"; error?: string; costUsd?: number };
-	let executionOutcome: ExecutionOutcome | null = null;
+	type ExecutionOutcome = InvocationOutcome;
+	let mainOutcome: ExecutionOutcome | null = null;
+	let mainSettled = false;
+	let closing = false;
+	const pendingBackground = new Set<Promise<unknown>>();
 	let pendingTaskEnvelope: AgentFluxTaskEnvelope | null = null;
-	// Main 会话逐轮 usage 累计：turn_end 从 pi message_end 读取，agent_settled 落盘
+	// 唯一 usage adapter：流中快照暂估，原始 session entries 幂等结算（不是 provider context 投影）。
 	let mainTurnUsage: MainUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
-	const resetMainUsage = (): MainUsage => { const usage = mainTurnUsage; mainTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 }; return usage; };
+	let mainAccounting = new UsageAccounting();
+	let assistantSequence = 0;
+	let activeAssistantSource: string | undefined;
+	const resetMainUsage = (): MainUsage => {
+		const usage = mainTurnUsage;
+		mainTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+		mainAccounting = new UsageAccounting({ sessionId, pricing: runtime?.pricing, baselineEntryIds: uiCtx?.sessionManager?.getEntries?.().map((entry: any) => entry.id) ?? [] });
+		activeAssistantSource = undefined;
+		return usage;
+	};
+	function updateMainUsage(ctx = uiCtx): void {
+		const entries = ctx?.sessionManager?.getEntries?.();
+		if (entries) mainAccounting.ingestEntries(entries as any);
+		const snapshot = mainAccounting.snapshot();
+		const lastAssistant = [...mainAccounting.getCharges()].reverse().find(item => item.sourceKind === "assistant");
+		mainTurnUsage = { input: snapshot.input, output: snapshot.output, cacheRead: snapshot.cacheRead, cacheWrite: snapshot.cacheWrite, costUsd: snapshot.cost, model: lastAssistant?.responseModel ?? lastAssistant?.model };
+		const plan = currentPlan ?? implicitPlan;
+		if (runtime && plan?.taskId) updateTaskMainUsage(runtime.fluxDir, plan.taskId, mainTurnUsage, { complete: snapshot.complete, attributionComplete: snapshot.attributionComplete, provisional: snapshot.provisional });
+	}
 	const activeRuns = new Map<string, AbortController>();
 	const persistentControllers = new Map<string, AbortController>();
 	let uiCtx: any = null;  // TUI footer 状态行的 UI 上下文（session_start 时注入）
 	/** TUI 底部单行状态：subagent: name - status | ...（运行中优先，其次按创建时间；无子代理时清除）。 */
 	function updateSubagentStatusLine(): void {
 		try {
-			if (uiCtx?.ui?.setStatus && runtime) {
+			if (uiCtx?.mode === "tui" && uiCtx?.ui?.setStatus && runtime) {
 				uiCtx.ui.setStatus("agentflux-subagents", formatSubagentStatusLine(listAgents(runtime.cwd, sessionId)));
 			}
 		} catch { /* footer 更新尽力而为 */ }
@@ -237,9 +274,9 @@ export default function agentFlux(pi: ExtensionAPI) {
 	let progressTimer: any = null;
 	/** 子代理运行过程实时显示：TUI 用 working 行（覆盖输入区上方的“正在…”行），持续更新最新一步。 */
 	function showSubagentProgress(name: string, event: { type: "message" | "tool"; text: string }): void {
-		if (!uiCtx?.ui?.setWorkingMessage) return;
-		const prefix = event.type === "tool" ? "⚙" : "💬";
-		const text = `${prefix} [子代理 ${name}] ${event.text.replace(/\s+/g, " ").slice(0, 120)}`;
+		if (uiCtx?.mode !== "tui" || !uiCtx?.ui?.setWorkingMessage) return;
+		const prefix = event.type === "tool" ? "tool" : "message";
+		const text = `[subagent ${name}] ${prefix}: ${event.text.replace(/\s+/g, " ").slice(0, 120)}`;
 		try {
 			uiCtx.ui.setWorkingMessage(text);
 			clearTimeout(progressTimer);
@@ -289,6 +326,10 @@ export default function agentFlux(pi: ExtensionAPI) {
 			: null);
 		if (!plan) return;
 		if (!currentPlan && !implicitPlan) startPlan(plan);
+		const receipts = getTaskExecution(runtime.fluxDir, plan.executionId)?.invocationOutcomes ?? [];
+		const invocationCostUsd = aggregateInvocationOutcomes(receipts).costUsd ?? 0;
+		const costAccounting = { mainCostUsd: usage?.costUsd ?? 0, invocationCostUsd, complete: mainAccounting.snapshot().complete && receipts.every(item => item.costUsd !== undefined && item.costComplete === true), attributionComplete: mainAccounting.snapshot().attributionComplete && receipts.every(item => item.attributionComplete === true) };
+		outcome = aggregateInvocationOutcomes([...receipts, { ...outcome, costUsd: usage?.costUsd ?? 0 }]);
 		telemetry.writeTaskExecution({
 			sessionId,
 			taskId: plan.taskId,
@@ -315,13 +356,34 @@ export default function agentFlux(pi: ExtensionAPI) {
 			executionId: plan.executionId,
 			costUsd: outcome.costUsd,
 			usage,
+			costAccounting,
 			outcome: { status: outcome.status, error: outcome.error },
 		});
 		currentPlan = null;
 		implicitPlan = null;
 		implicitTask = null;
-		executionOutcome = null;
-		lastAgentRunFailed = false;
+		mainOutcome = null;
+		mainSettled = false;
+		resetMainUsage();
+	}
+
+	function recordOutcome(id: string, outcome: ExecutionOutcome, taskId = ensureImplicitPlan()?.taskId): void {
+		if (runtime && taskId) recordTaskInvocationOutcome(runtime.fluxDir, taskId, id, outcome);
+	}
+
+	function invocationRunCosts(baseline: ReadonlySet<string>, taskId: string): { costUsd: number; costComplete: boolean; attributionComplete: boolean } {
+		if (!runtime) return { costUsd: 0, costComplete: false, attributionComplete: false };
+		try {
+			const runs = listAgentRuns(runtime.fluxDir, { taskId }).filter(run => !baseline.has(run.id));
+			return { costUsd: runs.reduce((sum, run) => sum + run.costUsd, 0),
+				costComplete: runs.every(run => run.costAccounting?.complete === true),
+				attributionComplete: runs.every(run => run.costAccounting?.attributionComplete === true) };
+		} catch { return { costUsd: 0, costComplete: false, attributionComplete: false }; }
+	}
+
+	function maybeFinishMain(): void {
+		if (!mainSettled || closing || persistentControllers.size > 0) return;
+		finishCurrentPlan(mainOutcome ?? { action: "completed", status: "success" }, { ...mainTurnUsage });
 	}
 
 	function ensureImplicitPlan(): TaskExecutionPlan | null {
@@ -358,7 +420,11 @@ export default function agentFlux(pi: ExtensionAPI) {
 	}
 
 	/** community 空间启动：claim 内部完成互斥检查与注册（多 issue 并行允许）。 */
-	const registerCommunityClaim = claimIssue;
+	const registerCommunityClaim: typeof claimIssue = (cwd, id, actor, scope, options = {}) => withAgentReferenceFence(() => {
+		const matches = actor === "main" ? [] : findAgents(cwd, actor, sessionId);
+		if (matches.length > 1) throw new Error(`Agent selector is ambiguous: ${actor}`);
+		return claimIssue(cwd, id, actor, scope, { ...options, ownerSessionId: sessionId, agentId: options.agentId ?? matches[0]?.id });
+	});
 
 	const persistentContext = (maxCostUsd = runtime?.config.budget.max_cost_per_task): AgentRunContext => {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
@@ -419,7 +485,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 						model: run?.model ?? agent.model,
 						provider: run?.provider ?? agent.provider,
 						phase: run?.phase,
-						elapsedMs: ageMs(run?.createdAt),
+						elapsedMs: runDurationMs(run),
 						freshnessMs: ageMs(run?.lastActivityAt),
 						turns: run?.turns,
 						input: run?.input,
@@ -474,7 +540,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	async function runWorkflow(
 		plan: TaskExecutionPlan,
 		signal?: AbortSignal,
-		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string } = {},
+		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string; task?: string; preserveParent?: boolean } = {},
 	): Promise<DAGExecutionResult> {
 		if (!runtime) throw new Error("AgentFlux is not initialized");
 		return runWorkflowWithContext(runtime.cwd, plan, () => runWorkflowInternal(plan, signal, request));
@@ -483,7 +549,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 	async function runWorkflowInternal(
 		plan: TaskExecutionPlan,
 		signal?: AbortSignal,
-		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string } = {},
+		request: { action?: "run" | "reuse" | "modify"; selector?: string; name?: string; task?: string; preserveParent?: boolean } = {},
 	): Promise<DAGExecutionResult> {
 		if (!runtime || !telemetry) throw new Error("AgentFlux is not initialized");
 		// flux_workflow can be called with a freshly constructed plan when no
@@ -494,6 +560,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 			plan = { ...plan, deadlineAt: new Date(Date.now() + plan.budget.maxWallClockMs).toISOString() };
 		}
 		registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
+		const workflowTask = request.task?.trim() ?? plan.task;
+		if (!workflowTask) throw new Error("Workflow task cannot be empty");
 		const planDeadlineAt = plan.deadlineAt === undefined
 			? undefined
 			: (() => {
@@ -514,12 +582,35 @@ export default function agentFlux(pi: ExtensionAPI) {
 		if (resumeDagPath && existsSync(resumeDagPath)) {
 			const dag = JSON.parse(readFileSync(resumeDagPath, "utf-8")) as TaskDAG;
 			const source = plan.parentTaskId ? getTask(runtime.fluxDir, plan.parentTaskId) : undefined;
-			if (source?.resource?.type === "workflow") updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: source.resource });
+			if (!source) throw new Error("Workflow resume requires the source Task");
+			if ((request.action !== undefined && request.action !== "run") || request.name !== undefined) {
+				throw new Error("Workflow resume only accepts run without renaming; use a new task for reuse or modify");
+			}
+			const originalInput = dag.invocationTask === undefined ? source.workflowRequest?.task ?? source.task : dag.invocationTask;
+			if (typeof originalInput !== "string" || !originalInput.trim()) throw new Error("Workflow resume input is invalid");
+			if (dag.invocationTask !== undefined && source.workflowRequest && dag.invocationTask.trim() !== source.workflowRequest.task.trim()) {
+				throw new Error("Workflow resume input conflicts with the source Task request");
+			}
+			if (request.task !== undefined && request.task.trim() !== originalInput.trim()) {
+				throw new Error("Workflow resume cannot replace the saved invocation input");
+			}
+			const resource = source.resource?.type === "workflow" ? source.resource : undefined;
+			if (request.selector !== undefined) {
+				const selected = getWorkflowDefinition(runtime.fluxDir, request.selector);
+				if (!selected || !resource || selected.id !== resource.id || selected.version !== resource.version) {
+					throw new Error("Workflow resume selector must match the source definition and version");
+				}
+			}
+			const selector = resource ? `${resource.id}${resource.version === undefined ? "" : `@${resource.version}`}` : undefined;
+			updateTaskMetadata(runtime.fluxDir, plan.taskId, {
+				...(resource ? { resource } : {}),
+				workflowRequest: { task: originalInput.trim(), action: "run", selector },
+			});
 			mkdirSync(runsDir, { recursive: true });
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.executionId);
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, resumeFromExecutionId: resumeExecutionId, qualityGate: runtime.config.quality_gate ? { ...runtime.config.quality_gate, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		if (plan.operation === "resume") throw new Error(`Workflow checkpoint is unavailable for ${plan.parentTaskId ?? "the selected task"}`);
 		let action = request.action ?? "run";
@@ -533,29 +624,30 @@ export default function agentFlux(pi: ExtensionAPI) {
 					: source.resource.id;
 			}
 		}
+		updateTaskMetadata(runtime.fluxDir, plan.taskId, { workflowRequest: { task: workflowTask, action, selector } });
 		if (action === "reuse") {
 			if (!selector) throw new Error("Workflow reuse requires a saved Workflow selector");
 			const definition = getWorkflowDefinition(runtime.fluxDir, selector);
 			if (!definition) throw new Error(`Workflow not found: ${selector}`);
-			if (plan.operation === "new") {
+			if (plan.operation === "new" && !request.preserveParent) {
 				plan.operation = "reuse";
 				plan.parentTaskId = definition.sourceTaskId;
 				registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
 			}
-			const dag = structuredClone(definition.dag);
+			const dag = bindWorkflowInvocation(definition.dag, workflowTask);
 			delete dag.planningCostUsd;
 			mkdirSync(runsDir, { recursive: true });
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.taskId);
 			mkdirSync(runDir, { recursive: true });
 			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
 			updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "workflow", id: definition.id, version: definition.version } });
-			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+			return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { ...runtime.config.quality_gate, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 		}
 		const previous = action === "modify"
 			? getWorkflowDefinition(runtime.fluxDir, selector ?? "")
 			: undefined;
 		if (action === "modify" && !previous) throw new Error(`Workflow not found: ${selector ?? ""}`);
-		if (previous && plan.operation === "new") {
+		if (previous && plan.operation === "new" && !request.preserveParent) {
 			plan.operation = "continue";
 			plan.parentTaskId = previous.sourceTaskId;
 			registerTask(runtime.fluxDir, sessionId, plan, "running", { ownerPid: process.pid });
@@ -571,41 +663,51 @@ export default function agentFlux(pi: ExtensionAPI) {
 					"The DAG nodes must perform the user's intended work. They must not edit the Workflow registry, modify .agentflux, invoke AgentFlux control tools, or describe the act of revising a Workflow.",
 					"Apply the requested structural change to the current DAG, preserving unaffected business steps and dependencies.",
 					"",
-					`Requested change:\n${plan.task}`,
+					`Requested change:\n${workflowTask}`,
 					"",
 					`Current executable DAG:\n${JSON.stringify(previous.dag, null, 2)}`,
 				].join("\n")
-				: plan.task;
+				: workflowTask;
 			dag = await generateTaskDAG(planningTask, { cwd: runtime.cwd, model: planner.model, provider: planner.provider, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, thinking: planner.thinking, models: runtime.modelsConfig.models, modelsConfig: runtime.modelsConfig, pricing: runtime.pricing, telemetry, sessionId, prefixLayout: runtime.config.cache.prefix_layout === "static_first", signal, maxCostUsd: plan.budget.maxCostUsd, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, deadlineAt: planDeadlineAt, timeoutMs: planTimeoutMs, health: runtime.config.health, taskId: plan.taskId, executionId: plan.executionId });
 			mkdirSync(runsDir, { recursive: true });
 			const runDir = resolvePathInsideExistingRoot(runsDir, plan.taskId);
 			mkdirSync(runDir, { recursive: true });
-			writeFileSync(join(runDir, "dag.json"), JSON.stringify(dag, null, 2));
-			const defaultName = plan.task.slice(0, 64);
+			const executionDag = bindWorkflowInvocation(dag, workflowTask);
+			writeFileSync(join(runDir, "dag.json"), JSON.stringify(executionDag, null, 2));
+			const defaultName = workflowTask.slice(0, 64);
 			const name = request.name?.trim() || (listWorkflowDefinitions(runtime.fluxDir).some(item => item.name === defaultName)
 				? `${defaultName} · ${plan.taskId.slice(-8)}`
 				: defaultName);
 			const definition = previous
 				? reviseWorkflowDefinition(runtime.fluxDir, previous.id, { dag, sourceTaskId: plan.taskId, name: request.name })
 				: createWorkflowDefinition(runtime.fluxDir, { name, dag, sourceTaskId: plan.taskId });
+			dag = executionDag;
 			updateTaskMetadata(runtime.fluxDir, plan.taskId, { resource: { type: "workflow", id: definition.id, version: definition.version } });
 			telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "subagent", origin: "fresh", status: "done", action: "completed", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
 		} catch (error) {
 			telemetry.writeAgentLifecycle({ sessionId, taskId: plan.taskId, agentId: plannerAgentId, agent: "dag-planner", kind: "subagent", origin: "fresh", status: signal?.aborted ? "cancelled" : "failed", action: signal?.aborted ? "cancelled" : "failed", role: "planner", currentTask: `Plan Workflow: ${plan.task}`.slice(0, 200), model: planner.model });
 			throw error;
 		}
-		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { model: runtime.config.quality_gate.model, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
+		return executeDAG(dag, { cwd: runtime.cwd, fluxDir: runtime.fluxDir, modelsConfig: runtime.modelsConfig, telemetry, prefixLayout: runtime.config.cache.prefix_layout === "static_first", pricing: runtime.pricing, sessionId, sharedSkills: runtime.sharedSkills, persistent: false, enableQualityGate: true, maxRetries: 1, signal, maxCostUsd: plan.budget.maxCostUsd, deadlineAt: planDeadlineAt, maxWallClockMs: planTimeoutMs, maxIterations: dag.nodes.length + plan.budget.maxIterations, maxParallel: plan.budget.maxParallel ?? 3, parentMaxTurns: plan.budget.maxTurns, parentMaxInputTokens: plan.budget.maxInputTokens, health: runtime.config.health, executionId: plan.executionId, taskId: plan.taskId, defaultModel: runtime.mainModel, defaultProvider: runtime.mainProvider, qualityGate: runtime.config.quality_gate ? { ...runtime.config.quality_gate, timeoutMs: runtime.config.quality_gate.timeout_ms } : undefined });
 	}
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
+		const hostProvenance = inspectPiRuntime({ hostPackageDir: hostSdk.getPackageDir(), hostVersion: hostSdk.VERSION });
 		uiCtx = ctx;
+		if (ctx.sessionManager instanceof hostSdk.SessionManager && ctx.modelRegistry instanceof hostSdk.ModelRegistry) {
+			sdkHostBinding = bindPiSdkHost(ctx.cwd, hostSdk, ctx, pi.getSettings());
+		}
 		const config = loadConfig(ctx.cwd);
 		const warnings = validateConfig(config);
-		const modelsConfig = loadModelsConfig(ctx.cwd);
+		const nativeModels = ctx.modelRegistry?.getModelsOfType?.("chat");
+		const available = nativeModels ? await ctx.modelRegistry.getAvailableOfType("chat") : undefined;
+		const registeredProviders = nativeModels ? [...(ctx.modelRegistry.getRegisteredProviderIds?.() ?? []), ...new Set(nativeModels.filter((model: any) => ctx.modelRegistry.getRegisteredNativeProvider?.(model.provider)).map((model: any) => model.provider))] : undefined;
+		const modelsConfig = loadModelsConfig(ctx.cwd, nativeModels ? { models: nativeModels, available, registeredProviders } : undefined);
+		closing = false;
 		const fluxDir = join(ctx.cwd, ".agentflux");
 		telemetry = new TelemetryWriter(fluxDir);
 		sessionId = ctx.sessionManager?.getSessionId?.() ?? ctx.sessionManager?.getSessionFile?.() ?? `main-${randomUUID()}`;
-		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig), mainModel: ctx.model?.id, mainProvider: ctx.model?.provider };
+		runtime = { cwd: ctx.cwd, fluxDir, config, modelsConfig, sharedSkills: resolveSharedSkills(config, modelsConfig), mainModel: ctx.model?.id, mainProvider: ctx.model?.provider, hostProvenance };
 		let reconciled: AgentRunRecord[] = [];
 		try {
 			reconciled = reconcileStaleAgentRuns(fluxDir);
@@ -628,10 +730,31 @@ export default function agentFlux(pi: ExtensionAPI) {
 		setCommunityLimits({ stallThreshold: config.community_stall_threshold ?? 3, maxCostPerTask: config.budget.max_cost_per_task, maxRounds: config.community_stall_threshold ?? 3 });
 		setDagLogSink(ctx.hasUI ? null : console.error);
 		try { runtime.pricing = await loadPricing(fluxDir, config.pricing, ctx.hasUI ? undefined : ctx.model?.id); } catch {}
+		resetMainUsage();
 		for (const warning of warnings) notify(ctx, warning, "warning");
 		notify(ctx, "AgentFlux ready · main + subagents · workflow · community", "info");
 	});
 
+	// 会话替换不得把仍归属旧父任务的 child/controllers 接到新 context。
+	const guardSessionReplacement = (_event: unknown, ctx: ExtensionContext) => {
+		if (persistentControllers.size > 0 || currentPlan || implicitPlan || (!mainSettled && implicitTask)) {
+			notify(ctx, "Finish or stop active AgentFlux work before changing sessions.", "warning");
+			return { cancel: true };
+		}
+		return undefined;
+	};
+	pi.on("session_before_switch", guardSessionReplacement);
+	pi.on("session_before_fork", guardSessionReplacement);
+	pi.on("session_before_tree", guardSessionReplacement);
+
+	pi.on("model_select", async (_event, ctx) => {
+		uiCtx = ctx;
+		if (!runtime) return;
+		runtime.mainModel = ctx.model?.id;
+		runtime.mainProvider = ctx.model?.provider;
+		const models = ctx.modelRegistry?.getModelsOfType?.("chat");
+		if (models) runtime.modelsConfig = loadModelsConfig(ctx.cwd, { models, available: await ctx.modelRegistry.getAvailableOfType("chat"), registeredProviders: [...ctx.modelRegistry.getRegisteredProviderIds()] });
+	});
 	pi.on("before_provider_request", async (event: any) => runtime ? applyPrefixLayout(event.payload, runtime.config.cache).payload : undefined);
 	pi.on("input", async (event: any) => {
 		const envelope = safeParseEnvelope(event.text);
@@ -639,67 +762,90 @@ export default function agentFlux(pi: ExtensionAPI) {
 		pendingTaskEnvelope = envelope;
 		return { action: "transform", text: envelope.task, images: event.images };
 	});
-	pi.on("before_agent_start", async (event: any) => {
-		if (!currentPlan) {
+	pi.on("before_agent_start", async (event: any, ctx) => {
+		uiCtx = ctx;
+		mainSettled = false;
+		if (!currentPlan && !implicitPlan) {
 			if (!runtime) return undefined;
 			const envelope = pendingTaskEnvelope ?? safeParseEnvelope(event.prompt);
 			pendingTaskEnvelope = null;
 			const task = envelope?.task ?? event.prompt;
 			if (envelope) {
-				executionOutcome = null;
-				lastAgentRunFailed = false;
+				mainOutcome = null;
 				currentPlan = startPlan(createTaskExecutionPlan({ task, taskId: envelope.taskId, selectedBy: "user", budget: runtime.config.budget }));
 			} else {
 				implicitTask = { taskId: `task-${randomUUID()}`, task };
 				implicitPlan = null;
 			}
 		}
-		return { systemPrompt: `${event.systemPrompt}\n\n${operatingProtocol}` };
+		if (event.systemPromptOptions) {
+			// Pi 的这个 options 对象可变；返回值不接受 systemPromptOptions。
+			event.systemPromptOptions.sections ??= {};
+			event.systemPromptOptions.sections.agentflux = operatingProtocol;
+			return undefined;
+		}
+		// 旧 FakePi 夹具的只读兼容分支；新版 Host 使用结构化 section。
+		return { systemPrompt: event.systemPrompt?.includes(operatingProtocol) ? event.systemPrompt : `${event.systemPrompt}\n\n${operatingProtocol}` };
 	});
-	pi.on("turn_end", async (event: any) => {
+	pi.on("message_start", async (event: any) => {
+		if (event.message?.role === "assistant") activeAssistantSource = `${sessionId}:assistant:${++assistantSequence}`;
+	});
+	pi.on("message_update", async (event: any, ctx) => {
+		if (event.message?.role === "assistant") mainAccounting.ingestStream(event, { sourceId: activeAssistantSource });
+		updateMainUsage(ctx);
+	});
+	pi.on("message_end", async (event: any, ctx) => {
+		mainAccounting.settleStream(event, { sourceId: event.message?.role === "assistant" ? activeAssistantSource : undefined });
+		updateMainUsage(ctx);
+	});
+	pi.on("turn_end", async (event: any, ctx) => {
 		turnIndex += 1;
-		const message = event?.message;
-		const u = message?.usage;
-		if (u && typeof u.input === "number") {
-			mainTurnUsage.input += u.input ?? 0;
-			mainTurnUsage.output += u.output ?? 0;
-			mainTurnUsage.cacheRead += u.cacheRead ?? 0;
-			mainTurnUsage.cacheWrite += u.cacheWrite ?? 0;
-			mainTurnUsage.costUsd += u.cost?.total ?? 0;
-			if (message.model) mainTurnUsage.model = message.model;
+		if (event.message?.role === "assistant") mainAccounting.settleStream(event, { sourceId: activeAssistantSource ?? `${sessionId}:turn:${turnIndex}` });
+		updateMainUsage(ctx);
+	});
+	pi.on("agent_before_settle", async (event: any, ctx) => {
+		updateMainUsage(ctx);
+		if (event.outcome && event.outcome !== "completed") {
+			const cancelled = event.outcome === "aborted";
+			mainOutcome = { action: cancelled ? "cancelled" : "failed", status: cancelled ? "cancelled" : "failure", error: `Main boundary ${String(event.outcome)}` };
 		}
 	});
+	// 先关闭没有独立 session-overhead 归属契约的 warming，避免终态后回写历史任务。
+	pi.on("cache_warming_decision", async () => ({ action: "stop" }));
 	pi.on("agent_end", async (event: any) => {
 		const lastAssistant = [...(event?.messages ?? [])].reverse().find((message: any) => message?.role === "assistant");
-		lastAgentRunFailed = lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted";
+		if (lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted") {
+			const cancelled = lastAssistant.stopReason === "aborted";
+			mainOutcome = { action: cancelled ? "cancelled" : "failed", status: cancelled ? "cancelled" : "failure", error: lastAssistant.errorMessage ?? `Main ${lastAssistant.stopReason}` };
+		} else mainOutcome = null; // agent_end 可以属于自动 retry，只有最终 settled 的 Main 结果参与收敛。
 	});
-	pi.on("agent_settled", async () => {
-		const terminal = executionOutcome ?? (lastAgentRunFailed
-			? { action: "failed" as const, status: "failure" as const }
-			: { action: "completed" as const, status: "success" as const });
-		finishCurrentPlan(terminal, resetMainUsage());
+	pi.on("agent_settled", async (_event, ctx) => {
+		updateMainUsage(ctx);
+		mainSettled = true;
+		maybeFinishMain();
 	});
 	pi.on("session_shutdown", async () => {
+		closing = true;
 		for (const controller of activeRuns.values()) controller.abort();
 		for (const controller of persistentControllers.values()) controller.abort();
+		await Promise.allSettled([...pendingBackground]);
 		activeRuns.clear();
 		persistentControllers.clear();
 		if (runtime) {
+			releasePiSdkHost(runtime.cwd, sdkHostBinding);
+			sdkHostBinding = undefined;
 			try { deleteSessionAgents(runtime.cwd, sessionId); } catch { /* 清理尽力而为 */ }
 		}
 		if (currentPlan || implicitPlan || implicitTask) {
-			finishCurrentPlan(executionOutcome ?? {
-				action: "cancelled",
-				status: "cancelled",
-				error: "Session closed before task settled",
-			}, resetMainUsage());
+			updateMainUsage();
+			finishCurrentPlan({ action: "cancelled", status: "cancelled", error: "Session closed before task settled" }, { ...mainTurnUsage });
 		}
 	});
 
 	registerSessionFork(pi, () => ({ sessionId, telemetry }));
 	registerCompactionAdvisor(pi, () => ({ sessionId, telemetry }));
 
-	pi.registerTool({
+	registerControlTool({
 		name: "flux_task",
 		label: "Task History",
 		description: "List or inspect prior AgentFlux tasks, or prepare a new, reused, resumed, continued, or retried task without exposing runtime identifiers in the prompt.",
@@ -727,25 +873,29 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (source && activePlan?.taskId === source.id) {
 				throw new Error("Cannot reuse, resume, continue or retry the currently active task");
 			}
-			const preparedTaskId = activePlan?.taskId;
-			const task = params.task?.trim() || implicitTask?.task || source?.task;
+			if (activePlan || persistentControllers.size > 0 || activeRuns.size > 0) {
+				throw new Error("Cannot replace an active task; wait for it to settle before preparing another invocation");
+			}
+			if (params.action === "retry" && source && !["failed", "cancelled", "timed_out"].includes(source.status)) {
+				throw new Error(`Cannot retry a ${source.status} task`);
+			}
+			const task = resolvePreparedTaskText(params.action, source?.task, params.task, implicitTask?.task);
 			if (!task) throw new Error("new requires task");
 			currentPlan = startPlan(createTaskExecutionPlan({
 				task,
-				taskId: preparedTaskId,
 				selectedBy: "main_agent",
 				budget: runtime.config.budget,
 				operation: params.action,
 				parentTaskId: source?.id,
 				parentExecutionId: source?.executionId,
-			}), !preparedTaskId);
+			}));
 			implicitPlan = null;
 			const next = `${source?.resource?.type === "workflow" ? "Call flux_workflow; resume uses the saved checkpoint when available." : source?.resource?.type === "issue" ? `Use flux_issue to continue the existing Issue: ${source.resource.id}.` : "Continue in the main Agent."}`;
 			return { content: [{ type: "text", text: `${params.action} prepared. ${next}` }], details: { ok: true } };
 		},
 	});
 
-	pi.registerTool({
+	registerControlTool({
 		name: "flux_agent",
 		label: "Agent",
 		description: "Create, inspect, run, steer, stop, retry, list, delete or gc Agents. inspect reads the Core Run Registry and recent session transcript; steer always queues a Message V2 instruction to a busy Run. An Agent may bind to multiple registered roles; run selects the role for this Run without changing the Agent identity. run accepts a unique id or name; an unknown name auto-creates a default Agent. run (and retry) is background by default in TUI sessions (returns immediately, result is notified asynchronously and queryable via list); pass background:false to wait synchronously and return the Agent's last message (last(k) for more). In headless/print mode run always executes synchronously (background is meaningless there).",
@@ -789,7 +939,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `Steer queued for ${queued.agent.name}: ${queued.message.envelope.id} (pending=${queued.pending}, run=${queued.run.id})` }], details: { ok: true, queued: true, runId: queued.run.id, message: queued.message, pending: queued.pending } };
 			}
 			if (params.action === "gc") {
-				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
+				const removed = gcAgents(runtime.cwd, params.keepLatestK ?? 10, new Set(), { ownerSessionId: sessionId });
 				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: removed.length ? `GC removed ${removed.length} Agent(s): ${removed.join(", ")}` : "GC: no Agents to remove." }], details: { ok: true, removed } };
 			}
@@ -799,7 +949,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				try {
 					agent = createAgent(runtime.cwd, { name: params.name, role: params.role, roles: params.roles, model: params.model, thinking: params.thinking, forkFrom: params.forkFrom, scope: params.scope, ownerSessionId: sessionId, modelsConfig: runtime.modelsConfig });
 				} catch (error: any) {
-					executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+					recordOutcome(_id, { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500), costUsd: 0 });
 					throw error;
 				}
 				telemetry?.writeAgentLifecycle({ sessionId, agentId: agent.id, agent: agent.name, kind: "subagent", origin: agent.lineage.origin, status: "idle", action: "created", role: agent.role, forkPoint: agent.lineage.forkPoint });
@@ -845,50 +995,48 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const controller = new AbortController();
 				const forwardAbort = () => controller.abort();
 				persistentControllers.set(matches[0].name, controller);
+				if (signal?.aborted) controller.abort();
 				signal?.addEventListener("abort", forwardAbort, { once: true });
-				const background = params.background !== false && uiCtx?.hasUI !== false; // TUI 默认后台（结果异步通知）；headless 默认同步（会话立即结束，后台无意义）；background:false 显式同步 / background:true 显式后台
+				const background = params.background !== false && uiCtx?.mode === "tui"; // TUI 默认后台（结果异步通知）；headless 默认同步（会话立即结束，后台无意义）；background:false 显式同步 / background:true 显式后台
 				if (background) {
 					// 后台模式：不等待子代理完成，立即返回；结果在完成时 notify + footer 状态行
 					const name = matches[0].name;
-					void runAgentRecord(name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event), event => showSubagentHealth(name, event))
+					const pending = runAgentRecord(name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(name, event), event => showSubagentHealth(name, event))
 						.then(result => {
+							recordOutcome(_id, agentInvocationOutcome(result, controller.signal.aborted), context.taskId);
 							const ok = result.exitCode === 0 && !result.errorMessage;
 							notify(uiCtx, `[subagent ${name}] ${ok ? "completed" : result.exitCode === 130 ? "cancelled" : result.timedOut === true ? "timed out" : "failed"} · turns ${result.usage.turns} · $${result.usage.cost.toFixed(4)}`, "info", 1);
 						})
 						.catch((error: any) => {
+							recordOutcome(_id, { action: controller.signal.aborted ? "cancelled" : "failed", status: controller.signal.aborted ? "cancelled" : "failure", error: String(error?.message ?? error) }, context.taskId);
 							notify(uiCtx, `[subagent ${name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1);
 						})
 						.finally(() => {
 							signal?.removeEventListener("abort", forwardAbort);
 							persistentControllers.delete(name);
 							updateSubagentStatusLine();
-						});
+							maybeFinishMain();
+						}).catch(error => notify(uiCtx, `Parent task settlement failed: ${String(error)}`, "error"));
+					pendingBackground.add(pending);
+					void pending.then(() => pendingBackground.delete(pending));
 					updateSubagentStatusLine();
-					return { content: [{ type: "text", text: `后台已启动子代理 ${name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。运行中可用 /flux agent stop ${name} 停止；完成后会通知，可用 flux_agent list 查看最近结果。` }], details: { ok: true, background: true } };
+					return { content: [{ type: "text", text: `Background Agent ${name} started (task: ${task.length > 80 ? `${task.slice(0, 80)}...` : task}). Use /flux agent stop ${name} to stop it while it runs; completion is notified, and flux_agent list shows the latest result.` }], details: { ok: true, background: true } };
 				}
 				let result: AgentRunResult;
-				const headlessBgNote = params.background === true && !uiCtx?.hasUI ? "（headless 模式不支持后台，已同步执行）\n" : "";
+				const headlessBgNote = params.background === true && !uiCtx?.hasUI ? "(headless mode does not support background execution; running synchronously)\n" : "";
 				try {
 					result = await runAgentRecord(matches[0].name, task, context, controller.signal, undefined, runOverrides, () => updateSubagentStatusLine(), event => showSubagentProgress(matches[0].name, event), event => showSubagentHealth(matches[0].name, event));
 				} catch (error: any) {
-					executionOutcome = controller.signal.aborted
+					recordOutcome(_id, controller.signal.aborted
 						? { action: "cancelled", status: "cancelled", error: "Agent cancelled" }
-						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) }, context.taskId);
 					throw error;
 				} finally {
 					signal?.removeEventListener("abort", forwardAbort);
 					persistentControllers.delete(matches[0].name);
 					updateSubagentStatusLine();
 				}
-				if (result.exitCode !== 0 || result.errorMessage) {
-					executionOutcome = result.exitCode === 130 || controller.signal.aborted
-						? { action: "cancelled", status: "cancelled", error: result.errorMessage ?? "Agent cancelled", costUsd: result.usage.cost }
-						: result.timedOut === true
-							? { action: "failed", status: "timeout", error: result.errorMessage ?? "Agent timed out", costUsd: result.usage.cost }
-							: { action: "failed", status: "failure", error: result.errorMessage ?? `Agent exited ${result.exitCode}`, costUsd: result.usage.cost };
-				} else {
-					executionOutcome = { action: "completed", status: "success", costUsd: result.usage.cost };
-				}
+				recordOutcome(_id, agentInvocationOutcome(result, controller.signal.aborted), context.taskId);
 				updateSubagentStatusLine();
 				return { content: [{ type: "text", text: headlessBgNote + formatAgentRunResult(result, Math.max(1, params.last ?? 1)) }], details: { ok: result.exitCode === 0 && !result.errorMessage } };
 			}
@@ -896,7 +1044,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	registerControlTool({
 		name: "flux_workflow",
 		label: "Workflow",
 		description: "List, inspect, create, reuse or revise saved fixed-DAG Workflows. For action=run, pass only natural-language task requirements and optional name; AgentFlux plans the DAG. workflow is a saved selector string only for show/reuse/modify, never a DAG or object.",
@@ -911,8 +1059,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const action = params.action ?? "run";
 			if (action === "delete") {
 				if (!params.workflow) throw new Error("delete requires workflow");
-				const active = new Set(readActiveContext(runtime.cwd).entries.filter(entry => entry.context === "workflow").map(entry => entry.scope ?? entry.name));
-				const removed = deleteWorkflowDefinition(runtime.fluxDir, params.workflow, active);
+				const removed = deleteWorkflowDefinition(runtime.fluxDir, params.workflow);
 				return { content: [{ type: "text", text: `Deleted workflow ${removed.name} (v${removed.version})` }], details: { ok: true } };
 			}
 			if (action === "list") {
@@ -925,37 +1072,53 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!definition) throw new Error(`Workflow not found: ${params.workflow}`);
 				return { content: [{ type: "text", text: formatWorkflowDefinitions([definition], true) }], details: { definition } };
 			}
-			const plan = ensureImplicitPlan()
-				?? createTaskExecutionPlan({ task: params.task ?? "", selectedBy: "main_agent", budget: runtime.config.budget });
+			const explicitTask = params.task?.trim();
+			const preparedRecovery = currentPlan && ["reuse", "resume"].includes(currentPlan.operation);
+			if ((action === "modify" || (action === "run" && !preparedRecovery)) && !explicitTask) {
+				throw new Error(`Workflow ${action} requires task`);
+			}
+			if (params.task !== undefined && !explicitTask) throw new Error("Workflow task cannot be empty");
+			const preserveParent = !!(currentPlan || implicitPlan);
+			let plan = currentPlan ?? implicitPlan;
+			if (!plan) {
+				const fallback = implicitTask?.task ?? (params.workflow ? getWorkflowDefinition(runtime.fluxDir, params.workflow)?.description : undefined);
+				plan = startPlan(createTaskExecutionPlan({ task: explicitTask ?? fallback ?? "", taskId: implicitTask?.taskId, selectedBy: "main_agent", budget: runtime.config.budget }));
+				implicitPlan = plan;
+			}
 			if ((action === "reuse" || action === "modify") && !params.workflow && plan.operation !== "reuse") {
 				throw new Error(`Workflow ${action} requires workflow`);
 			}
 			if (workflowInvocations.has(plan.taskId)) {
 				throw new Error(`Workflow execution already started for task ${plan.taskId}`);
 			}
+			const invocationRunBaseline = new Set(listAgentRuns(runtime.fluxDir, { taskId: plan.taskId }).map(run => run.id));
 			workflowInvocations.add(plan.taskId);
 			try {
-				const result = await runWorkflow(plan, signal, { action, selector: params.workflow, name: params.name });
-				executionOutcome = result.status === "passed"
-					? { action: "completed", status: "success", costUsd: result.totalCost }
+				const result = await runWorkflow(plan, signal, { action, selector: params.workflow, name: params.name, task: explicitTask, preserveParent });
+				const invocationCost = result.attemptCostUsd ?? result.totalCost;
+				const coverage = invocationRunCosts(invocationRunBaseline, plan.taskId);
+				const costFlags = { costComplete: coverage.costComplete && Math.abs(coverage.costUsd - invocationCost) < 1e-9, attributionComplete: coverage.attributionComplete };
+				recordOutcome(_id, { ...costFlags, ...(result.status === "passed"
+					? { action: "completed", status: "success", costUsd: invocationCost }
 					: result.status === "cancelled"
-						? { action: "cancelled", status: "cancelled", error: "Workflow cancelled", costUsd: result.totalCost }
-						: { action: "failed", status: result.status === "timed_out" ? "timeout" : "failure", error: `Workflow ${result.status}`, costUsd: result.totalCost };
+						? { action: "cancelled", status: "cancelled", error: "Workflow cancelled", costUsd: invocationCost }
+						: { action: "failed", status: result.status === "timed_out" ? "timeout" : "failure", error: `Workflow ${result.status}`, costUsd: invocationCost }) }, plan.taskId);
 				const resource = getTask(runtime.fluxDir, plan.taskId)?.resource;
-				return { content: [{ type: "text", text: `${formatTaskExecutionPlan(plan)}${resource ? `\n  saved ${resource.type} ${resource.id}` : ""}\n\n${formatDAGResult(result)}` }], details: { ...result, resource } };
+				return { content: [{ type: "text", text: `${formatTaskExecutionPlan(plan)}${resource ? `\n  saved ${resource.type} ${resource.id}` : ""}\n\n${formatDAGResult(result)}` }], details: { ...result, taskResults: [...result.taskResults.entries()].map(([nodeId, value]) => ({ nodeId, ...value })), resource } };
 			} catch (error: any) {
 				workflowInvocations.delete(plan.taskId);
-				executionOutcome = signal?.aborted
+				const spent = invocationRunCosts(invocationRunBaseline, plan.taskId);
+				recordOutcome(_id, { ...spent, ...(signal?.aborted
 					? { action: "cancelled", status: "cancelled", error: "Workflow cancelled" }
 					: isWorkflowTimeoutError(error)
 						? { action: "failed", status: "timeout", error: String(error?.message ?? error).slice(0, 500) }
-						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+						: { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) }) }, plan.taskId);
 				throw error;
 			}
 		},
 	});
 
-	pi.registerTool({
+	registerControlTool({
 		name: "flux_issue", label: "Community Issue", description: "Create, discuss, claim, submit, review and resolve Community work.",
 		parameters: Type.Object({ action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("show"), Type.Literal("comment"), Type.Literal("propose"), Type.Literal("support"), Type.Literal("oppose"), Type.Literal("claim"), Type.Literal("submit"), Type.Literal("review"), Type.Literal("resolve"), Type.Literal("delete")]), issueId: Type.Optional(Type.String()), title: Type.Optional(Type.String()), body: Type.Optional(Type.String()), agent: Type.Optional(Type.String()), scope: Type.Optional(Type.String()), claimId: Type.Optional(Type.String()), verdict: Type.Optional(Type.Union([Type.Literal("pass"), Type.Literal("rework")])), proposalIds: Type.Optional(Type.Array(Type.String())), plan: Type.Optional(Type.String()), costUsd: Type.Optional(Type.Number()), acceptanceCriteria: Type.Optional(Type.Array(Type.String())) }),
 		async execute(_id, params) {
@@ -964,15 +1127,22 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (params.action === "list") { const issues = listIssues(runtime.cwd); return { content: [{ type: "text", text: issues.length ? issues.map(formatIssue).join("\n\n") : "No Community issues." }], details: { ok: true } }; }
 			if (params.action === "create") { const issue = createIssue(runtime.cwd, { title: params.title ?? "", description: params.body ?? "", acceptanceCriteria: params.acceptanceCriteria }); const taskId = ensureImplicitPlan()?.taskId; if (taskId) updateTaskMetadata(runtime.fluxDir, taskId, { resource: { type: "issue", id: issue.id } }); return { content: [{ type: "text", text: formatIssue(issue) }], details: { ok: true } }; }
 			if (!params.issueId) throw new Error(`${params.action} requires issueId`);
-			const issue = params.action === "show" ? getIssue(runtime.cwd, params.issueId)
-				: params.action === "comment" ? commentOnIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.body ?? "")
-					: params.action === "propose" ? proposeIssue(runtime.cwd, params.issueId, { title: params.title ?? "", body: params.body ?? "", createdBy: params.agent ?? "main" })
-						: params.action === "support" ? supportProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main")
-							: params.action === "oppose" ? opposeProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main")
-								: params.action === "claim" ? claimIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.scope ?? "", { proposalIds: params.proposalIds, plan: params.plan })
-									: params.action === "submit" ? submitClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.plan, params.costUsd)
-										: params.action === "review" ? reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict ?? "pass", params.agent ?? "main", params.body ?? "")
-											: resolveIssue(runtime.cwd, params.issueId, params.body);
+			let issue: ReturnType<typeof getIssue>;
+			switch (params.action) {
+				case "show": issue = getIssue(runtime.cwd, params.issueId); break;
+				case "comment": issue = commentOnIssue(runtime.cwd, params.issueId, params.agent ?? "main", params.body ?? ""); break;
+				case "propose": issue = proposeIssue(runtime.cwd, params.issueId, { title: params.title ?? "", body: params.body ?? "", createdBy: params.agent ?? "main" }); break;
+				case "support": issue = supportProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main"); break;
+				case "oppose": issue = opposeProposal(runtime.cwd, params.issueId, params.claimId ?? "", params.agent ?? "main"); break;
+				case "claim": issue = registerCommunityClaim(runtime.cwd, params.issueId, params.agent ?? "main", params.scope ?? "", { proposalIds: params.proposalIds, plan: params.plan, ownerSessionId: sessionId }); break;
+				case "submit": issue = submitClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.plan, params.costUsd); break;
+				case "review":
+					if (params.verdict !== "pass" && params.verdict !== "rework") throw new Error("review requires verdict pass or rework");
+					issue = reviewClaim(runtime.cwd, params.issueId, params.claimId ?? "", params.verdict, params.agent ?? "main", params.body ?? ""); break;
+				case "resolve": issue = resolveIssue(runtime.cwd, params.issueId, params.body); break;
+				case "delete": issue = deleteIssue(runtime.cwd, params.issueId); break;
+				default: throw new Error(`Unknown Issue action: ${params.action}`);
+			}
 			if (!issue) throw new Error(`Issue not found: ${params.issueId}`);
 			const taskId = ensureImplicitPlan()?.taskId;
 			if (taskId) updateTaskMetadata(runtime.fluxDir, taskId, { resource: { type: "issue", id: issue.id } });
@@ -981,13 +1151,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 			} catch (error: any) {
 				// A rejected Community operation is a business failure. Do not let a
 				// later assistant marker turn the parent Main task into success.
-				executionOutcome = { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500) };
+				recordOutcome(_id, { action: "failed", status: "failure", error: String(error?.message ?? error).slice(0, 500), costUsd: 0 });
 				throw error;
 			}
 		},
 	});
 
-	pi.registerTool({
+	registerControlTool({
 		name: "flux_message",
 		label: "Agent Message",
 		description: "Create/list Agent groups, send direct or group Message V2, inspect inboxes and acknowledge delivery.",
@@ -1047,7 +1217,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			const action = result.status === "passed" ? "completed" : result.status === "cancelled" ? "cancelled" : "failed";
 			const status = result.status === "passed" ? "success" : result.status === "timed_out" ? "timeout" : result.status === "cancelled" ? "cancelled" : "failure";
 			telemetry!.writeTaskExecution({ sessionId, taskId: plan.taskId, executionId: plan.executionId, runId: plan.executionId, action, selectedBy: plan.selectedBy, task: plan.task, operation: plan.operation, parentTaskId: plan.parentTaskId, parentExecutionId: plan.parentExecutionId, outcome: { status, success: action === "completed" } });
-			updateTaskStatus(runtime!.fluxDir, plan.taskId, action === "completed" ? "completed" : action === "cancelled" ? "cancelled" : status === "timeout" ? "timed_out" : "failed", { executionId: plan.executionId, costUsd: result.totalCost, outcome: { status } });
+			updateTaskStatus(runtime!.fluxDir, plan.taskId, action === "completed" ? "completed" : action === "cancelled" ? "cancelled" : status === "timeout" ? "timed_out" : "failed", { executionId: plan.executionId, costUsd: result.attemptCostUsd ?? result.totalCost, outcome: { status } });
 		};
 		if (!ctx.hasUI) {
 			try {
@@ -1073,6 +1243,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 			.finally(() => activeRuns.delete(plan.taskId));
 	}
 
+	async function dispatchMenuIntent(intent: import("./extension/tui-menu").TuiIntent, ctx: any): Promise<void> {
+		if (intent.kind === "main_message") { pi.sendUserMessage(intent.message, ctx.isIdle?.() === false ? { deliverAs: "followUp" } : undefined); return; }
+		if (!runtime) throw new Error("AgentFlux is not initialized");
+		const plan = startPlan(createTaskExecutionPlan({ task: intent.task, selectedBy: "user", budget: runtime.config.budget }));
+		await dispatchTuiWorkflow(plan, ctx, { action: "run" });
+	}
+
 	pi.registerCommand("flux", { description: "Open AgentFlux Workbench or run a command", getArgumentCompletions: getFluxArgumentCompletions, handler: async (input: string, ctx: any) => {
 		try {
 			if (!runtime || !telemetry) throw new Error("AgentFlux is not initialized");
@@ -1080,11 +1257,13 @@ export default function agentFlux(pi: ExtensionAPI) {
 				const menuCommand = await showFluxTuiMenu(ctx, tuiMenuData(ctx));
 				if (menuCommand === undefined) return notify(ctx, FLUX_HELP);
 				if (menuCommand === null) return;
+				if (typeof menuCommand === "object") return dispatchMenuIntent(menuCommand, ctx);
 				input = menuCommand;
 			}
 			if (input.trim() === "agent") {
 				const menuCommand = await showAgentTuiMenu(ctx, tuiMenuData(ctx));
 				if (menuCommand === null) return;
+				if (typeof menuCommand === "object") return dispatchMenuIntent(menuCommand, ctx);
 				input = menuCommand ?? "agent list";
 			}
 			if (input.trim() === "task") {
@@ -1095,6 +1274,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 			if (input.trim() === "workflow") {
 				const menuCommand = await showWorkflowTuiMenu(ctx, tuiMenuData(ctx));
 				if (menuCommand === null) return;
+				if (typeof menuCommand === "object") return dispatchMenuIntent(menuCommand, ctx);
 				input = menuCommand ?? "workflow list";
 			}
 			if (input.trim() === "issue") {
@@ -1129,6 +1309,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (action === "new") {
 					const task = [...(selector ? [selector] : []), ...taskParts].join(" ").trim();
 					if (!task) throw new Error("Usage: /flux task new <task>");
+					if (currentPlan || implicitPlan || activeRuns.size || persistentControllers.size) throw new Error("Cannot replace an active task; wait for it to settle");
 					const plan = startPlan(createTaskExecutionPlan({ task, selectedBy: "user", budget: runtime.config.budget }));
 					currentPlan = plan;
 					const previousTurn = turnIndex;
@@ -1149,7 +1330,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!["reuse", "resume", "continue", "retry"].includes(action) || !source) throw new Error("Usage: /flux task list|show [selector]|reuse|resume|continue|retry [selector] [task]");
 				if (action === "retry" && !["failed", "cancelled", "timed_out"].includes(source.status)) throw new Error(`Cannot retry a ${source.status} task`);
 				if (action === "resume" && !["failed", "cancelled", "timed_out", "running"].includes(source.status)) throw new Error(`Cannot resume a ${source.status} task; use continue or reuse`);
-				const task = taskParts.join(" ").trim() || source.task;
+				const task = resolvePreparedTaskText(action as "reuse" | "resume" | "continue" | "retry", source.task, taskParts.length ? taskParts.join(" ") : undefined);
+				if (currentPlan || implicitPlan || activeRuns.size || persistentControllers.size) throw new Error("Cannot replace an active task; wait for it to settle");
 				const plan = startPlan(createTaskExecutionPlan({ task, selectedBy: "user", budget: runtime.config.budget, operation: action as "reuse" | "resume" | "continue" | "retry", parentTaskId: source.id, parentExecutionId: source.executionId }));
 				currentPlan = plan;
 				notify(ctx, `${action} prepared.`);
@@ -1170,8 +1352,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!definition) throw new Error(`Workflow not found: ${selector}`);
 				if (action === "show") return notify(ctx, formatWorkflowDefinitions([definition], true), "info", 12);
 				if (action === "delete") {
-					const active = new Set(readActiveContext(runtime.cwd).entries.filter(entry => entry.context === "workflow").map(entry => entry.scope ?? entry.name));
-					const removed = deleteWorkflowDefinition(runtime.fluxDir, selector, active);
+					const removed = deleteWorkflowDefinition(runtime.fluxDir, selector);
 					return notify(ctx, `Deleted workflow ${removed.name} (v${removed.version})`);
 				}
 				if (!["reuse", "modify"].includes(action)) throw new Error("Invalid /flux workflow command");
@@ -1198,7 +1379,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				if (!action) {
 					const menuCommand = await showMessageTuiMenu(ctx, tuiMenuData(ctx));
 					if (!menuCommand) return;
-					return pi.sendUserMessage(`/flux ${menuCommand}`);
+					return pi.sendUserMessage(`/flux ${menuCommand}`, { expandPromptTemplates: true });
 				}
 				if (action === "send") {
 					const content = rest.join(" ").trim();
@@ -1234,7 +1415,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 				}
 				throw new Error("Usage: /flux message send|inbox|ack|group");
 			}
-			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()] })), "info", 12);
+			if (command.kind === "gc") return notify(ctx, formatLifecycleGcReport(runLifecycleGc(runtime.fluxDir, runtime.config.retention, { dryRun: command.dryRun, activeRunIds: [...activeRuns.keys()], ownerSessionId: sessionId })), "info", 12);
 			if (command.kind === "cancel") { const ids = command.taskId ? [command.taskId] : [...activeRuns.keys()]; for (const id of ids) activeRuns.get(id)?.abort(); return notify(ctx, ids.length ? `Cancellation requested: ${ids.join(", ")}` : "No active runs."); }
 			if (command.kind === "agent") {
 				const [action, subject, ...rest] = command.args;
@@ -1273,8 +1454,8 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const queued = enqueueAgentInstruction(agent.name, task, persistentContext(), "high");
 					if (queued) return notify(ctx, `Agent ${queued.agent.name} is busy; instruction queued via Message V2 (${queued.message.envelope.id}, pending=${queued.pending}, run=${queued.run.id}).`, "info");
 					if (persistentControllers.has(agent.name)) throw new Error(`Agent is already starting: ${agent.name}`);
-					const background = flags.sync !== "true" && ctx.hasUI; // TUI 默认后台；headless 同步（会话立即结束，后台无意义）；--sync 强制同步；--background 强制后台
-					if (flags.background === "true" && !ctx.hasUI) notify(ctx, "headless 模式不支持后台，已同步执行", "info", 1);
+					const background = flags.sync !== "true" && ctx.mode === "tui"; // TUI 默认后台；headless 同步（会话立即结束，后台无意义）；--sync 强制同步；--background 强制后台
+					if (flags.background === "true" && !ctx.hasUI) notify(ctx, "headless mode does not support background execution; running synchronously", "info", 1);
 					if (background) {
 						const controller = new AbortController();
 						persistentControllers.set(agent.name, controller);
@@ -1286,7 +1467,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 							.catch((error: any) => notify(ctx, `[subagent ${agent.name}] failed: ${String(error?.message ?? error).slice(0, 200)}`, "info", 1))
 							.finally(() => { persistentControllers.delete(agent.name); updateSubagentStatusLine(); });
 						updateSubagentStatusLine();
-						return notify(ctx, `后台已启动子代理 ${agent.name}（任务：${task.length > 80 ? `${task.slice(0, 80)}...` : task}）。/flux agent stop ${agent.name} 可停止，/flux agent list 查看最近结果。`, "info", 1);
+						return notify(ctx, `Background Agent ${agent.name} started (task: ${task.length > 80 ? `${task.slice(0, 80)}...` : task}). Use /flux agent stop ${agent.name} to stop it; use /flux agent list to view the latest result.`, "info", 1);
 					}
 					updateSubagentStatusLine();
 					const syncController = new AbortController();
@@ -1328,7 +1509,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					return notify(ctx, `Deleted ${agent.name}`);
 				}
 				if (action === "gc") {
-					const removed = gcAgents(runtime.cwd, Number(subject) || 10, new Set(listAgents(runtime.cwd).filter(agent => agent.status === "running").map(agent => agent.name)));
+					const removed = gcAgents(runtime.cwd, subject === undefined ? 10 : Number(subject), new Set(), { ownerSessionId: sessionId });
 					return notify(ctx, removed.length ? `GC removed ${removed.length} Agent(s): ${removed.join(", ")}` : "GC: no Agents to remove.", "info");
 				}
 				throw new Error("Usage: /flux agent list|create <name> [role]|run <name> <task>|retry <name> [task]|stop <name>|delete <name>|gc [k]");
@@ -1346,7 +1527,7 @@ export default function agentFlux(pi: ExtensionAPI) {
 					const args = rest.slice(2).join(" ");
 					const propsMatch = args.match(/--props\s+([^\s]+)/);
 					const plan = args.replace(/--props\s+[^\s]+/g, "").replace(/^--plan\s+/, "").trim();
-					return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest[1], { proposalIds: propsMatch ? propsMatch[1].split(",").map(item => item.trim()).filter(Boolean) : undefined, plan })), "info", 12);
+					return notify(ctx, formatIssue(registerCommunityClaim(runtime.cwd, id, rest[0], rest[1], { proposalIds: propsMatch ? propsMatch[1].split(",").map(item => item.trim()).filter(Boolean) : undefined, plan, ownerSessionId: sessionId })), "info", 12);
 				}
 				if (action === "resolve" && id) return notify(ctx, formatIssue(resolveIssue(runtime.cwd, id, rest.join(" "))), "info", 12);
 				if (action === "delete" && id) return notify(ctx, `Deleted issue ${deleteIssue(runtime.cwd, id).id}`);

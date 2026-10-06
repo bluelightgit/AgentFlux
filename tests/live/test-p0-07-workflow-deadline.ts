@@ -1,8 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
+import { hasAssistantFinalMarker } from "../helpers/pi-json-output";
 
 /**
  * P0-07/P0-01/P0-04 production-dist Workflow evidence:
@@ -24,7 +25,8 @@ const propagationRoot = join(fixtureRoot, "propagation");
 const parentTimeoutRoot = join(fixtureRoot, "parent-timeout");
 const deadlineRoot = join(fixtureRoot, "deadline");
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-workflow-deadline-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const uniqueReportPath = join(sourceRoot, ".agentflux", "test-results", `p0-07-workflow-deadline-${Date.now()}-${process.pid}.json`);
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
 type PiResult = { pid?: number; exitCode: number; stdout: string; stderr: string; timedOut: boolean };
@@ -76,7 +78,7 @@ function setupFixture(root: string, config: ReturnType<typeof loadLiveConfig>, b
 		},
 		pricing: { enable_remote_fetch: false },
 	};
-	if (options.qualityGate) fluxConfig.quality_gate = { model: config.judgeModel, timeout_ms: options.qualityGateTimeoutMs ?? 180_000 };
+	if (options.qualityGate) fluxConfig.quality_gate = { model: config.judgeModel, provider: config.providerId, thinking: config.thinking, timeout_ms: options.qualityGateTimeoutMs ?? 180_000 };
 	writeFileSync(join(root, ".agentflux", "agentflux.json"), JSON.stringify(fluxConfig, null, 2));
 	const models: any = config.fluxModelsJson();
 	for (const model of [config.mainModel, config.plannerModel, config.workerModel, config.judgeModel]) {
@@ -109,16 +111,18 @@ function launch(root: string, extensionEntry: string, tools: string, model: stri
 	});
 	let stdout = "";
 	let stderr = "";
+	writeFileSync(join(root, "main.stdout.jsonl"), "");
+	writeFileSync(join(root, "main.stderr.log"), "");
 	const result = new Promise<PiResult>(resolveResult => {
 		let settled = false;
 		const timer = setTimeout(() => {
 			if (settled) return;
 			settled = true;
-			killTree(child.pid);
+			if (child.exitCode === null && child.signalCode === null) killTree(child.pid);
 			resolveResult({ pid: child.pid, exitCode: 124, stdout, stderr, timedOut: true });
 		}, timeoutMs);
-		child.stdout?.on("data", value => { stdout += value.toString(); });
-		child.stderr?.on("data", value => { stderr += value.toString(); });
+		child.stdout?.on("data", value => { stdout += value.toString(); appendFileSync(join(root, "main.stdout.jsonl"), value); });
+		child.stderr?.on("data", value => { stderr += value.toString(); appendFileSync(join(root, "main.stderr.log"), value); });
 		child.on("error", error => {
 			if (settled) return;
 			settled = true;
@@ -177,7 +181,7 @@ async function main(): Promise<void> {
 		profile: config.profileName, configPath: config.configPath,
 		provider: config.providerId, model: config.mainModel, plannerModel: config.plannerModel,
 		thinking: config.thinking, builtExtension: process.env.AGENTFLUX_LIVE_BUILT === "1",
-		reportPath, workflow: {}, deadline: {}, passed: false,
+		reportPath, uniqueReportPath, fixtureRoot, pricingAuthoritative: false, workflow: {}, deadline: {}, passed: false,
 	};
 	let workflowPi: PiHandle | undefined;
 	let propagationPi: PiHandle | undefined;
@@ -185,7 +189,7 @@ async function main(): Promise<void> {
 	let deadlinePi: PiHandle | undefined;
 	try {
 		if (process.env.AGENTFLUX_LIVE_BUILT !== "1") throw new Error("built Workflow/deadline live test requires AGENTFLUX_LIVE_BUILT=1");
-		if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "subagent-entry.js"))) {
+		if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "subagent-entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "background-preload.mjs"))) {
 			throw new Error("production dist entries are missing; run npm run build first");
 		}
 		mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
@@ -206,7 +210,7 @@ async function main(): Promise<void> {
 			"Wait for the Workflow and quality gate result; output BUILT_WORKFLOW_MAIN_OK only after DAG Execution is PASSED.",
 		].join("\n");
 		const workflowSnapshots: any[] = [];
-		workflowPi = launch(workflowRoot, join(workflowRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, workflowPrompt, 600_000);
+		workflowPi = launch(workflowRoot, join(workflowRoot, "dist", "extension", "host-entry.ts"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, workflowPrompt, 600_000);
 		const workflowResult = await waitForPi(workflowRoot, workflowPi, workflowSnapshots, 600_000);
 		const workflowRuns = readRuns(workflowRoot);
 		const workflowStore = readJson(join(workflowRoot, ".agentflux", "runtime", "workflows.json")) ?? { definitions: [] };
@@ -228,7 +232,11 @@ async function main(): Promise<void> {
 		const nodeSpecContainsMarker = typeof nodeSpec?.description === "string" && nodeSpec.description.includes("BUILT_WORKFLOW_NODE_OK")
 			&& Array.isArray(nodeSpec.acceptanceCriteria) && nodeSpec.acceptanceCriteria.some((criterion: any) => typeof criterion === "string" && criterion.includes("BUILT_WORKFLOW_NODE_OK"));
 		const nodesWithCompletedRuns = nodes.filter((node: any) => nodeRuns.some(run => run.agent === `dag-${node.id}` && run.status === "completed" && (run.turns ?? 0) > 0));
-		const workflowMarker = workflowResult.stdout.includes("BUILT_WORKFLOW_MAIN_OK") || workflowResult.stderr.includes("BUILT_WORKFLOW_MAIN_OK");
+		const judgeRun = workflowRuns.find(run => run.id === qualityGate?.runId && run.role === "judge");
+		const judgeFactsConsistent = judgeRun?.status === "completed" && judgeRun.taskId === workflowTask?.id
+			&& judgeRun.executionId === executionId && judgeRun.input === qualityGate?.gateInputTokens
+			&& judgeRun.output === qualityGate?.gateOutputTokens && judgeRun.costUsd === qualityGate?.gateCost;
+		const workflowMarker = hasAssistantFinalMarker(workflowResult.stdout, workflowResult.stderr, "BUILT_WORKFLOW_MAIN_OK");
 		const workflowPassedMarker = workflowResult.stdout.includes("[DAG Execution: PASSED]") || workflowResult.stderr.includes("[DAG Execution: PASSED]");
 		const plannerCompleted = plannerRun?.status === "completed" && (plannerRun.turns ?? 0) > 0 && plannerRun.phase === "terminal";
 		const workflowFactsConsistent = workflowTask?.status === "completed" && execution?.status === "completed"
@@ -253,6 +261,7 @@ async function main(): Promise<void> {
 			checkpoint: checkpoint ? { executionId, status: checkpoint.status, completed: checkpoint.completed, failed: checkpoint.failed } : undefined,
 			qualityGate,
 			qualityGateCount: gateResults.length,
+			judgeRun, judgeFactsConsistent,
 			snapshotCount: workflowSnapshots.length,
 			snapshots: workflowSnapshots,
 			stdoutTail: workflowResult.stdout.slice(-6000),
@@ -267,7 +276,7 @@ async function main(): Promise<void> {
 			max_input_tokens_per_task: 100_000,
 			max_parallel_agents: 1,
 			max_wall_clock_seconds: 240,
-		}, { qualityGate: true });
+		}, { qualityGate: true, qualityGateTimeoutMs: 300_000 });
 		const propagationPrompt = [
 			"Use AgentFlux Workflow and do not perform the work directly in Main.",
 			"Create and execute a brand-new minimal Workflow. Override any generic planner guidance about creating 2-5 nodes: the generated DAG MUST contain exactly one node total, an implementer node, and no planner, reviewer, tester, or validation/waiting nodes. The quality gate is executed by AgentFlux after the node; do not model it as a DAG node.",
@@ -276,7 +285,7 @@ async function main(): Promise<void> {
 		].join("\n");
 		writeFileSync(join(propagationRoot, "README.md"), "# Parent deadline propagation fixture\\n");
 		const propagationSnapshots: any[] = [];
-		propagationPi = launch(propagationRoot, join(propagationRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, propagationPrompt, 600_000);
+		propagationPi = launch(propagationRoot, join(propagationRoot, "dist", "extension", "host-entry.ts"), "read,grep,find,ls,flux_task,flux_workflow", config.mainModel, config, propagationPrompt, 600_000);
 		const propagationResult = await waitForPi(propagationRoot, propagationPi, propagationSnapshots, 600_000);
 		const propagationRuns = readRuns(propagationRoot);
 		const propagationStore = readJson(join(propagationRoot, ".agentflux", "runtime", "tasks.json")) ?? { tasks: [], executions: [] };
@@ -313,7 +322,10 @@ async function main(): Promise<void> {
 			&& propagationPhaseRuns.every(run => Date.parse(String(run.deadlineAt ?? "")) === propagationParentDeadline)
 			&& propagationGatePassed
 			&& propagationGate.deadlineAt === propagationParentDeadline;
-		const propagationMarker = propagationResult.stdout.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK") || propagationResult.stderr.includes("PARENT_DEADLINE_PROPAGATION_MAIN_OK");
+		const propagationJudge = propagationPhaseRuns.find(run => run.id === propagationGate?.runId && run.role === "judge");
+		const propagationJudgeConsistent = propagationJudge?.status === "completed"
+			&& propagationJudge.input === propagationGate?.gateInputTokens && propagationJudge.costUsd === propagationGate?.gateCost;
+		const propagationMarker = hasAssistantFinalMarker(propagationResult.stdout, propagationResult.stderr, "PARENT_DEADLINE_PROPAGATION_MAIN_OK");
 		const propagationTerminal = propagationTask && propagationExecution
 			&& ["completed", "failed", "cancelled", "timed_out"].includes(propagationTask.status)
 			&& propagationExecution.status === propagationTask.status;
@@ -325,7 +337,7 @@ async function main(): Promise<void> {
 			parentDeadlineAt: propagationTask?.deadlineAt,
 			planner: propagationPlanner,
 			nodeRuns: propagationNodeRuns,
-			qualityGate: propagationGate,
+			qualityGate: propagationGate, judgeRun: propagationJudge, judgeFactsConsistent: propagationJudgeConsistent,
 			dag: propagationDag ? { description: propagationDag.description, nodes: propagationNodes } : undefined,
 			singleImplementerNode: propagationSingleNode,
 			nodeCompleted: propagationNodeCompleted,
@@ -359,7 +371,7 @@ async function main(): Promise<void> {
 			"Wait for the Workflow result. Output PARENT_DEADLINE_TIMEOUT_MAIN_OK only after the result is terminal and its status is TIMED_OUT; never claim success for an unfinished or failed result.",
 		].join("\n");
 		const parentTimeoutSnapshots: any[] = [];
-		parentTimeoutPi = launch(parentTimeoutRoot, join(parentTimeoutRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,bash,flux_task,flux_workflow", config.mainModel, config, parentTimeoutPrompt, 240_000);
+		parentTimeoutPi = launch(parentTimeoutRoot, join(parentTimeoutRoot, "dist", "extension", "host-entry.ts"), "read,grep,find,ls,bash,flux_task,flux_workflow", config.mainModel, config, parentTimeoutPrompt, 240_000);
 		const parentTimeoutResult = await waitForPi(parentTimeoutRoot, parentTimeoutPi, parentTimeoutSnapshots, 240_000);
 		const parentTimeoutRuns = readRuns(parentTimeoutRoot);
 		const parentTimeoutStore = readJson(join(parentTimeoutRoot, ".agentflux", "runtime", "tasks.json")) ?? { tasks: [], executions: [] };
@@ -374,7 +386,7 @@ async function main(): Promise<void> {
 		const parentTimeoutCheckpoint = parentTimeoutTask?.executionId
 			? safeRead(join(parentTimeoutRoot, ".agentflux", "runtime", "runs", parentTimeoutTask.executionId, "checkpoint.json"))
 			: undefined;
-		const parentTimeoutMarker = `${parentTimeoutResult.stdout}\n${parentTimeoutResult.stderr}`.includes("PARENT_DEADLINE_TIMEOUT_MAIN_OK");
+		const parentTimeoutMarker = hasAssistantFinalMarker(parentTimeoutResult.stdout, parentTimeoutResult.stderr, "PARENT_DEADLINE_TIMEOUT_MAIN_OK");
 		const parentTimeoutDagTimedOut = parentTimeoutCheckpoint?.status === "timed_out"
 			|| parentTimeoutTask?.executionId && safeRead(join(parentTimeoutRoot, ".agentflux", "runtime", "runs", parentTimeoutTask.executionId, "dag-state.json"))?.status === "timed_out";
 		const parentTimeoutFactsConsistent = parentTimeoutResult.exitCode === 0
@@ -418,11 +430,11 @@ async function main(): Promise<void> {
 			"该调用预期因显式 deadline 超时；返回后只输出 BUILT_DEADLINE_MAIN_OK，不要把子 Agent 失败说成成功。",
 		].join("\n");
 		const deadlineSnapshots: any[] = [];
-		deadlinePi = launch(deadlineRoot, join(deadlineRoot, "dist", "extension", "entry.js"), "read,grep,find,ls,bash,flux_task,flux_agent", config.mainModel, config, deadlinePrompt, 180_000);
+		deadlinePi = launch(deadlineRoot, join(deadlineRoot, "dist", "extension", "host-entry.ts"), "read,grep,find,ls,bash,flux_task,flux_agent", config.mainModel, config, deadlinePrompt, 180_000);
 		const deadlineResult = await waitForPi(deadlineRoot, deadlinePi, deadlineSnapshots, 180_000);
 		const deadlineRuns = readRuns(deadlineRoot);
 		const deadlineRun = latestRun(deadlineRuns, run => run.agent === "explicit-deadline-live");
-		const deadlineMarker = deadlineResult.stdout.includes("BUILT_DEADLINE_MAIN_OK") || deadlineResult.stderr.includes("BUILT_DEADLINE_MAIN_OK");
+		const deadlineMarker = hasAssistantFinalMarker(deadlineResult.stdout, deadlineResult.stderr, "BUILT_DEADLINE_MAIN_OK");
 		const deadlineActive = deadlineSnapshots.flat().find((run: any) => run.agent === "explicit-deadline-live" && ACTIVE.has(run.status) && run.deadlineAt);
 		const deadlineTimeoutEvent = Array.isArray(deadlineRun?.recentEvents)
 			&& deadlineRun.recentEvents.some((event: any) => event.type === "timeout" && String(event.summary ?? "").toLowerCase().includes("timeout"));
@@ -445,9 +457,9 @@ async function main(): Promise<void> {
 		evidence.builtEntryMtimeMs = statSync(join(sourceRoot, "dist", "extension", "entry.js")).mtimeMs;
 		evidence.wallClockMs = Date.now() - startedAt;
 		evidence.passed = workflowResult.exitCode === 0 && !workflowResult.timedOut
-			&& workflowMarker && workflowPassedMarker && plannerCompleted && qualityGate && workflowFactsConsistent
+			&& workflowMarker && workflowPassedMarker && plannerCompleted && qualityGate && workflowFactsConsistent && judgeFactsConsistent
 			&& propagationResult.exitCode === 0 && !propagationResult.timedOut
-			&& propagationMarker && evidence.parentDeadlinePropagation.factsConsistent
+			&& propagationMarker && evidence.parentDeadlinePropagation.factsConsistent && propagationJudgeConsistent
 			&& evidence.parentDeadlineTimeout.factsConsistent
 			&& deadlineResult.exitCode === 0 && !deadlineResult.timedOut && deadlineMarker && deadlineFactsConsistent;
 		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
@@ -459,12 +471,14 @@ async function main(): Promise<void> {
 		try { writeFileSync(reportPath, JSON.stringify(evidence, null, 2)); } catch {}
 		throw error;
 	} finally {
-		if (workflowPi) killTree(workflowPi.child.pid);
-		if (propagationPi) killTree(propagationPi.child.pid);
-		if (parentTimeoutPi) killTree(parentTimeoutPi.child.pid);
-		if (deadlinePi) killTree(deadlinePi.child.pid);
-		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
-		catch (error) { console.warn(`Workflow/deadline fixture cleanup deferred: ${String(error)}`); }
+		const owned = [workflowPi, propagationPi, parentTimeoutPi, deadlinePi].filter((p): p is PiHandle => !!p);
+		for (const handle of owned) if (handle.child.exitCode === null && handle.child.signalCode === null) killTree(handle.child.pid);
+		const until = Date.now() + 10_000;
+		while (owned.some(h => h.child.exitCode === null && h.child.signalCode === null) && Date.now() < until) await sleep(50);
+		evidence.cleanup = { workspaceRetained: true, processes: owned.map(h => ({ pid: h.child.pid, exitCode: h.child.exitCode, signal: h.child.signalCode, exited: h.child.exitCode !== null || h.child.signalCode !== null })) };
+		if (evidence.cleanup.processes.some((p: any) => !p.exited)) { evidence.passed = false; process.exitCode = 1; }
+		writeFileSync(uniqueReportPath, JSON.stringify(evidence, null, 2));
+		writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
 		config.cleanup();
 	}
 }

@@ -16,19 +16,19 @@ export type FluxCommand =
 export interface FluxCompletionItem { value: string; label: string; description: string; }
 
 const TOP_LEVEL_COMPLETIONS: FluxCompletionItem[] = [
-		{ value: "task", label: "task", description: "查看、复用、恢复或继续历史任务" },
-	{ value: "workflow", label: "workflow", description: "查看、复用或修改固定 DAG 定义" },
-	{ value: "agent", label: "agent", description: "管理 Agents" },
-	{ value: "fork", label: "fork", description: "从当前会话上下文创建分支" },
-	{ value: "issue", label: "issue", description: "管理 Community Issues 与 Claims" },
-	{ value: "message", label: "message", description: "向运行中的 Agent 发送 Message V2" },
-	{ value: "status", label: "status", description: "查看任务、Agent 与 Issue 状态" },
-	{ value: "space", label: "space", description: "查看 workflow/community 空间与执行时间线" },
-	{ value: "usage", label: "usage", description: "查看 Main 会话逐轮 token/缓存命中/成本" },
-	{ value: "cancel", label: "cancel", description: "取消运行中的任务" },
-	{ value: "gc", label: "gc", description: "回收终态 Agent、消息和孤儿 session" },
-	{ value: "compact", label: "compact", description: "查看上下文压缩建议" },
-	{ value: "help", label: "help", description: "显示完整命令帮助" },
+		{ value: "task", label: "task", description: "List, reuse, resume, or continue prior tasks" },
+	{ value: "workflow", label: "workflow", description: "View, reuse, or modify saved fixed DAG definitions" },
+	{ value: "agent", label: "agent", description: "Manage Agents" },
+	{ value: "fork", label: "fork", description: "Create a branch from the current session context" },
+	{ value: "issue", label: "issue", description: "Manage Community Issues and Claims" },
+	{ value: "message", label: "message", description: "Send Message V2 messages to running Agents" },
+	{ value: "status", label: "status", description: "View task, Agent, and Issue status" },
+	{ value: "space", label: "space", description: "View workflow/community space and execution timeline" },
+	{ value: "usage", label: "usage", description: "View per-turn Main token usage, cache hits, and cost" },
+	{ value: "cancel", label: "cancel", description: "Cancel active tasks" },
+	{ value: "gc", label: "gc", description: "Collect terminal Agents, messages, and orphaned sessions" },
+	{ value: "compact", label: "compact", description: "View context compaction advice" },
+	{ value: "help", label: "help", description: "Show full command help" },
 ];
 
 function completions(prefix: string, options: Array<[string, string]>): FluxCompletionItem[] {
@@ -50,37 +50,37 @@ export function getFluxArgumentCompletions(argumentPrefix: string): FluxCompleti
 		return found.length ? found : null;
 	}
 	if (prefix.startsWith("task ")) return completions(prefix, [
-		["task list", "列出当前会话任务"], ["task show", "查看一个任务"],
-		["task reuse", "复用最近任务的工作方式"], ["task resume", "恢复未完成任务"],
-		["task continue", "基于最近结果继续"],
+		["task list", "List tasks in the current session"], ["task show", "Inspect a task"],
+		["task reuse", "Reuse a prior task's execution approach"], ["task resume", "Resume an unfinished task"],
+		["task continue", "Continue from a prior result"],
 	]);
 	if (prefix.startsWith("workflow ")) return completions(prefix, [
-		["workflow list", "列出已保存 Workflow"], ["workflow show", "查看 Workflow DAG"],
-		["workflow reuse", "按原版本创建新执行"], ["workflow modify", "生成新版本并执行"],
-		["workflow delete", "删除已保存 Workflow 定义"],
+		["workflow list", "List saved Workflows"], ["workflow show", "View a Workflow DAG"],
+		["workflow reuse", "Create a run from the saved version"], ["workflow modify", "Create and run a new version"],
+		["workflow delete", "Delete a saved Workflow definition"],
 	]);
 	if (prefix.startsWith("agent ")) return completions(prefix, [
-		["agent list", "列出 Agents"], ["agent inspect", "查看实时 Run、健康和最近 transcript"], ["agent create", "创建 Agent（默认/角色模板/分叉）"],
-		["agent run", "与 Agent 对话（可选择本次角色）"], ["agent steer", "通过 Message V2 向运行中的 Agent 排队指令"], ["agent stop", "停止运行"], ["agent retry", "重跑上次任务"],
-		["agent delete", "删除 Agent"], ["agent gc", "自动 GC（保留最新 k 个）"],
+		["agent list", "List Agents"], ["agent inspect", "View the live Run, health, and recent transcript"], ["agent create", "Create an Agent (default, role template, or fork)"],
+		["agent run", "Talk to an Agent and optionally choose its role"], ["agent steer", "Queue an instruction for a running Agent via Message V2"], ["agent stop", "Stop a running Agent"], ["agent retry", "Re-run the last task"],
+		["agent delete", "Delete an Agent"], ["agent gc", "Run GC and keep the latest k Agents"],
 	]);
 	if (prefix.startsWith("issue ")) return completions(prefix, [
-		["issue list", "列出 Issues"], ["issue create", "创建 Issue"], ["issue show", "查看 Issue"],
-		["issue comment", "发表评论"], ["issue propose", "提出提案"], ["issue support", "支持提案"], ["issue oppose", "反对提案"],
-		["issue claim", "认领工作范围（可绑定提案与方案）"], ["issue submit", "提交 Claim"],
-		["issue review", "评审已提交的 Claim（pass/rework）"], ["issue resolve", "关闭已完成 Issue"],
-		["issue delete", "删除已结束 Issue"],
+		["issue list", "List Issues"], ["issue create", "Create an Issue"], ["issue show", "View an Issue"],
+		["issue comment", "Add a comment"], ["issue propose", "Propose a plan"], ["issue support", "Support a proposal"], ["issue oppose", "Oppose a proposal"],
+		["issue claim", "Claim work (optionally binding proposals and a plan)"], ["issue submit", "Submit a Claim"],
+		["issue review", "Review a submitted Claim (pass/rework)"], ["issue resolve", "Close a completed Issue"],
+		["issue delete", "Delete a completed Issue"],
 	]);
-	if (prefix.startsWith("fork ")) return completions(prefix, [["fork last", "从最近一条用户消息创建分支"]]);
+	if (prefix.startsWith("fork ")) return completions(prefix, [["fork last", "Create a branch from the latest user message"]]);
 	if (prefix.startsWith("message ")) return completions(prefix, [
-		["message send", "向一个运行中的 Agent 发送消息"],
-		["message inbox", "接收 Main Agent 收件箱"],
-		["message ack", "确认一条已接收消息"],
-		["message group list", "列出消息群组"],
-		["message group create", "创建消息群组"],
-		["message group send", "向群组所有其他成员发送消息"],
+		["message send", "Send a message to a running Agent"],
+		["message inbox", "Read the Main Agent inbox"],
+		["message ack", "Acknowledge a received message"],
+		["message group list", "List message groups"],
+		["message group create", "Create a message group"],
+		["message group send", "Send a message to the other group members"],
 	]);
-	if (prefix.startsWith("gc ")) return completions(prefix, [["gc dry-run", "仅预览，不修改数据"]]);
+	if (prefix.startsWith("gc ")) return completions(prefix, [["gc dry-run", "Preview changes without modifying data"]]);
 	return null;
 }
 

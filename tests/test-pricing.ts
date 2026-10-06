@@ -12,6 +12,8 @@ import {
 	type PricingTable,
 	type PriceEntry,
 	loadPricing,
+	resolveUsageCost,
+	resolveUsageCostDetailed,
 } from "../src/core/pricing";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,6 +198,11 @@ check("returns 0 for empty usage array", () => {
 	assert.strictEqual(cost, 0);
 });
 
+check("cumulative resolution preserves native request totals before remote quotes", () => {
+	const cost = calcCostCumulative([{ input: 100, cost: { total: 0.7 } }], sampleTable, "openai/gpt-4");
+	assert.strictEqual(cost, 0.7);
+});
+
 check("uses unknown price for unknown model (returns 0)", () => {
 	const cost = calcCostCumulative([{ input: 100 }], sampleTable, "unknown/model");
 	assert.strictEqual(cost, 0);
@@ -205,6 +212,9 @@ const localPricingRoot = mkdtempSync(join(tmpdir(), "agentflux-pricing-"));
 try {
 	writeFileSync(join(localPricingRoot, "models.json"), JSON.stringify({
 		models: {
+			"metadata-only": { provider: "provider", contextWindow: 272000 },
+			"modalities-not-price": { input: ["text"], provider: "provider" },
+			"explicit-free": { pricing: { input: 0, output: 0 } },
 			"configured-worker-model": {
 				provider: "configured-provider",
 				pricing: { input: 9e-8, output: 1.8e-7, cacheRead: 2e-8, cacheWrite: 1e-7 },
@@ -212,6 +222,24 @@ try {
 		},
 	}));
 	const localTable = await loadPricing(localPricingRoot, { ...DEFAULT_PRICING_CONFIG, enable_remote_fetch: false }, "configured-worker-model");
+	check("metadata and modalities do not become explicit user zero prices", () => {
+		assert.equal(localTable.entries["metadata-only"], undefined);
+		assert.equal(localTable.entries["modalities-not-price"], undefined);
+		assert.equal(resolveUsageCost({ input: 1157, output: 37, cost: { total: 0.0002758 } }, "metadata-only", localTable), 0.0002758);
+	});
+	check("known quotes, native usage, and fallback retain explicit precedence", () => {
+		assert.equal(resolveUsageCost({ input: 10, cost: { total: 0.7 } }, "explicit-free", localTable), 0);
+		assert.equal(resolveUsageCost({ input: 10, cost: { total: 0 } }, "configured-worker-model", localTable), 9e-7);
+		assert.equal(resolveUsageCost({ cost: { total: 0 } }, "metadata-only", localTable), 0);
+		assert.equal(resolveUsageCost({ input: 10 }, "metadata-only", localTable), calcCost({ input: 10 }, lookupPrice(localTable, "metadata-only")));
+		assert.equal(resolveUsageCost({ cost: { total: NaN } }), 0);
+		const remote: PricingTable = { ...localTable, entries: { remote: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, source: "remote" } } };
+		assert.equal(resolveUsageCost({ input: 10, cost: { total: 0.7 } }, "remote", remote), 0.7);
+		assert.equal(resolveUsageCost({ input: 10 }, "remote", remote), 0.1);
+		assert.deepEqual(resolveUsageCostDetailed({ input: 10, cost: { total: 0.7 } }, "remote", remote), { cost: 0.7, source: "native", known: true });
+		assert.deepEqual(resolveUsageCostDetailed({ input: 10 }, "remote", remote), { cost: 0.1, source: "remote", known: true });
+		assert.deepEqual(resolveUsageCostDetailed({ input: 10 }), { cost: 0, source: "unknown", known: false });
+	});
 	check("loads pricing from the canonical nested models.json shape", () => {
 		const price = lookupPrice(localTable, "configured-worker-model");
 		assert.strictEqual(price.source, "user");

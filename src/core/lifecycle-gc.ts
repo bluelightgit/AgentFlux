@@ -11,12 +11,15 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { collectAgentReferences } from "./agent-references";
 import type { RetentionConfig } from "./types";
 import { SharedBoard, type AgentMessage } from "./shared-board";
 import { MessageBus, type MessageDeliveryV2, type MessageEnvelopeV2 } from "./message-bus";
 import { assertSafeOpaqueId, assertSafePathSegment } from "./safe-path";
 import { listAgentRuns, reconcileStaleAgentRuns } from "./run-registry";
-import { updateJsonStore, writeJsonFileAtomic } from "./json-store";
+import { readJsonStore, updateJsonStore, writeJsonFileAtomic } from "./json-store";
+import { withAgentReferenceFence } from "./agent-reference-fence";
 
 type JsonRecord = Record<string, any>;
 
@@ -24,6 +27,8 @@ export interface LifecycleGcOptions {
 	dryRun?: boolean;
 	now?: Date;
 	activeRunIds?: string[];
+	/** 普通维护同样不能回收其他 Main session 的 Agent。 */
+	ownerSessionId?: string;
 }
 
 export interface LifecycleGcReport {
@@ -99,19 +104,24 @@ function selectExpiredOrExcess<T>(
 		.map(entry => entry.item);
 }
 
+function agentCandidateKey(item: JsonRecord): string {
+	return typeof item.id === "string" ? item.id : JSON.stringify([item.name, item.scope, item.ownerSessionId, item.createdAt]);
+}
+
 function pruneRegistryFile(
 	path: string,
 	key: "instances" | "agents",
-	candidateNames: Set<string>,
+	candidateIds: Set<string>,
 	terminalStatuses: Set<string>,
 	dryRun: boolean,
 	warnings: string[],
+	mayRemove: (item: JsonRecord) => boolean = () => true,
 ): { removed: JsonRecord[]; remaining: JsonRecord[] } {
 	const root = readJson(path, { [key]: [] }, warnings);
 	const items = Array.isArray(root) ? root : Array.isArray(root?.[key]) ? root[key] : [];
-	const removed = items.filter((item: JsonRecord) => candidateNames.has(item.name) && terminalStatuses.has(item.status));
-	const removedNames = new Set(removed.map((item: JsonRecord) => item.name));
-	const remaining = items.filter((item: JsonRecord) => !removedNames.has(item.name));
+	const removed = items.filter((item: JsonRecord) => candidateIds.has(agentCandidateKey(item)) && terminalStatuses.has(item.status) && mayRemove(item));
+	const removedRecords = new Set(removed);
+	const remaining = items.filter((item: JsonRecord) => !removedRecords.has(item));
 	if (dryRun || removed.length === 0) return { removed, remaining };
 	try {
 		return updateJsonStore<JsonRecord | JsonRecord[], { removed: JsonRecord[]; remaining: JsonRecord[] }>(
@@ -122,9 +132,9 @@ function pruneRegistryFile(
 			currentRoot => {
 				const current = Array.isArray(currentRoot) ? currentRoot : currentRoot[key];
 				const currentRemoved = current.filter((item: JsonRecord) =>
-					candidateNames.has(item.name) && terminalStatuses.has(item.status));
-				const currentRemovedNames = new Set(currentRemoved.map((item: JsonRecord) => item.name));
-				const currentRemaining = current.filter((item: JsonRecord) => !currentRemovedNames.has(item.name));
+					candidateIds.has(agentCandidateKey(item)) && terminalStatuses.has(item.status) && mayRemove(item));
+				const currentRemovedRecords = new Set(currentRemoved);
+				const currentRemaining = current.filter((item: JsonRecord) => !currentRemovedRecords.has(item));
 				if (Array.isArray(currentRoot)) currentRoot.splice(0, currentRoot.length, ...currentRemaining);
 				else currentRoot[key] = currentRemaining;
 				return { removed: currentRemoved, remaining: currentRemaining };
@@ -246,6 +256,10 @@ export function runLifecycleGc(
 	policy: RetentionConfig,
 	options: LifecycleGcOptions = {},
 ): LifecycleGcReport {
+	return withAgentReferenceFence(() => runLifecycleGcInternal(fluxDir, policy, options));
+}
+
+function runLifecycleGcInternal(fluxDir: string, policy: RetentionConfig, options: LifecycleGcOptions): LifecycleGcReport {
 	const now = options.now ?? new Date();
 	const nowMs = now.getTime();
 	const dryRun = options.dryRun === true;
@@ -287,13 +301,23 @@ export function runLifecycleGc(
 
 	const runtimeDir = join(fluxDir, "runtime");
 	const persistentRegistryPath = join(runtimeDir, "agents.json");
-	const persistentRoot = readJson(persistentRegistryPath, { agents: [] }, warnings);
-	const persistentAgents: JsonRecord[] = Array.isArray(persistentRoot)
-		? persistentRoot
-		: Array.isArray(persistentRoot?.agents) ? persistentRoot.agents : [];
+	const readAgents = (path: string): JsonRecord[] => {
+		const value = readJsonStore<any>(path, () => ({ agents: [] }), (data): data is any =>
+			Array.isArray(data) || (!!data && typeof data === "object" && Array.isArray((data as any).agents)));
+		return Array.isArray(value) ? value : value.agents;
+	};
+	let persistentAgents: JsonRecord[], globalAgents: JsonRecord[], references: Set<string>;
+	try {
+		persistentAgents = readAgents(persistentRegistryPath);
+		globalAgents = readAgents(join(homedir(), ".agentflux", "agents.json"));
+		references = collectAgentReferences(dirname(fluxDir));
+	} catch (error) {
+		report.blockedReason = `Agent/session references unavailable: ${String(error)}`;
+		return report;
+	}
 
 	const persistentCandidates = selectExpiredOrExcess(
-		persistentAgents, item => PERSISTENT_TERMINAL.has(item.status), item => item.updatedAt ?? item.createdAt,
+		persistentAgents, item => PERSISTENT_TERMINAL.has(item.status) && !references.has(item.id) && !references.has(item.name), item => item.updatedAt ?? item.createdAt,
 		policy.terminal_agent_ttl_hours, policy.max_terminal_agents, nowMs,
 	);
 
@@ -330,7 +354,13 @@ export function runLifecycleGc(
 		.reduce((total, group) => total + board.getGroupMessages(group.id).length, 0);
 
 	const persistentResult = pruneRegistryFile(
-		persistentRegistryPath, "agents", new Set(persistentCandidates.map(item => item.name)), PERSISTENT_TERMINAL, dryRun, warnings,
+		persistentRegistryPath, "agents", new Set(persistentCandidates.map(agentCandidateKey)), PERSISTENT_TERMINAL, dryRun, warnings,
+		item => {
+			if (item.scope === "global") return false;
+			if (item.scope === "session" && (!options.ownerSessionId || item.ownerSessionId !== options.ownerSessionId)) return false;
+			const currentRefs = collectAgentReferences(dirname(fluxDir));
+			return !currentRefs.has(item.id) && !currentRefs.has(item.name);
+		},
 	);
 	const removedTerminalShared = dryRun
 		? sharedCandidates
@@ -379,8 +409,16 @@ export function runLifecycleGc(
 	const currentSharedNames = new Set(board.listAgents()
 		.filter(agent => !removedSharedNames.has(agent.name))
 		.map(agent => agent.name));
+	const protectedSessionKeys = new Set([...persistentResult.remaining, ...globalAgents].flatMap(item =>
+		[item.sessionId, item.lastSessionId].filter((key): key is string => typeof key === "string" && key.length > 0)));
+	const protectsSessionKey = (file: string): boolean => [...protectedSessionKeys].some(key => {
+		const safe = key.replace(/[^a-zA-Z0-9._-]/g, "-");
+		// 精确键 + capability 边界，不用展示名猜归属；兼容旧 runner 的整体截断。
+		return file.includes(`_${safe}-cap-`) || file.endsWith(`_${safe.slice(0, 120)}.jsonl`);
+	});
 	const protectedNames = new Set([
 		...persistentResult.remaining.map(item => item.name),
+		...globalAgents.map(item => item.name),
 		...currentSharedNames,
 		...Object.entries(board.getBlackboard().agentStatuses)
 			.filter(([name, status]) => !removedBlackboardNames.includes(name) && !BLACKBOARD_TERMINAL.has(status.status))
@@ -393,7 +431,8 @@ export function runLifecycleGc(
 		for (const entry of readdirSync(sessionsDir, { withFileTypes: true })) {
 			if (!entry.isFile()) continue;
 			const file = entry.name;
-			const protectedSession = [...protectedNames].some(name => includesAgentSession(file, name));
+			const protectedSession = protectsSessionKey(file)
+				|| [...protectedNames].some(name => includesAgentSession(file, name));
 			if (protectedSession) {
 				report.preserved.protectedSessions++;
 				continue;

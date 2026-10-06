@@ -38,6 +38,10 @@ check("provider wait and tool wait are phase-aware", () => {
 	assert.equal(assessRunHealth({ phase: "running", nowMs: now, lastProgressAt: iso(now - 31_000), waitingForProvider: true }, DEFAULT_RUN_HEALTH_CONFIG).health, "waiting_provider");
 	assert.equal(assessRunHealth({ phase: "tool", nowMs: now, lastProgressAt: iso(now - 1_000) }, DEFAULT_RUN_HEALTH_CONFIG).health, "waiting_tool");
 });
+check("native user prompt wait is not provider stall", () => {
+	assert.equal(assessRunHealth({ phase: "waiting_user", nowMs: now, lastProgressAt: iso(now - 3_600_000), waitingForProvider: true }).health, "waiting_user");
+	assert.equal(assessRunHealth({ phase: "running", nowMs: now, lastProgressAt: iso(now) }).health, "healthy");
+});
 check("loop and context pressure retain evidence", () => {
 	const loop = assessRunHealth({ phase: "running", nowMs: now, repeatActionSignature: "read:a", repeatActionCount: 3 }, DEFAULT_RUN_HEALTH_CONFIG);
 	assert.equal(loop.health, "suspected_loop");

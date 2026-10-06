@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Built-extension Task lineage validation. It performs real continue and retry
@@ -11,7 +11,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-task-lineage-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-task-lineage-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 
 function git(args: string[]): string {
 	try { return execFileSync("git", args, { cwd: sourceRoot, encoding: "utf8", windowsHide: true }).trimEnd(); }
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
 		const extensionDir = join(fixtureRoot, "dist", "extension");
 		mkdirSync(extensionDir, { recursive: true });
 		cpSync(join(sourceRoot, "dist", "extension"), extensionDir, { recursive: true });
-		const extensionEntry = join(extensionDir, "entry.js");
+		const extensionEntry = join(extensionDir, "host-entry.ts");
 
 		firstContinue = runPi(config, extensionEntry, "continue-live", "只回答精确文本 CONTINUE_SEED_OK，不要调用任何工具。", "flux_task");
 		secondContinue = runPi(config, extensionEntry, "continue-live", "必须先实际调用 AgentFlux flux_task，参数 action=continue；工具成功后只输出 CONTINUE_OK，不要调用其他工具。", "flux_task");

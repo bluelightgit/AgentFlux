@@ -43,7 +43,15 @@ try {
 	assert.equal(config.cliArgs(config.mainModel).at(-1), "max");
 	config.cleanup();
 	console.log("✓ live test profile resolves provider, role models and thinking from config/environment");
-	console.log("Live config: 1/1 passed");
+	for (const key of keys.filter(key => key.startsWith("AGENTFLUX_LIVE_") && key !== "AGENTFLUX_LIVE_PROFILE")) delete process.env[key];
+	const local = loadLiveConfig("multirole");
+	assert.equal(local.providerId, "openai-codex");
+	for (const model of [local.mainModel, local.plannerModel, local.workerModel, local.judgeModel]) assert.equal(model, "gpt-5.6-luna");
+	assert.equal(local.thinking, "max");
+	assert.equal((local.fluxModelsJson() as any).roles.assistant.thinking, "max");
+	local.cleanup();
+	console.log("✓ explicit local Luna/max profile is not replaced by Main PI_MODEL/PI_THINKING");
+	console.log("Live config: 2/2 passed");
 } finally {
 	for (const key of keys) {
 		const value = previous.get(key);

@@ -9,15 +9,18 @@ import { checkQualityGate, type QualityGateResult } from "./quality-gate";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { PricingTable } from "../core/pricing";
 import { assignModel, rankModels, type ModelEntry, type RoleRequirement } from "../core/model-capability";
+import { resolveChatModel } from "../core/model-catalog";
 import { loadAllRoles, type RoleDefinition } from "../agents/templates";
 import { SharedBoard } from "../core/shared-board";
 import { assertSafeOpaqueId, resolvePathInsideExistingRoot } from "../core/safe-path";
 import { join } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
 import type { RunHealthConfig } from "../core/run-health";
 import { isWorkflowDeadlineExceededError, WorkflowDeadlineExceededError } from "./workflow-errors";
+import { withJsonStoreLock, withJsonStoreLockAsync, writeJsonFileAtomic } from "../core/json-store";
+import { artifactHash, dagFingerprint, validateDAGCheckpoint } from "./dag-checkpoint";
 
 /**
  * 诊断日志 sink。默认 console.error；UI 模式下由宿主置空（setDagLogSink(null)），
@@ -48,6 +51,13 @@ export interface TaskDAG {
 	nodes: TaskNode[];
 	description: string;        // 整体任务描述
 	planningCostUsd?: number;    // planner 调用也属于任务总成本
+	/** 仅执行快照携带的本次输入；保存定义不写入此字段，恢复必须保留。 */
+	invocationTask?: string;
+}
+
+export function bindWorkflowInvocation(dag: TaskDAG, task: string): TaskDAG {
+	if (typeof task !== "string" || !task.trim()) throw new Error("Workflow invocation task must be non-empty");
+	return { ...structuredClone(dag), invocationTask: task.trim() };
 }
 
 /** 为 DAG 级熔断选择可用模型；首选健康时保持原选择。 */
@@ -87,6 +97,8 @@ export interface DAGExecutionResult {
 	allPassed: boolean;
 	status: "passed" | "failed" | "cancelled" | "budget_exceeded" | "timed_out";
 	totalCost: number;
+	inheritedCostUsd?: number;
+	attemptCostUsd?: number;
 	wallClockMs: number;
 	completedNodes: string[];
 	failedNodes: string[];
@@ -112,20 +124,22 @@ export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: st
 	const role = loadAllRoles(cwd, modelsConfig).get(roleName);
 	if (!role) throw new Error(`DAG role not found: ${roleName}`);
 	const models = modelsConfig?.models ?? {};
-	// 显式角色模型优先，即使它只存在于 pi provider 配置而尚未出现在 AgentFlux 模型表中。
+	// 原生目录已投影到 Core；显式角色模型优先，但不绕过身份/可执行性验证。
 	if (role.model) {
+		const selected = resolveChatModel(role.model, models, role.provider, { physical: true });
 		return {
-			model: role.model,
-			provider: role.provider ?? models[role.model]?.provider,
+			model: selected.model,
+			provider: selected.provider,
 			thinking: role.thinking,
 			source: "model",
 		};
 	}
 	// 没有角色级模型时，继承当前 Main Agent；能力亲和度不应静默替换 Main 的选择。
 	if (defaults?.model) {
+		const selected = resolveChatModel(defaults.model, models, defaults.provider, { physical: true });
 		return {
-			model: defaults.model,
-			provider: defaults.provider ?? models[defaults.model]?.provider,
+			model: selected.model,
+			provider: selected.provider,
 			thinking: role.thinking,
 			source: "main",
 		};
@@ -134,9 +148,10 @@ export function resolveDAGRoleModel(cwd: string, modelsConfig: any, roleName: st
 		?? ROLE_FALLBACK_REQUIREMENTS[roleName]
 		?? { coding: 0.5, reasoning: 0.5, cost_eff: 0.5 };
 	const assigned = assignModel(roleName, { model: role.model, requirement }, models);
+	const selected = resolveChatModel(assigned.model, models, role.provider, { physical: true });
 	return {
-		model: assigned.model,
-		provider: role.provider ?? models[assigned.model]?.provider,
+		model: selected.model,
+		provider: selected.provider,
 		thinking: role.thinking,
 		source: assigned.source,
 	};
@@ -394,13 +409,16 @@ export interface DAGExecutorOptions {
 	health?: RunHealthConfig;   // 子 Run 健康阈值；只产生提示，不自动终止
 	/** 确定性测试或受控宿主可替换子进程入口；正常生产调用留空。 */
 	invocationOverride?: { command: string; args: string[] };
+	/** 确定性测试可单独替换 judge 进程，仍走统一 runner。 */
+	judgeInvocationOverride?: { command: string; args: string[] };
 	executionId?: string;      // 显式 run id；也用于断点文件
 	taskId?: string;
-	resume?: boolean;          // 从同 executionId 的 checkpoint 恢复
+	resume?: boolean;          // 已废弃：原地恢复会修改历史，明确拒绝
 	resumeFromExecutionId?: string; // 从只读父执行 checkpoint 派生新 execution
 	qualityGate?: {            // 质量门独立配置: judge 模型/显式 deadline；省略 timeout 表示只受取消控制
 		model?: string;
 		provider?: string;
+		thinking?: RoleDefinition["thinking"];
 		timeoutMs?: number | null;
 	};
 }
@@ -426,10 +444,24 @@ export function createDAGRunId(executionId: string, nodeId: string): string {
 /**
  * 按拓扑序执行 DAG；支持独立节点并行、质量门、自动重试和 review 反馈。
  */
-export async function executeDAG(
-	dag: TaskDAG,
-	opts: DAGExecutorOptions,
-): Promise<DAGExecutionResult> {
+export async function executeDAG(dag: TaskDAG, opts: DAGExecutorOptions): Promise<DAGExecutionResult> {
+	if (dag.invocationTask !== undefined && (typeof dag.invocationTask !== "string" || !dag.invocationTask.trim())) {
+		throw new Error("DAG invocationTask must be a non-empty string");
+	}
+	validateTaskDAG(dag.nodes);
+	if (opts.resume) throw new Error("In-place resume is forbidden; use resumeFromExecutionId with a new executionId");
+	const executionId = assertSafeOpaqueId(opts.executionId ?? `execution-${randomUUID()}`, "executionId");
+	if (opts.resumeFromExecutionId === executionId) throw new Error("Resume requires a new executionId; parent is immutable");
+	const runsDir = join(opts.fluxDir, "runtime", "runs");
+	mkdirSync(runsDir, { recursive: true });
+	const checkpoint = resolvePathInsideExistingRoot(runsDir, executionId, "checkpoint.json");
+	return withJsonStoreLockAsync(checkpoint, async () => {
+		if (existsSync(checkpoint)) throw new Error(`Execution checkpoint already exists and is immutable: ${executionId}`);
+		return executeDAGInternal(dag, { ...opts, executionId });
+	}, { lockTimeoutMs: 1 });
+}
+
+async function executeDAGInternal(dag: TaskDAG, opts: DAGExecutorOptions): Promise<DAGExecutionResult> {
 	validateTaskDAG(dag.nodes);
 	const maxRetries = opts.maxRetries ?? 2;
 	const enableGate = opts.enableQualityGate ?? true;
@@ -445,6 +477,8 @@ export async function executeDAG(
 	const completed = new Set<string>();
 	const failed = new Set<string>();
 	let totalCost = dag.planningCostUsd ?? 0;
+	if (!Number.isFinite(totalCost) || totalCost < 0) throw new Error("DAG planning cost must be finite and non-negative");
+	let inheritedCostUsd = 0;
 	let status: DAGExecutionResult["status"] | "running" = "running";
 	let iterationCount = 0;
 	let timeoutObserved = false;
@@ -454,6 +488,7 @@ export async function executeDAG(
 	);
 	if (opts.taskId) assertSafeOpaqueId(opts.taskId, "taskId");
 	const artifactPaths: Record<string, string> = {};
+	const artifactHashes: Record<string, string> = {};
 
 	// 加载角色定义并在执行前验证所有节点绑定，避免执行到一半才发现角色/Agent 配置错误。
 	const roles = loadAllRoles(opts.cwd, opts.modelsConfig);
@@ -489,16 +524,16 @@ export async function executeDAG(
 	const latestStateFile = join(runtimeDir, "dag-state.json");
 	const resumeFromExecutionId = opts.resumeFromExecutionId
 		? assertSafeOpaqueId(opts.resumeFromExecutionId, "resumeFromExecutionId")
-		: opts.resume
-			? executionId
-			: undefined;
+		: undefined;
 	const resumeCheckpointFile = resumeFromExecutionId
 		? resolvePathInsideExistingRoot(runsDir, resumeFromExecutionId, "checkpoint.json")
 		: undefined;
-	try { mkdirSync(artifactDir, { recursive: true }); } catch {}
+	mkdirSync(artifactDir, { recursive: true });
 
 	function saveDagState(): void {
 		const state = {
+			version: 1,
+			dagFingerprint: dagFingerprint(dag),
 			executionId,
 			resumedFromExecutionId: resumeFromExecutionId && resumeFromExecutionId !== executionId
 				? resumeFromExecutionId
@@ -509,15 +544,16 @@ export async function executeDAG(
 			failed: [...failed],
 			status,
 			totalCost,
+			inheritedCostUsd,
+			attemptCostUsd: totalCost - inheritedCostUsd,
 			iterationCount,
 			taskResults: [...taskResults.entries()],
 			artifactPaths,
+			artifactHashes,
 			timestamp: Date.now(),
 		};
-		try {
-			writeFileSync(dagStateFile, JSON.stringify(state, null, 2));
-			writeFileSync(latestStateFile, JSON.stringify(state, null, 2));
-		} catch {}
+		writeJsonFileAtomic(dagStateFile, state);
+		withJsonStoreLock(latestStateFile, () => writeJsonFileAtomic(latestStateFile, state));
 	}
 
 	if (resumeCheckpointFile && existsSync(resumeCheckpointFile)) {
@@ -527,26 +563,35 @@ export async function executeDAG(
 		} catch (error: any) {
 			throw new Error(`checkpoint ${resumeFromExecutionId} is corrupt and was not overwritten: ${error?.message ?? String(error)}`);
 		}
-		const checkpointIds = new Set(Array.isArray(checkpoint.nodeIds) ? checkpoint.nodeIds : []);
-		const dagIds = new Set(dag.nodes.map(node => node.id));
-		if (checkpointIds.size !== dagIds.size || ![...dagIds].every(id => checkpointIds.has(id))) {
-			throw new Error(`checkpoint ${resumeFromExecutionId} does not match current DAG (node set differs)`);
+		const sourceDir = resolvePathInsideExistingRoot(runsDir, resumeFromExecutionId!);
+		checkpoint = withJsonStoreLock(resumeCheckpointFile, () => validateDAGCheckpoint(JSON.parse(readFileSync(resumeCheckpointFile, "utf8")), dag, resumeFromExecutionId!, sourceDir, enableGate), { lockTimeoutMs: 1 });
+		for (const id of checkpoint.completed) completed.add(id);
+		// 只继承已证明完成的结果；失败节点在新尝试中重新调度。
+		for (const [id, result] of checkpoint.taskResults as Array<[string, TaskExecutionResult]>) if (completed.has(id)) taskResults.set(id, result);
+		for (const id of completed) {
+			const target = resolvePathInsideExistingRoot(artifactDir, `${id}.md`);
+			copyFileSync(checkpoint.artifactPaths[id], target);
+			artifactPaths[id] = target;
+			artifactHashes[id] = artifactHash(target);
+			if (artifactHashes[id] !== checkpoint.artifactHashes[id]) throw new Error(`checkpoint artifact changed during copy: ${id}`);
 		}
-		for (const id of checkpoint.completed ?? []) completed.add(id);
-		// resume starts a new bounded attempt: completed nodes stay complete, failed nodes become runnable again.
-		for (const [id, result] of checkpoint.taskResults ?? []) taskResults.set(id, result);
-		Object.assign(artifactPaths, checkpoint.artifactPaths ?? {});
-		totalCost = 0;
+		inheritedCostUsd = checkpoint.totalCost;
+		totalCost = inheritedCostUsd;
 		iterationCount = 0;
+		if (opts.maxCostUsd !== undefined && totalCost >= opts.maxCostUsd) status = "budget_exceeded";
 	} else if (resumeFromExecutionId) {
 		throw new Error(`checkpoint is unavailable for execution ${resumeFromExecutionId}`);
 	}
 
+	if (opts.maxCostUsd !== undefined) {
+		if (!Number.isFinite(opts.maxCostUsd) || opts.maxCostUsd < 0) throw new Error("DAG maxCostUsd must be finite and non-negative");
+		if (totalCost >= opts.maxCostUsd) status = "budget_exceeded";
+	}
 	// 先写入本次 DAG，避免监控面板在首批节点完成前继续显示上一次执行。
 	saveDagState();
 
 	// 主循环: 按拓扑序执行
-	while (completed.size + failed.size < dag.nodes.length) {
+	while (status === "running" && completed.size + failed.size < dag.nodes.length) {
 		if (opts.signal?.aborted) { status = "cancelled"; break; }
 		if (deadline !== undefined && Date.now() >= deadline) { status = "timed_out"; break; }
 		if (opts.maxCostUsd !== undefined && totalCost >= opts.maxCostUsd) { status = "budget_exceeded"; break; }
@@ -627,7 +672,7 @@ export async function executeDAG(
 		const batchSettled = await Promise.allSettled(
 			ready.map(node => executeNodeWithGate(
 				node, roles, models, batchOpts, maxRetries, enableGate, executionId,
-				taskResults, unavailableModels, reviewFeedback.get(node.id), perNodeBudget,
+				taskResults, unavailableModels, reviewFeedback.get(node.id), perNodeBudget, dag.invocationTask,
 			))
 		);
 		// A node may return just after the global deadline while the parent is
@@ -659,19 +704,18 @@ export async function executeDAG(
 			if (result.timedOut === true || gateResult?.timedOut === true) timeoutObserved = true;
 			totalCost += cost;
 			taskResults.set(node.id, { node, subagentResult: result, gateResult, retryCount, passed });
-			try {
-				const artifactPath = resolvePathInsideExistingRoot(artifactDir, `${node.id}.md`);
-				writeFileSync(artifactPath, result.output || `(no output)\n\nError: ${result.errorMessage ?? "unknown"}`, "utf-8");
-				artifactPaths[node.id] = artifactPath;
-			} catch {}
+			const artifactPath = resolvePathInsideExistingRoot(artifactDir, `${node.id}.md`);
+			writeFileSync(artifactPath, result.output || `(no output)\n\nError: ${result.errorMessage ?? "unknown"}`, "utf-8");
+			artifactPaths[node.id] = artifactPath;
+			artifactHashes[node.id] = artifactHash(artifactPath);
 
 			if (passed) {
 				completed.add(node.id);
-				dagLog(`[flux dag] ${node.id} ✅ passed (retries=${retryCount}, cost=$${cost.toFixed(6)})`);
+				dagLog(`[flux dag] ${node.id} passed (retries=${retryCount}, cost=$${cost.toFixed(6)})`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "done", workingOn: node.title.slice(0, 100) }); } catch {}
 			} else {
 				failed.add(node.id);
-				dagLog(`[flux dag] ${node.id} ❌ failed after ${retryCount} retries`);
+				dagLog(`[flux dag] ${node.id} failed after ${retryCount} retries`);
 				try { board.updateAgentStatus(`dag-${node.id}`, { status: "failed", workingOn: node.title.slice(0, 100) }); } catch {}
 
 				// reviewer 失败时允许对应 implementer 重跑一次。
@@ -731,7 +775,7 @@ export async function executeDAG(
 
 	return {
 		executionId, taskResults, allPassed: status === "passed" && allPassed, status,
-		totalCost: Number(totalCost.toFixed(6)), artifactPaths,
+		totalCost, inheritedCostUsd, attemptCostUsd: totalCost - inheritedCostUsd, artifactPaths,
 		wallClockMs, completedNodes: [...completed], failedNodes: [...failed],
 	};
 }
@@ -750,6 +794,7 @@ async function executeNodeWithGate(
 	unavailableModels: Set<string>,
 	reviewerFeedback?: string,
 	maxCostUsd?: number,
+	invocationTask?: string,
 ): Promise<{ node: TaskNode; result: AgentRunResult; gateResult: QualityGateResult | null; retryCount: number; passed: boolean; cost: number }> {
 	const role = roles.get(node.role);
 	if (!role) throw new Error(`DAG role not found: ${node.role}`);
@@ -777,16 +822,20 @@ async function executeNodeWithGate(
 			assignmentSource = assign.source;
 		}
 		if (assignedModel && unavailableModels.has(assignedModel)) {
+			if (assignmentSource === "model" || assignmentSource === "main") throw new Error(`Selected model is unavailable: ${assignedModel}; no implicit fallback for an explicit role/Main selection`);
 			const healthyFallback = selectHealthyModel(assignedModel, roleRequirement, models, unavailableModels);
 			dagLog(`[flux dag] ${node.id} circuit breaker skips ${assignedModel} → ${healthyFallback}`);
 			assignedModel = healthyFallback;
 			assignedProvider = models[healthyFallback]?.provider;
 		}
-		dagLog(`[flux dag] ${node.id} model: ${assignedModel ?? "none"} (${assignmentSource!})`);
+		if (!assignedModel) throw new Error(`No chat model for DAG role ${node.role}`);
+		const selected = resolveChatModel(assignedModel, models, assignedProvider, { physical: true });
+		assignedModel = selected.model;
+		assignedProvider = selected.provider;
+		dagLog(`[flux dag] ${node.id} model: ${assignedModel} (${assignmentSource!})`);
 	} catch (e: any) {
-		dagLog(`[flux dag] ${node.id} assignModel failed: ${e?.message}, using explicit role/Main model`);
-		assignedModel = role?.model ?? opts.defaultModel;
-		assignedProvider = role?.provider ?? (role?.model ? models[role.model]?.provider : opts.defaultProvider);
+		dagLog(`[flux dag] ${node.id} model selection rejected: ${e?.message}`);
+		throw e;
 	}
 
 	// 构建 agent 定义
@@ -813,6 +862,7 @@ async function executeNodeWithGate(
 		return `### ${depId}: ${dep.node.title}\nstatus=${dep.passed ? "passed" : "failed"}\n${output.slice(0, 20_000)}`;
 	});
 	const taskText = [
+		invocationTask ? `=== Workflow invocation input ===\n${invocationTask}\nApply this input to the fixed node below; do not replace its role, dependencies or acceptance contract.\n=== End workflow invocation input ===` : "",
 		node.description || node.title,
 		dependencyArtifacts.length > 0 ? `\n=== Dependency artifacts ===\n${dependencyArtifacts.join("\n\n")}\n=== End dependency artifacts ===` : "",
 		reviewerFeedback ? `\n=== Reviewer feedback requiring remediation ===\n${reviewerFeedback}\n=== End reviewer feedback ===` : "",
@@ -901,7 +951,7 @@ async function executeNodeWithGate(
 				retryDelayMs: 3000,
 				persistent: opts.persistent ?? true,
 				persistentSessionId: `flux-dag-${executionId}-${node.id}`,
-				enableModelFallback: Object.keys(models).length > 1,
+				enableModelFallback: !role.model && !opts.defaultModel && Object.keys(models).length > 1,
 				modelsForFallback: models,
 				roleRequirementForFallback: roleRequirement,
 				signal: opts.signal,
@@ -961,18 +1011,38 @@ async function executeNodeWithGate(
 			}
 			// judge 独立配置优先；未配置显式 timeout 时只受取消和（如有）DAG deadline 控制。
 			const gateCfg = opts.qualityGate;
-			const gateModel = gateCfg?.model ?? result.model ?? agentDef.model ?? "";
-			const gateProvider = gateCfg?.provider ?? (gateModel ? models[gateModel]?.provider ?? agentDef.provider : agentDef.provider);
+			const gateSelector = gateCfg?.model ?? agentDef.model ?? "";
+			const gateSelection = resolveChatModel(gateSelector, models, gateCfg?.provider ?? agentDef.provider, { physical: true });
+			const gateModel = gateSelection.model;
+			const gateProvider = gateSelection.provider;
 			let gateAttempts = 0;
 			for (;;) {
 				gateAttempts++;
 				lastGateResult = await checkQualityGate(
 					result.output,
 					node.acceptanceCriteria,
-					{ cwd: opts.cwd, model: gateModel, provider: gateProvider, pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId, signal: opts.signal, deadlineAt: nodeDeadline, timeoutMs: gateCfg?.timeoutMs },
+					{
+						cwd: opts.cwd, model: gateModel, provider: gateProvider, thinking: gateCfg?.thinking ?? agentDef.thinking,
+						pricing: opts.pricing, telemetry: opts.telemetry, sessionId: opts.sessionId,
+						taskId: opts.taskId, executionId,
+						agentName: `judge-${node.id.slice(0, 50)}-${createHash("sha256").update(node.id).digest("hex").slice(0, 12)}`,
+						signal: opts.signal, deadlineAt: nodeDeadline, timeoutMs: gateCfg?.timeoutMs,
+						maxCostUsd: maxCostUsd === undefined ? undefined : Math.max(0, maxCostUsd - totalNodeCost),
+						parentMaxCostUsd: opts.maxCostUsd, parentMaxTurns: opts.parentMaxTurns,
+						parentMaxInputTokens: opts.parentMaxInputTokens, parentMaxParallel: opts.maxParallel,
+						health: opts.health, invocationOverride: opts.judgeInvocationOverride ?? opts.invocationOverride,
+					},
 				);
 				totalNodeCost += lastGateResult.gateCost;
 
+				// 取消、预算和真实 deadline 是运行约束，不是可重试的 JSON 不确定性。
+				if (lastGateResult.cancelled || lastGateResult.budgetExceeded || lastGateResult.timedOut) {
+					return {
+						node, result: { ...result, exitCode: lastGateResult.cancelled ? 130 : lastGateResult.budgetExceeded ? 75 : 124,
+							timedOut: lastGateResult.timedOut, errorMessage: lastGateResult.feedback },
+						gateResult: lastGateResult, retryCount, passed: false, cost: totalNodeCost,
+					};
+				}
 				const action = judgeAction(lastGateResult);
 				if (action === "pass") {
 					return { node, result, gateResult: lastGateResult, retryCount, passed: true, cost: totalNodeCost };
@@ -1021,7 +1091,7 @@ export function formatDAG(dag: TaskDAG): string {
 	const lines = [`[Task DAG: ${dag.nodes.length} nodes]`, `  Description: ${dag.description.slice(0, 200)}`, ""];
 	for (const node of dag.nodes) {
 		const deps = node.dependsOn.length > 0 ? ` ← [${node.dependsOn.join(", ")}]` : "";
-		const par = node.parallelizable ? " ∥" : "";
+		const par = node.parallelizable ? " [parallel]" : "";
 		lines.push(`  ${node.id}: ${node.title} (${node.role}${node.agentId ? ` @${node.agentId}${node.sessionMode === "fresh" ? ":fresh" : ""}` : ""})${deps}${par}`);
 		if (node.acceptanceCriteria.length > 0) {
 			lines.push(`    criteria: ${node.acceptanceCriteria.join("; ")}`);
@@ -1037,9 +1107,9 @@ export function formatDAGResult(r: DAGExecutionResult): string {
 		`  failed: ${r.failedNodes.join(", ") || "(none)"}`,
 	];
 	for (const [id, tr] of r.taskResults) {
-		const gateIcon = tr.gateResult ? (tr.gateResult.passed ? "✅" : "❌") : "—";
+		const gateStatus = tr.gateResult ? (tr.gateResult.passed ? "passed" : "failed") : "not checked";
 		const retryInfo = tr.retryCount > 0 ? ` (retries=${tr.retryCount})` : "";
-		lines.push(`  ${id}: ${gateIcon} ${tr.node.title}${retryInfo} · $${tr.subagentResult.usage.cost.toFixed(6)}`);
+		lines.push(`  ${id}: ${gateStatus} ${tr.node.title}${retryInfo} · $${tr.subagentResult.usage.cost.toFixed(6)}`);
 		if (tr.gateResult && !tr.gateResult.passed) {
 			lines.push(`    gate feedback: ${tr.gateResult.feedback.slice(0, 150)}`);
 		}
@@ -1048,20 +1118,11 @@ export function formatDAGResult(r: DAGExecutionResult): string {
 	return lines.join("\n");
 }
 
-/** Emoji map for each DAG execution status. */
-const STATUS_EMOJI: Record<string, string> = {
-	passed: "✅",
-	failed: "❌",
-	cancelled: "🚫",
-	budget_exceeded: "💰",
-	timed_out: "⏰",
-};
-
 /**
- * Format a concise Markdown summary of a DAG execution result.
+ * Format a concise Markdown summary of a DAG execution result without emoji.
  *
  * Output includes:
- * - Overall status line with emoji
+ * - Overall status line
  * - Execution wall-clock time & optional time label
  * - Total USD cost
  * - Node count breakdown (passed vs failed)
@@ -1079,7 +1140,6 @@ function formatWallClock(ms: number): string {
 
 export function formatWorkflowSummary(r: DAGExecutionResult, timeLabel?: string): string {
 	const label = timeLabel && timeLabel.trim() ? timeLabel.trim() : "(not provided)";
-	const emoji = STATUS_EMOJI[r.status] ?? "❓";
 	const statusBadge = `\`${r.status.toUpperCase()}\``;
 	const wallTime = formatWallClock(r.wallClockMs);
 	const cost = `$${r.totalCost.toFixed(6)}`;
@@ -1090,7 +1150,7 @@ export function formatWorkflowSummary(r: DAGExecutionResult, timeLabel?: string)
 	let summary = [
 		"## Workflow Execution Summary",
 		"",
-		`${emoji} **Status:** ${statusBadge}`,
+		`**Status:** ${statusBadge}`,
 		`**Time:** ${label} · Wall Clock: ${wallTime}`,
 		`**Cost:** ${cost}`,
 		`**Nodes:** ${passedCount} passed / ${failedCount} failed / ${totalCount} total`,
@@ -1116,7 +1176,7 @@ export function formatWorkflowSummary(r: DAGExecutionResult, timeLabel?: string)
 			const nodeCost = `$${tr.subagentResult.usage.cost.toFixed(6)}`;
 			const artifact = r.artifactPaths[id]
 				? r.artifactPaths[id].split(/[/\\]/).pop() ?? r.artifactPaths[id]
-				: "—";
+				: "(none)";
 			if (showArtifact) {
 				rows.push(`| ${id} | ${title} | ${role} | ${retries} | ${nodeCost} | ${artifact} |`);
 			} else {
@@ -1124,7 +1184,7 @@ export function formatWorkflowSummary(r: DAGExecutionResult, timeLabel?: string)
 			}
 		}
 		if (rows.length > 0) {
-			summary += "\n\n### ✅ Passed\n" + [header, separator, ...rows].join("\n");
+			summary += "\n\n### Passed\n" + [header, separator, ...rows].join("\n");
 		}
 	}
 
@@ -1145,7 +1205,7 @@ export function formatWorkflowSummary(r: DAGExecutionResult, timeLabel?: string)
 			rows.push(`| ${id} | ${title} | ${role} | ${errMsg} |`);
 		}
 		if (rows.length > 0) {
-			summary += "\n\n### ❌ Failed\n"
+			summary += "\n\n### Failed\n"
 				+ ["| ID | Title | Role | Error |", "|----|-------|------|-------|", ...rows].join("\n");
 		}
 	}

@@ -9,20 +9,31 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { parseSessionEntries, SessionManager } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { readJsonStore, updateJsonStore } from "../core/json-store";
+import { join, resolve } from "node:path";
+import { readJsonStore } from "../core/json-store";
+import { updateReferenceStore as updateJsonStore, withAgentReferenceFence } from "../core/agent-reference-fence";
 import type { PricingTable } from "../core/pricing";
+import { resolveChatModel } from "../core/model-catalog";
 import { registerActiveContext, releaseActiveContext, type SpaceContext } from "../core/active-context";
 import { assertSafePathSegment } from "../core/safe-path";
 import type { AgentRecord, AgentScope, AgentStatus, ThinkingLevel } from "../core/types";
 import { getAgentRun, listAgentRuns, type AgentRunRecord } from "../core/run-registry";
 import { MessageBus, type SendMessageV2Result } from "../core/message-bus";
 import { readAgentRunStop } from "./agent-run-control";
+import { collectAgentReferences } from "../core/agent-references";
 import type { RunHealthConfig } from "../core/run-health";
 import type { TelemetryWriter } from "../telemetry/events";
 import { runAgent, type AgentRunResult, type AgentTemplate } from "./agent-runner";
+import {
+	forkAgentSession,
+	resolveAgentSessionFileForRecord,
+	resolveExplicitSessionFile,
+	resolveSessionFileById,
+	sessionFileMatchesAgentRecord,
+} from "./agent-session-fork";
 import { loadAllRoles } from "./templates";
 
 interface AgentRegistry { agents: AgentRecord[]; }
@@ -116,17 +127,13 @@ export function findAgents(cwd: string, selector: string, ownerSessionId?: strin
 	return listAgents(cwd, ownerSessionId).filter(agent => agent.status !== "archived" && (agent.id === selector || agent.name === selector));
 }
 
-function uniqueName(cwd: string, scope: AgentScope, name: string): string {
-	const existing = new Set(
-		(scope === "global"
-			? readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents.map(normalizeAgentRecord)
-			: listAgents(cwd)
-		).map(agent => agent.name),
-	);
+function uniqueName(existing: Set<string>, name: string): string {
 	if (!existing.has(name)) return name;
-	let index = 1;
-	while (existing.has(`${name}(${index})`)) index++;
-	return `${name}(${index})`;
+	for (let index = 2; ; index++) {
+		const suffix = `-${index}`;
+		const candidate = `${name.slice(0, 80 - suffix.length)}${suffix}`;
+		if (!existing.has(candidate)) return candidate;
+	}
 }
 
 /**
@@ -229,14 +236,47 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 /** 模型覆盖必须存在于模型表（fail-closed，防止无效模型白跑成本）。 */
 function assertModelOverride(modelsConfig: any, model: string | undefined): void {
 	if (model === undefined) return;
-	if (!modelsConfig?.models?.[model]) {
-		throw new Error(`Unknown model: ${model}. Available models: ${Object.keys(modelsConfig?.models ?? {}).join(", ") || "none"}.`);
+	resolveChatModel(model, modelsConfig?.models ?? {});
+}
+
+function agentSessionDir(cwd: string): string {
+	return join(cwd, ".agentflux", "runtime", "sessions");
+}
+
+function assertIdleForkSource(cwd: string, source: AgentRecord, sourceFile?: string): void {
+	if (source.status === "running") {
+		throw new Error(`Cannot fork active Agent source: ${source.name}`);
+	}
+	const activeRuns = listAgentRuns(join(cwd, ".agentflux"), { agent: source.name, activeOnly: true });
+	if (activeRuns.length === 0) return;
+	if (!sourceFile) throw new Error(`Cannot fork active Agent source: ${source.name}`);
+	throw new Error(`Cannot fork Agent source with active Run: ${source.name} (${activeRuns[0].id})`);
+}
+
+/** Explicit files can belong to an Agent even when the selector is not its name. */
+function assertExplicitForkSourceIdle(cwd: string, sourceFile: string, ownerSessionId?: string): void {
+	const normalizedSource = resolve(sourceFile);
+	const activeRuns = listAgentRuns(join(cwd, ".agentflux"), { activeOnly: true });
+	const activeNames = new Set(activeRuns.map(run => run.agent));
+	for (const agent of listAgents(cwd)) {
+		if (!sessionFileMatchesAgentRecord(normalizedSource, agent)) continue;
+		if (agent.scope === "session" && (!ownerSessionId || agent.ownerSessionId !== ownerSessionId)) throw new Error("Fork source belongs to another session owner");
+		if (agent.status === "running" || activeNames.has(agent.name)) throw new Error(`Cannot fork active Agent source: ${agent.name}`);
 	}
 }
 
 export function createAgent(cwd: string, input: { name: string; role?: string; roles?: string[]; forkFrom?: string; scope?: AgentScope; ownerSessionId?: string; modelsConfig: any; model?: string; thinking?: AgentRunOverrides["thinking"] }): AgentRecord {
+	return withAgentReferenceFence(() => createAgentInternal(cwd, input));
+}
+
+function createAgentInternal(cwd: string, input: Parameters<typeof createAgent>[1]): AgentRecord {
 	const safeName = assertSafePathSegment(input.name, "Agent name");
+	if (safeName.length > 80) throw new Error("Agent name must be at most 80 characters (capability/message identity)");
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(safeName)) {
+		throw new Error("Agent name must start with an ASCII letter or digit and contain only letters, digits, '.', '_' or '-'");
+	}
 	const scope: AgentScope = input.scope ?? "project";
+	if (scope === "session" && !input.ownerSessionId?.trim()) throw new Error("Session Agent creation requires ownerSessionId");
 	const roleDefinitions = loadAllRoles(cwd, input.modelsConfig);
 	const requestedRole = typeof input.role === "string" ? input.role.trim() : undefined;
 	const configuredRoles = Array.isArray(input.roles) && input.roles.length > 0
@@ -258,18 +298,36 @@ export function createAgent(cwd: string, input: { name: string; role?: string; r
 	const multiRole = configuredRoles.length > 1;
 	let sessionId: string | undefined;
 	let forkPoint: string | undefined;
+	let forkSourceFile: string | undefined;
+	let createdFork: ReturnType<typeof forkAgentSession> | undefined;
 	if (input.forkFrom) {
-		const forkCandidates = findAgents(cwd, input.forkFrom, input.ownerSessionId);
-		if (forkCandidates.length > 0) {
-			sessionId = forkCandidates[0].sessionId; // 继承源 Agent 会话记忆
-		} else {
-			sessionId = input.forkFrom; // 视为会话文件路径
+		const forkSelector = input.forkFrom.trim();
+		if (!forkSelector) throw new Error("forkFrom must identify an Agent or an existing Pi session file");
+		const forkCandidates = findAgents(cwd, forkSelector, input.ownerSessionId);
+		if (forkCandidates.length > 1) {
+			throw new Error(`Fork source Agent "${forkSelector}" is ambiguous: ${forkCandidates.map(agent => `${agent.name} (${agent.id})`).join(", ")}. Use a unique id or explicit session file.`);
 		}
-		forkPoint = input.forkFrom;
+		const sourceFile = forkCandidates.length === 1
+			? (() => {
+				const source = forkCandidates[0];
+				if (source.scope === "session" && (!input.ownerSessionId || source.ownerSessionId !== input.ownerSessionId)) throw new Error("Fork source belongs to another session owner");
+				assertIdleForkSource(cwd, source);
+				const physical = resolveAgentSessionFileForRecord(agentSessionDir(cwd), source);
+				if (!physical) {
+					throw new Error(`Cannot prove a real Pi session for Agent source "${source.name}"; run the source first or pass an existing session file.`);
+				}
+				assertIdleForkSource(cwd, source, physical);
+				return physical;
+			})()
+			: resolveExplicitSessionFile(cwd, forkSelector);
+		if (forkCandidates.length === 0) assertExplicitForkSourceIdle(cwd, sourceFile, input.ownerSessionId);
+		// 先获得并验证 Agent store，才创建物理目标，避免坏 registry 留下未登记分支。
+		forkSourceFile = sourceFile;
+		forkPoint = sourceFile;
 	}
 	const record: AgentRecord = {
 		id: `agent-${randomUUID()}`,
-		name: uniqueName(cwd, scope, safeName),
+		name: safeName,
 		scope,
 		role,
 		status: "idle",
@@ -290,7 +348,7 @@ export function createAgent(cwd: string, input: { name: string; role?: string; r
 				: (multiRole ? undefined : template?.provider) ?? (m ? input.modelsConfig?.models?.[m]?.provider : undefined);
 		})(),
 		thinking: input.thinking ?? (multiRole ? undefined : template?.thinking),
-		sessionId: sessionId ?? `agent-${uniqueName(cwd, scope, safeName)}`,
+		sessionId: sessionId ?? `agent-${safeName}`,
 		createdAt: now,
 		updatedAt: now,
 		callCount: 0,
@@ -299,7 +357,31 @@ export function createAgent(cwd: string, input: { name: string; role?: string; r
 	};
 	if (scope === "session") record.ownerSessionId = input.ownerSessionId;
 	const path = registryPath(cwd, scope);
-	updateRegistry(path, agents => { agents.push(record); return record; });
+	try {
+		updateRegistry(path, agents => {
+			const external = scope === "global" ? [] : readJsonStore(registryPath(cwd, "global"), createRegistry, isRegistry).agents;
+			record.name = uniqueName(new Set([...agents, ...external].map(agent => agent.name)), safeName);
+			if (forkSourceFile) {
+				createdFork = forkAgentSession(forkSourceFile, cwd, agentSessionDir(cwd));
+				sessionId = createdFork.targetSessionId;
+			}
+			record.sessionId = sessionId ?? `agent-${record.name}`;
+			agents.push(record);
+			return record;
+		});
+	} catch (error) {
+		if (createdFork) {
+			try {
+				const committed = readJsonStore(path, createRegistry, isRegistry).agents.some(agent => agent.id === record.id);
+				if (!committed && existsSync(createdFork.targetFile)) {
+					const header = JSON.parse(readFileSync(createdFork.targetFile, "utf8").split(/\r?\n/)[0]);
+					if (header.id !== createdFork.targetSessionId) throw new Error("Fork rollback target identity changed");
+					unlinkSync(createdFork.targetFile);
+				}
+			} catch (cleanupError) { throw new AggregateError([error, cleanupError], "Agent creation failed; native fork cleanup could not be proved"); }
+		}
+		throw error;
+	}
 	return record;
 }
 
@@ -310,9 +392,12 @@ export function deleteAgent(cwd: string, selector: string, ownerSessionId?: stri
 		const removed = updateRegistry(path, agents => {
 			const current = agents.find(agent => (agent.id === selector || agent.name === selector)
 				&& agent.status !== "archived"
-				&& (!ownerSessionId || agent.scope !== "session" || agent.ownerSessionId === ownerSessionId));
+				&& (agent.scope !== "session" || (!!ownerSessionId && agent.ownerSessionId === ownerSessionId)));
 			if (!current) return undefined;
 			if (current.status === "running") throw new Error(`Agent is running: ${current.name}`);
+			if (scope === "global" || current.scope === "global") throw new Error("Global Agent deletion requires a complete cross-project reference inventory");
+			const refs = collectAgentReferences(cwd);
+			if (refs.has(current.id) || refs.has(current.name)) throw new Error(`Agent is referenced and cannot be deleted: ${current.name}`);
 			const index = agents.indexOf(current);
 			agents.splice(index, 1);
 			return current;
@@ -324,24 +409,26 @@ export function deleteAgent(cwd: string, selector: string, ownerSessionId?: stri
 
 /**
  * 自动 GC：删除"无工作引用 且 创建时间早于最新第 k 个（默认 10）创建"的 Agent。
- * activeRefs：正在运行的 agent id/name、被活跃任务/issue 引用的名字（有引用永不清除）。
+ * activeRefs 是额外保护；Core 自动读取持久引用。普通 GC 只处理 project/当前 owner 的 session，global 保留。
  */
-export function gcAgents(cwd: string, keepLatestK = 10, activeRefs: ReadonlySet<string> = new Set()): string[] {
+export function gcAgents(cwd: string, keepLatestK = 10, activeRefs: ReadonlySet<string> = new Set(), options: { ownerSessionId?: string } = {}): string[] {
+	if (!Number.isSafeInteger(keepLatestK) || keepLatestK < 0) throw new Error("keepLatestK must be a non-negative integer");
 	const removed: string[] = [];
-	for (const scope of ["global", "project"] as const) {
-		const path = registryPath(cwd, scope);
-		updateRegistry(path, agents => {
-			const byCreation = [...agents].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-			const protectedNames = new Set(byCreation.slice(0, keepLatestK).map(agent => agent.name));
-			const survivors = agents.filter(agent => {
-				const referenced = activeRefs.has(agent.id) || activeRefs.has(agent.name) || agent.status === "running";
-				const kept = protectedNames.has(agent.name);
-				if (!referenced && !kept) removed.push(agent.name);
-				return referenced || kept;
-			});
-			agents.splice(0, agents.length, ...survivors);
+	// 项目会话不能证明 global Agent 在其他项目没有引用，因此普通 GC 从不回收 global。
+	updateRegistry(registryPath(cwd, "project"), agents => {
+		const refs = new Set([...activeRefs, ...collectAgentReferences(cwd)]);
+		const visible = (agent: AgentRecord) => agent.scope !== "global"
+			&& (agent.scope !== "session" || (!!options.ownerSessionId && agent.ownerSessionId === options.ownerSessionId));
+		const byCreation = [...agents].reverse().filter(visible).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+		const protectedIds = new Set(byCreation.slice(0, keepLatestK).map(agent => agent.id));
+		const survivors = agents.filter(agent => {
+			const keep = !visible(agent) || refs.has(agent.id) || refs.has(agent.name)
+				|| agent.status === "running" || protectedIds.has(agent.id);
+			if (!keep) removed.push(agent.name);
+			return keep;
 		});
-	}
+		agents.splice(0, agents.length, ...survivors);
+	});
 	return removed;
 }
 
@@ -363,12 +450,13 @@ function toTemplate(record: AgentRecord, roleName: string, cwd: string, modelsCo
 		?? role.provider
 		?? (record.model || role.model ? modelsConfig?.models?.[model ?? ""]?.provider : undefined)
 		?? (model && defaults?.model === model ? defaults?.provider : undefined);
+	const selection = model ? resolveChatModel(model, modelsConfig?.models ?? {}, provider, { physical: true }) : undefined;
 	return {
 		name: record.name,
 		role: roleName,
 		description: role.description ?? record.role,
-		model,
-		provider,
+		model: selection?.model,
+		provider: selection?.provider,
 		tools: role.tools,
 		skills: [...new Set([...sharedSkills, ...(role.skills ?? [])])],
 		mcpServers: role.mcpServers,
@@ -409,7 +497,18 @@ async function runAgentRecordCore(selector: string, task: string, context: Agent
 	if (!allowedRoles.includes(selectedRole)) {
 		throw new Error(`Agent ${record.name} is not registered for role ${selectedRole}; allowed roles: ${allowedRoles.join(", ")}`);
 	}
+	// 在变更 Agent 状态/创建 Run 前核验；显式 physical override 可覆盖虚拟 Main/Agent。
+	const selectionRecord = overrides?.model ? { ...record, model: overrides.model, provider: context.modelsConfig?.models?.[overrides.model]?.provider } : record;
+	const template = toTemplate(selectionRecord, selectedRole, context.cwd, context.modelsConfig, context.sharedSkills ?? [], { model: context.defaultModel, provider: context.defaultProvider });
+	if (overrides?.thinking !== undefined) template.thinking = overrides.thinking;
 	const path = registryPath(context.cwd, record.scope);
+	const persistentSessionDirectory = sessionDir ?? agentSessionDir(context.cwd);
+	const nativeForkSessionFile = record.lineage.origin === "fork" && overrides?.sessionMode !== "fresh"
+		? resolveSessionFileById(persistentSessionDirectory, record.sessionId)
+		: undefined;
+	if (record.lineage.origin === "fork" && overrides?.sessionMode !== "fresh" && !nativeForkSessionFile) {
+		throw new Error(`Cannot load native fork session for Agent ${record.name}: target session file is missing`);
+	}
 	const persistentSessionId = overrides?.sessionMode === "fresh"
 		? `${record.sessionId}-fresh-${randomUUID()}`
 		: record.sessionId;
@@ -428,12 +527,6 @@ async function runAgentRecordCore(selector: string, task: string, context: Agent
 	context.telemetry?.writeAgentLifecycle({ sessionId: context.sessionId, taskId: context.taskId, agentId: running.id, agent: running.name, kind: "subagent", origin: running.lineage.origin, status: "running", action: "started", role: selectedRole, forkPoint: running.lineage.forkPoint, model: running.model ?? context.defaultModel });
 	let result: AgentRunResult;
 	try {
-		const template = toTemplate(running, selectedRole, context.cwd, context.modelsConfig, context.sharedSkills ?? [], { model: context.defaultModel, provider: context.defaultProvider });
-		if (overrides?.model) {
-			template.model = overrides.model;
-			template.provider = context.modelsConfig?.models?.[overrides.model]?.provider;
-		}
-		if (overrides?.thinking !== undefined) template.thinking = overrides.thinking;
 		result = await runAgent({
 			cwd: context.cwd,
 			agent: template,
@@ -445,7 +538,8 @@ async function runAgentRecordCore(selector: string, task: string, context: Agent
 			prefixLayout: context.prefixLayout,
 			persistent: true,
 			persistentSessionId,
-			sessionDir: sessionDir ?? join(context.cwd, ".agentflux", "runtime", "sessions"),
+			persistentSessionFile: nativeForkSessionFile,
+			sessionDir: persistentSessionDirectory,
 			pricing: context.pricing,
 			timeoutMs: context.timeoutMs,
 			deadlineAt: context.deadlineAt,
@@ -461,6 +555,7 @@ async function runAgentRecordCore(selector: string, task: string, context: Agent
 			onProgress: onProgress,
 			invocationOverride: context.invocationOverride,
 			registeredRoles: allowedRoles,
+			agentId: running.id,
 		});
 	} catch (error) {
 		let failed: AgentRecord;
@@ -490,6 +585,7 @@ async function runAgentRecordCore(selector: string, task: string, context: Agent
 		const current = agents.find(agent => agent.id === running.id);
 		if (!current) throw new Error(`Agent disappeared while running: ${running.name}`);
 		current.status = result.exitCode === 0 && !result.errorMessage ? "idle" : result.exitCode === 130 ? "cancelled" : "failed";
+		current.lastSessionId = result.sessionId ?? persistentSessionId;
 		current.callCount += 1;
 		current.totalCostUsd += result.usage.cost;
 		current.lastResult = {
@@ -536,7 +632,9 @@ export function deleteSessionAgents(cwd: string, ownerSessionId: string): string
 	const removed: string[] = [];
 	const path = join(cwd, ".agentflux", "runtime", "agents.json");
 	updateRegistry(path, agents => {
-		const kept = agents.filter(agent => !(agent.scope === "session" && agent.ownerSessionId === ownerSessionId && agent.status !== "running"));
+		const refs = collectAgentReferences(cwd);
+		const kept = agents.filter(agent => !(agent.scope === "session" && agent.ownerSessionId === ownerSessionId && agent.status !== "running"
+			&& !refs.has(agent.id) && !refs.has(agent.name)));
 		for (const agent of agents) {
 			if (!kept.includes(agent) && agent.status !== "running") removed.push(agent.name);
 		}
@@ -552,6 +650,7 @@ export function resetAgentStatus(cwd: string, selector: string, status: Exclude<
 	return updateRegistry(path, agents => {
 		const current = agents.find(agent => agent.id === record.id);
 		if (!current) throw new Error(`Agent not found: ${selector}`);
+		if (current.scope === "session" && (!ownerSessionId || current.ownerSessionId !== ownerSessionId)) throw new Error("Session Agent mutation requires its ownerSessionId");
 		current.status = status;
 		current.updatedAt = new Date().toISOString();
 		return structuredClone(current);
@@ -619,39 +718,23 @@ export function formatAgents(input: AgentRecord[] | string, cwd?: string): strin
 	})].join("\n");
 }
 
-/** 解析子代理实际会话文件（shared/fresh 均为 <时间戳>_<persistentSessionId>-cap-<hash>.jsonl，按最近一次 key 扫描）。 */
+/** 解析子代理实际会话文件，兼容 fresh/capability 后缀与 Pi 原生 fork ID。 */
 export function resolveAgentSessionFile(cwd: string, record: AgentRecord): string | undefined {
-	const sessionKey = record.lastSessionId ?? record.sessionId;
-	if (!sessionKey) return undefined;
-	const sessionsDir = join(cwd, ".agentflux", "runtime", "sessions");
-	const pattern = `_${sessionKey}-cap-`;
-	try {
-		const name = readdirSync(sessionsDir)
-			.filter(name => name.endsWith(".jsonl") && name.includes(pattern))
-			.map(name => ({ name, mtime: statSync(join(sessionsDir, name)).mtimeMs }))
-			.sort((a, b) => b.mtime - a.mtime)[0]?.name;
-		return name ? join(sessionsDir, name) : undefined;
-	} catch { return undefined; }
+	return resolveAgentSessionFileForRecord(agentSessionDir(cwd), record);
 }
 
-/** 读取子代理会话文件中最后 count 条 assistant 文本消息（时间正序，最新在后；Talk 展示“对话内容”用）。
- * 会话文件事件类型为 message（非 message_end），逐行扫描收集最后 count 条含 text 的 assistant 消息。 */
+/** 只读原生 active projection；不展示废弃分支或 context_edit 省略的旧回答，不迁移/回写源文件。 */
 export function readAgentLastMessages(cwd: string, record: AgentRecord, count = 3): string[] {
 	const sessionFile = resolveAgentSessionFile(cwd, record);
 	if (!sessionFile) return [];
 	const messages: string[] = [];
 	try {
-		const lines = readFileSync(sessionFile, "utf8").split("\n");
-		for (const line of lines) {
-			try {
-				const event = JSON.parse(line);
-				if (event?.type === "message" && event.message?.role === "assistant") {
-					const texts = (event.message.content ?? [])
-						.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim())
-						.map((block: any) => block.text.trim());
-					if (texts.length) messages.push(texts.join(" "));
-				}
-			} catch { /* 跳过坏行 */ }
+		const entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
+		const manager = SessionManager.inMemory(cwd, {}, entries);
+		for (const message of manager.buildSessionProjection().messages) {
+			if (message.role !== "assistant") continue;
+			const texts = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim()).map((block: any) => block.text.trim());
+			if (texts.length) messages.push(texts.join(" "));
 		}
 	} catch { return []; }
 	return messages.slice(-count);

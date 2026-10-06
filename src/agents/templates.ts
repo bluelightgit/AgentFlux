@@ -41,45 +41,45 @@ export interface RoleDefinition {
 const BUILTIN_ROLES: Record<string, RoleDefinition> = {
 	assistant: {
 		name: "assistant",
-		description: "通用默认子代理（无角色模板时使用）",
+		description: "General-purpose default subagent (used when no role template is selected)",
 		tools: ["read", "grep", "find", "ls", "bash", "write", "edit"],
-		systemPrompt: "你是一个通用助理子代理。忠实执行给定的任务，按需查看工作区，并汇报具体结果。",
+		systemPrompt: "You are a general-purpose assistant subagent. Carry out the assigned task faithfully, inspect the workspace as needed, and report specific results.",
 		source: "builtin",
 		thinking: "off",
 	},
 	planner: {
 		name: "planner",
-		description: "分析需求, 拆解任务, 输出实现计划",
+		description: "Analyze requirements, break down tasks, and produce an implementation plan",
 		requirement: { coding: 0.3, reasoning: 0.9, speed: 0.2, context: 0.7, cost_eff: 0.3 },
 		tools: ["read", "grep", "find", "ls", "bash"],
-		systemPrompt: "你是一名资深规划者。分析需求，拆解为实现步骤，识别风险与依赖。输出任务边界清晰的结构化计划。不要编写实现代码。",
+		systemPrompt: "You are a senior planner. Analyze requirements, break them into implementation steps, and identify risks and dependencies. Produce a structured plan with clear task boundaries. Do not write implementation code.",
 		source: "builtin",
 		thinking: "high",
 	},
 	implementer: {
 		name: "implementer",
-		description: "写代码, 跑测试",
+		description: "Write code and run tests",
 		requirement: { coding: 0.8, reasoning: 0.5, speed: 0.6, cost_eff: 0.7 },
 		tools: ["read", "write", "edit", "bash", "grep", "find"],
-		systemPrompt: "你是一名资深开发者。按计划实现任务，编写干净、可维护的代码，运行测试验证。遇到问题时记录说明。",
+		systemPrompt: "You are a senior developer. Implement the task according to the plan, write clean and maintainable code, and run tests to verify it. Record any issues you encounter.",
 		source: "builtin",
 		thinking: "medium",
 	},
 	reviewer: {
 		name: "reviewer",
-		description: "审查代码质量/安全/可维护性",
+		description: "Review code quality, security, and maintainability",
 		requirement: { coding: 0.7, reasoning: 0.8, cost_eff: 0.4 },
 		tools: ["read", "grep", "bash"],
-		systemPrompt: "你是一名代码评审者。从正确性、安全性、性能、可维护性角度评审改动。输出：## 必须修复的问题 / ## 建议 / ## 整体评价。不要直接修改代码。",
+		systemPrompt: "You are a code reviewer. Review changes for correctness, security, performance, and maintainability. Output: ## Must Fix / ## Suggestions / ## Overall Assessment. Do not modify the code directly.",
 		source: "builtin",
 		thinking: "high",
 	},
 	tester: {
 		name: "tester",
-		description: "写测试用例, 验证正确性",
+		description: "Write tests and verify correctness",
 		requirement: { coding: 0.7, reasoning: 0.5, speed: 0.5, cost_eff: 0.6 },
 		tools: ["read", "write", "edit", "bash"],
-		systemPrompt: "你是一名测试工程师。为实现编写全面的测试，覆盖正常路径、边界与错误处理，运行测试并汇报结果。",
+		systemPrompt: "You are a test engineer. Write comprehensive tests for the implementation, covering normal paths, boundaries, and error handling. Run the tests and report the results.",
 		source: "builtin",
 	},
 };
@@ -227,8 +227,8 @@ export function loadAllRoles(cwd: string, modelsConfig: any): Map<string, RoleDe
 export function formatRoleList(roles: Map<string, RoleDefinition>): string {
 	const lines = ["Agent Roles:", ""];
 	for (const [name, def] of roles) {
-		const source = def.source === "builtin" ? "(内置)" : def.source === "json" ? "(json)" : "(md)";
-		const modelInfo = def.model ? `model=${def.model}` : def.requirement ? `req={${Object.entries(def.requirement).map(([k, v]) => `${k}:${v}`).join(",")}}` : "???";
+		const source = def.source === "builtin" ? "(built-in)" : def.source === "json" ? "(json)" : "(md)";
+		const modelInfo = def.model ? `model=${def.model}` : def.requirement ? `req={${Object.entries(def.requirement).map(([k, v]) => `${k}:${v}`).join(",")}}` : "unspecified";
 		const toolsInfo = def.tools ? `tools=[${def.tools.join(",")}]` : "tools=all";
 		const thinkInfo = def.thinking ? `thinking=${def.thinking}` : "";
 		const communicationInfo = def.communication

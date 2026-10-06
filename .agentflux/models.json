@@ -1,5 +1,9 @@
 {
   "models": {
+    "gpt-5.6-luna": {
+      "provider": "openai-codex",
+      "contextWindow": 272000
+    },
     "gpt-5.5": {
       "provider": "octopus-responses",
       "contextWindow": 900000,
@@ -26,24 +30,32 @@
     }
   },
   "roles": {
+    "assistant": {
+      "description": "General-purpose default Agent when no role template is selected",
+      "systemPrompt": "You are a general-purpose assistant Agent. Follow the assigned task, inspect the workspace as needed, and report concrete results. Use English for product-facing text and do not use emoji.",
+      "model": "gpt-5.6-luna",
+      "provider": "openai-codex",
+      "thinking": "max",
+      "tools": ["read", "grep", "find", "ls", "bash", "write", "edit"]
+    },
     "planner": {
       "model": "gpt-5.6-luna",
-      "provider": "openai",
+      "provider": "openai-codex",
       "thinking": "max"
     },
     "implementer": {
       "model": "gpt-5.6-luna",
-      "provider": "openai",
+      "provider": "openai-codex",
       "thinking": "max"
     },
     "reviewer": {
       "model": "gpt-5.6-luna",
-      "provider": "openai",
+      "provider": "openai-codex",
       "thinking": "max"
     },
     "tester": {
       "model": "gpt-5.6-luna",
-      "provider": "openai",
+      "provider": "openai-codex",
       "thinking": "max"
     }
   },

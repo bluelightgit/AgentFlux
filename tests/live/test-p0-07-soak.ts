@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Repeated production-dist soak: three independent fresh Pi sessions execute
@@ -12,7 +12,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-soak-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-soak-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const CYCLES = 3;
 
 function git(args: string[]): string {
@@ -59,7 +59,7 @@ async function main(): Promise<void> {
 		const extensionDir = join(fixtureRoot, "dist", "extension");
 		mkdirSync(extensionDir, { recursive: true });
 		cpSync(join(sourceRoot, "dist", "extension"), extensionDir, { recursive: true });
-		const extensionEntry = join(extensionDir, "entry.js");
+		const extensionEntry = join(extensionDir, "host-entry.ts");
 		for (let cycle = 1; cycle <= CYCLES; cycle++) {
 			const result = runCycle(config, extensionEntry, cycle);
 			cycleResults.push({ cycle, exitCode: result.status, signal: result.signal, marker: String(result.stdout ?? "").includes(`SOAK_MAIN_${cycle}_OK`) && String(result.stdout ?? "").includes(`SOAK_${cycle}_OK`), stdoutTail: String(result.stdout ?? "").slice(-3500), stderrTail: String(result.stderr ?? "").slice(-2500) });

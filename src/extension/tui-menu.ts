@@ -1,3 +1,7 @@
+// 正文不是控制命令；只对已有控制入口保留字符串返回。
+export type TuiIntent = { kind: "main_message"; message: string } | { kind: "new_workflow"; task: string };
+export type TuiMenuResult = string | TuiIntent | null | undefined;
+
 export interface TuiAgentInfo {
 	name: string;
 	kind: "main" | "subagent";
@@ -117,7 +121,7 @@ function agentDetails(agent: TuiAgentInfo): string {
 	].join("\n");
 }
 
-export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
+export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<TuiMenuResult> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const createLabel = "+ Create Agent";
 	const options = [...data.agents.map(agentLabel), createLabel];
@@ -151,18 +155,18 @@ export async function showAgentTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 	if (action?.startsWith("Talk")) {
 		const history = (agent.lastHistory ?? []).map(text => `  · ${text.replace(/\s+/g, " ").slice(0, 100)}`);
 		if (history.length) {
-			ctx.ui.notify(`${agent.name} 最近对话：\n${history.join("\n")}`, "info");
+			ctx.ui.notify(`${agent.name} recent conversation:\n${history.join("\n")}`, "info");
 		} else {
-			ctx.ui.notify(`${agent.name} 还没有 run 过，暂无历史回复。`, "info");
+			ctx.ui.notify(`${agent.name} has no prior runs or replies.`, "info");
 		}
 		const last = agent.lastMessage?.trim().replace(/\s+/g, " ").slice(0, 200);
 		const selectedRole = agent.communication === "current_chat" || (agent.roles?.length ?? 0) <= 1
 			? undefined
 			: await select(ctx, `Role for this Run · ${agent.name}`, agent.roles ?? []);
 		if (agent.roles && agent.roles.length > 1 && !selectedRole) return null;
-		const message = await input(ctx, `Talk to ${agent.name}`, last ? `最近回复：${last.slice(0, 60)}` : "Describe the task, question or follow-up");
+		const message = await input(ctx, `Talk to ${agent.name}`, last ? `Recent reply: ${last.slice(0, 60)}` : "Describe the task, question or follow-up");
 		if (!message) return null;
-		return agent.communication === "current_chat" ? message : `agent run ${agent.name} ${message}${selectedRole ? ` --role ${selectedRole}` : ""}`;
+		return agent.communication === "current_chat" ? { kind: "main_message", message } : `agent run ${agent.name} ${message}${selectedRole ? ` --role ${selectedRole}` : ""}`;
 	}
 	if (action?.startsWith("Message")) { const message = await input(ctx, `Message ${agent.name}`, "Message content"); return message ? `message send ${agent.name} ${message}` : null; }
 	if (action?.startsWith("Inspect")) return `agent inspect ${agent.name}`;
@@ -257,7 +261,7 @@ export async function showIssueTuiMenu(ctx: any, data: FluxTuiMenuData): Promise
 		const claimLabel = await select(ctx, "Claim to review", pending.map(claim => `${claim.id} · ${claim.agent} · ${claim.scope}`));
 		const claim = pending.find(candidate => claimLabel?.startsWith(`${candidate.id} ·`));
 		if (!claim) return null;
-		const verdict = await select(ctx, "Verdict", ["pass · 通过", "rework · 退回重做"]);
+		const verdict = await select(ctx, "Verdict", ["pass · approve", "rework · request changes"]);
 		if (!verdict) return null;
 		if (verdict.startsWith("pass")) return `issue review ${issue.id} ${claim.id} pass`;
 		const feedback = await input(ctx, "Rework feedback", "What must the agent fix?");
@@ -290,7 +294,7 @@ export async function showTaskTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<
 	return null;
 }
 
-export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
+export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<TuiMenuResult> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const createLabel = "+ New Workflow";
 	const workflows = data.workflows ?? [];
@@ -299,7 +303,7 @@ export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Prom
 	if (!selected) return null;
 	if (selected === createLabel) {
 		const task = await input(ctx, "New Workflow task", "Describe the outcome and fixed dependencies");
-		return task ? `work workflow ${task}` : null;
+		return task ? { kind: "new_workflow", task } : null;
 	}
 	const workflow = workflows.find((item, index) => labels[index] === selected);
 	if (!workflow) return null;
@@ -317,7 +321,7 @@ export async function showWorkflowTuiMenu(ctx: any, data: FluxTuiMenuData): Prom
 		: `workflow modify ${workflow.id} ${task}`;
 }
 
-export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<string | null | undefined> {
+export async function showFluxTuiMenu(ctx: any, data: FluxTuiMenuData): Promise<TuiMenuResult> {
 	if (!ctx.hasUI || ctx.mode !== "tui" || !ctx.ui?.select) return undefined;
 	const selected = await select(ctx, "AgentFlux Workbench", [
 		"New task · describe outcome", "Tasks · reuse, resume or continue", "Workflows · saved fixed DAGs", "Agents · inspect, create or talk", "Community · Issues and Claims",

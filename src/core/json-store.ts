@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
-import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
+import { createProcessOwnerToken, isLockOwnerActive, stealStaleLock } from "./fs-lock";
 
 export type JsonStoreValidator<T> = (value: unknown) => value is T;
 
@@ -93,7 +93,7 @@ export function writeJsonFileAtomic(path: string, value: unknown, options: { bac
 function acquireStoreLock(path: string, options: JsonStoreOptions): () => void {
 	mkdirSync(dirname(path), { recursive: true });
 	const lockPath = `${path}.lock`;
-	const owner = `${process.pid}:${randomUUID()}`;
+	const owner = createProcessOwnerToken();
 	const timeoutMs = Math.max(1, options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
 	const staleLockMs = Math.max(timeoutMs * 2, options.staleLockMs ?? DEFAULT_STALE_LOCK_MS);
 	const deadline = Date.now() + timeoutMs;
@@ -129,8 +129,7 @@ function acquireStoreLock(path: string, options: JsonStoreOptions): () => void {
 					// 时间超时且持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
 					let owner = "";
 					try { owner = readFileSync(lockPath, "utf-8"); } catch {}
-					const pid = parseOwnerPid(owner);
-					stale = pid !== undefined && !isProcessAlive(pid);
+					stale = !isLockOwnerActive(owner);
 				}
 			} catch {}
 			if (stale) stealStaleLock(lockPath);
@@ -138,6 +137,18 @@ function acquireStoreLock(path: string, options: JsonStoreOptions): () => void {
 		}
 	}
 	throw new Error(`JSON store lock timeout: ${path}`);
+}
+
+/** 在同一存储 fence 内协调关联文件；调用方仍须使用原子写及损坏校验。 */
+export function withJsonStoreLock<R>(path: string, update: () => R, options: JsonStoreOptions = {}): R {
+	const release = acquireStoreLock(path, options);
+	try { return update(); } finally { release(); }
+}
+
+/** 长生命周期执行 fence；必须等异步操作完成才释放，仍按持有者 token 定向释放。 */
+export async function withJsonStoreLockAsync<R>(path: string, update: () => Promise<R>, options: JsonStoreOptions = {}): Promise<R> {
+	const release = acquireStoreLock(path, options);
+	try { return await update(); } finally { release(); }
 }
 
 export function updateJsonStore<T, R>(

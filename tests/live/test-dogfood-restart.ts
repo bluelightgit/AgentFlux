@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 
@@ -73,6 +73,7 @@ function tail(value: unknown, limit = 8000): string {
 
 function main(): void {
 	const options = parseOptions(process.argv.slice(2));
+	const startedAt = Date.now();
 	const iterationId = `iteration-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 	const requestedTaskId = `dogfood-task-${randomUUID()}`;
 	const requestedExecutionId = `dogfood-execution-${randomUUID()}`;
@@ -80,9 +81,7 @@ function main(): void {
 	const branch = git(["branch", "--show-current"]);
 	const changedFiles = git(["status", "--porcelain", "--untracked-files=all"])
 		.split("\n").filter(Boolean).map(line => line.length > 3 ? line.slice(3) : line);
-	const envOldPid = Number(process.env.AGENTFLUX_DOGFOOD_OLD_PID);
-	const configuredOldPid = Number.isInteger(envOldPid) && envOldPid > 0 ? envOldPid : undefined;
-	const oldPi = stopOldPi(options.oldPid ?? configuredOldPid);
+	const oldPi = stopOldPi(options.oldPid);
 	const build = spawnSync(npmCommand, npmArgs(["run", "build"]), {
 		cwd: root,
 		encoding: "utf8",
@@ -101,7 +100,6 @@ function main(): void {
 	let test: ReturnType<typeof spawnSync> | undefined;
 	let evidence: any;
 	if (buildStatus.success) {
-		rmSync(baseEvidencePath, { force: true });
 		const env: NodeJS.ProcessEnv = {
 			...process.env,
 			AGENTFLUX_LIVE_BUILT: "1",
@@ -126,7 +124,10 @@ function main(): void {
 		if ((test.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" && test.pid && process.platform === "win32") {
 			spawnSync("taskkill", ["/PID", String(test.pid), "/T", "/F"], { windowsHide: true });
 		}
-		try { evidence = JSON.parse(readFileSync(baseEvidencePath, "utf8")); } catch { evidence = undefined; }
+		try {
+			const candidate = JSON.parse(readFileSync(baseEvidencePath, "utf8"));
+			evidence = candidate.startedAt >= startedAt ? candidate : undefined;
+		} catch { evidence = undefined; }
 	}
 	const report = {
 		iterationId,
@@ -153,7 +154,7 @@ function main(): void {
 			stderrTail: tail(test?.stderr),
 		},
 		evidence,
-		passed: buildStatus.success && test?.status === 0 && evidence?.builtExtension === true && evidence?.marker === true,
+		passed: buildStatus.success && test?.status === 0 && evidence?.builtExtension === true && evidence?.marker === true && evidence?.passed === true,
 	};
 	mkdirSync(reportDir, { recursive: true });
 	const reportPath = join(reportDir, `${iterationId}.json`);

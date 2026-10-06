@@ -2,43 +2,27 @@
  * AgentFlux Extension — cache 监控
  * 文档依据: docs/06-cache-strategy, 10-pi-integration §3
  *
- * 从 sessionManager.getBranch() 累加 assistant usage (含 cacheRead/cacheWrite),
+ * 通过 Core usage adapter 累加原始 session 费用（包括未投影到 context 的费用），
  * 从 ctx.getContextUsage() 取当前 context 占用。
  */
 
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { CacheStats } from "../core/types";
 import type { PricingTable } from "../core/pricing";
-import { calcCost, lookupPrice } from "../core/pricing";
+import { UsageAccounting } from "../core/usage-accounting";
 
 export function collectCacheStats(ctx: any, pricing?: PricingTable): CacheStats {
-	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0;
-	try {
-		for (const e of ctx.sessionManager.getBranch()) {
-			if (e.type === "message" && e.message?.role === "assistant") {
-				const m = e.message as AssistantMessage;
-				const u: any = m.usage ?? {};
-				input += u.input || 0;
-				output += u.output || 0;
-				cacheRead += u.cacheRead || 0;
-				cacheWrite += u.cacheWrite || 0;
-				// F1-14: 优先本地算成本 (token×单价), 上游 cost.total 兜底
-				if (pricing && m.model) {
-					cost += calcCost(u, lookupPrice(pricing, m.model));
-				} else {
-					cost += u.cost?.total || 0;
-				}
-			}
-		}
-	} catch { /* session not ready */ }
+	const accounting = new UsageAccounting({ pricing });
+	let readable = true;
+	try { accounting.ingestEntries(ctx.sessionManager.getEntries()); } catch { readable = false; }
+	const { input, output, cacheRead, cacheWrite, cost, complete } = accounting.snapshot();
 
-	let contextTokens = 0, contextWindow = 0;
+	let contextTokens = 0, contextWindow: number | undefined;
 	let contextPercent: number | null = null;
 	try {
 		const cu = ctx.getContextUsage?.();
 		if (cu) {
 			contextTokens = cu.tokens || 0;
-			contextWindow = (cu as any).contextWindow || 0;
+			contextWindow = typeof cu.contextWindow === "number" && cu.contextWindow > 0 ? cu.contextWindow : undefined;
 			contextPercent = (cu as any).percent != null ? (cu as any).percent / 100 : null; // pi returns 0-100, normalize to 0-1
 		}
 	} catch { /* */ }
@@ -46,7 +30,7 @@ export function collectCacheStats(ctx: any, pricing?: PricingTable): CacheStats 
 	const cacheHitRate = cacheRead / (cacheRead + input + 1e-9);
 
 	return {
-		input, output, cacheRead, cacheWrite, costUsd: cost,
+		input, output, cacheRead, cacheWrite, costUsd: cost, costComplete: readable && complete,
 		contextTokens, contextWindow, contextPercent, cacheHitRate,
 	};
 }

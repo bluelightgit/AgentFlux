@@ -1,11 +1,20 @@
-import { executeDAG, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, setDagLogSink, validateTaskDAG, type TaskDAG, type TaskNode } from "../src/workflows/dag-executor";
+import { bindWorkflowInvocation, executeDAG as executeDAGCore, boundedNodeTimeout, createDAGRunId, parsePlannerTaskDAG, resolveDAGRoleModel, selectHealthyModel, setDagLogSink, validateTaskDAG, type TaskDAG, type TaskNode } from "../src/workflows/dag-executor";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { TelemetryWriter } from "../src/telemetry/events";
 import { createAgent, listAgents } from "../src/agents/agent-store";
 import { listAgentRuns } from "../src/core/run-registry";
+import { dagFingerprint } from "../src/workflows/dag-checkpoint";
+import { createWorkflowDefinition, reviseWorkflowDefinition } from "../src/workflows/workflow-registry";
 
+// 离线进程夹具有自己的物理 chat 目录，不依赖开发机真实凭据或 CLI 默认模型。
+const executeDAG: typeof executeDAGCore = (dag, options) => executeDAGCore(dag, {
+	...options,
+	modelsConfig: options.invocationOverride && Object.keys(options.modelsConfig.models ?? {}).length === 0
+		? { ...options.modelsConfig, models: { "fixture-chat": { provider: "fixture", contextWindow: 128000 } } }
+		: options.modelsConfig,
+});
 const node = (id: string, dependsOn: string[] = []): TaskNode => ({
 	id, title: id, role: "implementer", dependsOn, parallelizable: false,
 	acceptanceCriteria: [], files: [], description: id,
@@ -126,7 +135,7 @@ try {
 
 // judge 决策: indeterminate(judge 超时/解析失败) 不触发节点重试, 只重试 judge 本身
 import { judgeAction } from "../src/workflows/dag-executor";
-import { checkQualityGate, interpretQualityGateJudgeExecution } from "../src/workflows/quality-gate";
+import { checkQualityGate, interpretQualityGateJudgeExecution, qualityGateModelArgs } from "../src/workflows/quality-gate";
 import type { QualityGateResult } from "../src/workflows/quality-gate";
 
 const minimalGate = (over: Partial<QualityGateResult>): QualityGateResult => ({
@@ -145,6 +154,7 @@ const expiredQualityGate = await checkQualityGate("candidate output", ["output c
 check("quality gate honors an expired inherited absolute deadline without spawning a judge",
 	expiredQualityGate.status === "indeterminate" && expiredQualityGate.passed === false
 		&& /timed out/.test(expiredQualityGate.feedback), expiredQualityGate.feedback);
+check("quality gate forwards explicit model/provider/max instead of forcing off", JSON.stringify(qualityGateModelArgs({ model: "configured-judge", provider: "configured-provider", thinking: "max" })) === JSON.stringify(["--provider", "configured-provider", "--model", "configured-judge", "--thinking", "max"]), "max argv");
 const firstDAGRunId = createDAGRunId("execution-one", "review");
 const secondDAGRunId = createDAGRunId("execution-one", "review");
 check(
@@ -162,13 +172,13 @@ const configuredPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "f
 }, "planner");
 check("DAG planner honors role model/provider configuration", configuredPlanner.model === "configured-planner-model" && configuredPlanner.provider === "configured-provider" && configuredPlanner.thinking === "off", `${configuredPlanner.provider}/${configuredPlanner.model}`);
 const inheritedPlanner = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
-	models: { "affinity-model": { provider: "other", contextWindow: 128_000 } },
+	models: { "affinity-model": { provider: "other", contextWindow: 128_000 }, "main-selected-model": { provider: "main-selected-provider" } },
 	roles: {},
 }, "planner", { model: "main-selected-model", provider: "main-selected-provider" });
 check("DAG role without explicit model inherits Main model/provider", inheritedPlanner.model === "main-selected-model"
 	&& inheritedPlanner.provider === "main-selected-provider" && inheritedPlanner.source === "main", `${inheritedPlanner.provider}/${inheritedPlanner.model}`);
 const explicitProviderRole = resolveDAGRoleModel(resolve(process.cwd(), "tests", "fixtures", "dag-role-resolution"), {
-	models: {},
+	models: { "role-selected-model": { provider: "role-selected-provider" } },
 	roles: { planner: { model: "role-selected-model", provider: "role-selected-provider", thinking: "max" } },
 }, "planner", { model: "main-selected-model", provider: "main-selected-provider" });
 check("DAG explicit role provider wins over Main inheritance", explicitProviderRole.model === "role-selected-model"
@@ -223,7 +233,11 @@ try {
 	const fluxDir = join(resumeRoot, ".agentflux");
 	const runDir = join(fluxDir, "runtime", "runs", executionId);
 	mkdirSync(runDir, { recursive: true });
-	writeFileSync(join(runDir, "checkpoint.json"), JSON.stringify({ executionId, nodeIds: ["done"], completed: ["done"], failed: [], status: "timed_out", totalCost: 0.01, iterationCount: 1, taskResults: [], artifactPaths: {} }));
+	await executeDAG({ description: "resume", nodes: [node("done")], planningCostUsd: 0.01 }, {
+		cwd: resumeRoot, fluxDir, modelsConfig: { models: {}, roles: {} }, telemetry: new TelemetryWriter(fluxDir), prefixLayout: false,
+		sessionId: "pi-session", executionId, enableQualityGate: false, maxRetries: 0,
+		invocationOverride: { command: process.execPath, args: [resolve(process.cwd(), "tests/helpers/successful-subagent.cjs")] },
+	});
 	const parentCheckpointBefore = readFileSync(join(runDir, "checkpoint.json"), "utf-8");
 	const resumed = await executeDAG(
 		{ description: "resume", nodes: [node("done")] },
@@ -242,6 +256,7 @@ try {
 	);
 	const childCheckpoint = JSON.parse(readFileSync(join(fluxDir, "runtime", "runs", childExecutionId, "checkpoint.json"), "utf-8"));
 	check("DAG resume derives a new execution without rerunning completed nodes", resumed.status === "passed" && resumed.executionId === childExecutionId && resumed.completedNodes[0] === "done", resumed.status);
+	check("DAG resume retains cumulative cost without charging inherited work to the new attempt", resumed.totalCost === 0.01 && resumed.inheritedCostUsd === 0.01 && resumed.attemptCostUsd === 0, JSON.stringify({ total: resumed.totalCost, attempt: resumed.attemptCostUsd }));
 	check("DAG resume preserves the parent checkpoint byte-for-byte", readFileSync(join(runDir, "checkpoint.json"), "utf-8") === parentCheckpointBefore, executionId);
 	check("DAG resume records its source execution in the child checkpoint", childCheckpoint.resumedFromExecutionId === executionId, childCheckpoint.resumedFromExecutionId);
 } finally { rmSync(resumeRoot, { recursive: true, force: true }); }
@@ -282,8 +297,12 @@ try {
 	const fluxDir = join(reorderedRoot, ".agentflux");
 	const runDir = join(fluxDir, "runtime", "runs", executionId);
 	mkdirSync(runDir, { recursive: true });
-	// 相同节点集合但顺序不同 → 允许恢复（顺序无关比较）；全部节点已完成避免真实 spawn
-	writeFileSync(join(runDir, "checkpoint.json"), JSON.stringify({ executionId, nodeIds: ["impl", "plan", "review"], completed: ["plan", "impl", "review"], failed: [], status: "timed_out", totalCost: 0.01, iterationCount: 1, taskResults: [], artifactPaths: {} }));
+	// 父执行先由测试子进程产出完整证据；恢复时只改变节点排列，不允许改变节点内容。
+	await executeDAG({ description: "resume", nodes: [node("impl", ["plan"]), node("plan"), node("review", ["impl"])], planningCostUsd: 0.01 }, {
+		cwd: reorderedRoot, fluxDir, modelsConfig: { models: {}, roles: {} }, telemetry: new TelemetryWriter(fluxDir), prefixLayout: false,
+		sessionId: "pi-session", executionId, enableQualityGate: false, maxRetries: 0,
+		invocationOverride: { command: process.execPath, args: [resolve(process.cwd(), "tests/helpers/successful-subagent.cjs")] },
+	});
 	let reorderOk = false;
 	let reorderError = "";
 	try {
@@ -306,6 +325,40 @@ try {
 	check("checkpoint node set comparison is order-insensitive",
 		reorderOk, reorderError || "not resumed");
 } finally { rmSync(reorderedRoot, { recursive: true, force: true }); }
+
+const invocationRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-invocation-"));
+const previousCapture = process.env.AGENTFLUX_TEST_CAPTURE;
+try {
+	const fluxDir = join(invocationRoot, ".agentflux");
+	const definition: TaskDAG = { description: "saved reusable work A", nodes: [node("input-worker")] };
+	const before = JSON.stringify(definition);
+	const bound = bindWorkflowInvocation(definition, "EXPLICIT_INPUT_B");
+	check("Workflow input binding preserves saved DAG", JSON.stringify(definition) === before && bound.invocationTask === "EXPLICIT_INPUT_B", "copy only");
+	check("checkpoint fingerprint includes invocation input", dagFingerprint(bound) !== dagFingerprint(bindWorkflowInvocation(definition, "OTHER_INPUT_C")), "B != C");
+	const saved = createWorkflowDefinition(fluxDir, { name: "input-free-definition", dag: definition });
+	for (const action of [() => createWorkflowDefinition(fluxDir, { name: "invalid", dag: bound }), () => reviseWorkflowDefinition(fluxDir, saved.id, { dag: bound })]) {
+		let error = ""; try { action(); } catch (caught) { error = String(caught); }
+		check("saved definitions reject dynamic invocation input", /cannot contain invocationTask/.test(error), error);
+	}
+	const capture = join(invocationRoot, "argv.json"); process.env.AGENTFLUX_TEST_CAPTURE = capture;
+	const options = { cwd: invocationRoot, fluxDir, modelsConfig: { models: {}, roles: {} }, telemetry: new TelemetryWriter(fluxDir),
+		prefixLayout: false, sessionId: "pi-session", enableQualityGate: false, maxRetries: 0,
+		invocationOverride: { command: process.execPath, args: [resolve(process.cwd(), "tests/helpers/successful-subagent.cjs")] } };
+	const first = await executeDAG(bound, { ...options, executionId: "input-parent" });
+	const args = JSON.parse(readFileSync(capture, "utf8")).argv;
+	check("real child argv receives explicit Workflow input and fixed node", first.status === "passed" && args.at(-1).includes("EXPLICIT_INPUT_B") && args.at(-1).includes("input-worker"), args.at(-1));
+	const checkpoint = join(fluxDir, "runtime/runs/input-parent/checkpoint.json");
+	const checkpointBefore = readFileSync(checkpoint, "utf8");
+	let mismatch = "";
+	try { await executeDAG(bindWorkflowInvocation(definition, "OTHER_INPUT_C"), { ...options, executionId: "wrong-input", resumeFromExecutionId: "input-parent" }); }
+	catch (error) { mismatch = String(error); }
+	check("resume rejects changed execution input", /fingerprint differs/.test(mismatch) && readFileSync(checkpoint, "utf8") === checkpointBefore, mismatch);
+	const resumed = await executeDAG(bound, { ...options, executionId: "same-input", resumeFromExecutionId: "input-parent" });
+	check("resume preserves proven invocation input without rerunning nodes", resumed.status === "passed" && resumed.attemptCostUsd === 0 && listAgentRuns(fluxDir).length === 1, "original completed evidence only");
+} finally {
+	if (previousCapture === undefined) delete process.env.AGENTFLUX_TEST_CAPTURE; else process.env.AGENTFLUX_TEST_CAPTURE = previousCapture;
+	rmSync(invocationRoot, { recursive: true, force: true });
+}
 
 const unsafeExecutionRoot = mkdtempSync(join(tmpdir(), "agentflux-dag-unsafe-id-"));
 try {

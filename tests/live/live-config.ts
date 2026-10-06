@@ -1,13 +1,21 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getPiCliPath as resolvePiCliPath } from "../../src/core/pi-runtime";
+import { resolveSubagentRuntime } from "../../src/core/config";
+
+/** Test-only installed Host selection; still validates manifest/bin/SDK VERSION. */
+export function getPiCliPath(): string {
+	const packageDir = process.env.AGENTFLUX_LIVE_PI_PACKAGE_DIR;
+	return packageDir ? resolvePiCliPath({ hostPackageDir: packageDir, processEntryPath: null }) : resolvePiCliPath();
+}
 
 /**
  * Live 验证的模型/provider 配置。
  *
  * 测试场景到 profile 的映射位于 live-test-config.json。默认 local profile
- * 优先使用当前 Pi 的 PI_PROVIDER/PI_MODEL/PI_THINKING；配置文件只提供
- * 本地默认值。需要切换 provider 或角色模型时，使用 AGENTFLUX_LIVE_PROFILE
+ * 固定使用用户指定的本地模型/provider/thinking，不隐式跟随 Main 的 PI_MODEL。
+ * 需要切换 provider 或角色模型时，使用 AGENTFLUX_LIVE_PROFILE
  * 或对应的 AGENTFLUX_LIVE_* 环境变量，不修改测试代码。
  *
  * 自定义兼容 provider 可设置 AGENTFLUX_LIVE_BASE_URL、
@@ -22,6 +30,7 @@ export interface LiveConfig {
 	workerModel: string;
 	judgeModel: string;
 	thinking: string;
+	subagentRuntime: "process" | "sdk";
 	/** spawn pi 时追加的 provider/model/thinking/api-key CLI 参数 */
 	cliArgs(model: string): string[];
 	/** spawn 环境变量（自定义 provider 时注入 PI_CODING_AGENT_DIR） */
@@ -166,6 +175,7 @@ export function loadLiveConfig(testName = process.env.AGENTFLUX_LIVE_TEST?.trim(
 		workerModel,
 		judgeModel,
 		thinking,
+		subagentRuntime: resolveSubagentRuntime(env.AGENTFLUX_LIVE_RUNTIME),
 		cliArgs: (model: string): string[] => {
 			const args = ["--provider", providerId, "--model", model, "--thinking", thinking];
 			const apiKey = process.env.AGENTFLUX_LIVE_API_KEY?.trim();
@@ -176,6 +186,7 @@ export function loadLiveConfig(testName = process.env.AGENTFLUX_LIVE_TEST?.trim(
 		fluxModelsJson: () => ({
 			models: Object.fromEntries(uniqueModels(config.mainModel, config.plannerModel, config.workerModel, config.judgeModel).map(model => [model, { provider: config.providerId, contextWindow: 1_000_000 }])),
 			roles: {
+				assistant: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
 				planner: { model: config.plannerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
 				implementer: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },
 				reviewer: { model: config.workerModel, provider: config.providerId, thinking: config.thinking, tools: ["read", "grep", "find", "ls"] },

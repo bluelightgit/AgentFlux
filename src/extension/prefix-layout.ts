@@ -49,12 +49,15 @@ export function applyPrefixLayout(
 		return { payload, result: { applied: false, targetMsgIndex: histIdx, reason: "history msg has no content blocks" } };
 	}
 
+	// 原生断点/TTL 是 Host 语义；实验布局不可覆盖或删除它们。
+	if (hist.content.some((block: any) => block?.cache_control !== undefined)) {
+		return { payload, result: { applied: false, targetMsgIndex: histIdx, reason: "native cache_control preserved" } };
+	}
+
 	// 深拷贝避免污染原 payload (before_provider_request 可能共享引用)
 	const newPayload = { ...payload, messages: msgs.map((m: any, i: number) => {
 		if (i !== histIdx) return m;
 		const newContent = m.content.map((b: any) => ({ ...b }));
-		// 移除该消息上既有的 cache_control (避免重复断点), 只在最后 block 打
-		for (const b of newContent) if (b.cache_control) delete b.cache_control;
 		const lastBlock = newContent[newContent.length - 1];
 		if (lastBlock) lastBlock.cache_control = { type: "ephemeral" };
 		return { ...m, content: newContent };
@@ -62,6 +65,6 @@ export function applyPrefixLayout(
 
 	return {
 		payload: newPayload,
-		result: { applied: true, targetMsgIndex: histIdx, reason: `cache_control → msg[${histIdx}] (role=${hist.role})` },
+		result: { applied: true, targetMsgIndex: histIdx, reason: `cache_control -> msg[${histIdx}] (role=${hist.role})` },
 	};
 }

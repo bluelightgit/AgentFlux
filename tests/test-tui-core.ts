@@ -143,7 +143,7 @@ async function main(): Promise<void> {
 		menuSelections = ["reviewer-main · subagent · reviewer · idle", "Talk · continue Agent session"]; menuInputs = ["review this change"];
 		const talkCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "reviewer-main", kind: "subagent", role: "reviewer", status: "idle", callCount: 0, totalCostUsd: 0, capabilityGeneration: 1, lastMessage: "报告写好了", lastHistory: ["报告写好了，共 12 个问题。", "汇总完毕。"], sessionCommand: "npx pi --session \"x.jsonl\"", communication: "persistent_session" }], roles: ["reviewer"], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(talkCommand === "agent run reviewer-main review this change", "选择 Agent 后 Talk 生成对话命令（恢复 Talk 入口）");
-		check(notices.some(text => text.includes("最近对话") && text.includes("报告写好了") && text.includes("汇总完毕")), "Talk 输入前先展示最近几条对话内容");
+		check(notices.some(text => text.includes("recent conversation") && text.includes("报告写好了") && text.includes("汇总完毕")), "Talk 输入前先展示最近几条对话内容");
 		menuSelections = ["worker-live · subagent · tester · running", "Message · send to active Agent"]; menuInputs = ["please report status"];
 		const messageCommand = await showAgentTuiMenu(ctx, { agents: [{ name: "worker-live", kind: "subagent", role: "tester", status: "running", callCount: 1, totalCostUsd: 0, capabilityGeneration: 1, communication: "message" }], roles: [], issues: [], forkPoints: [], activeTaskIds: [] });
 		check(messageCommand === "message send worker-live please report status", "运行中的子代理可从列表发送 Message V2");
@@ -197,10 +197,11 @@ async function main(): Promise<void> {
 		const tasksAfterUsage = JSON.parse(readFileSync(join(root, ".agentflux", "runtime", "tasks.json"), "utf-8"));
 		check(tasksAfterUsage.executions.some((execution: any) => execution.usage?.input === 100 && execution.usage.costUsd === 0.0004), "执行记录持久化 Main usage（token/缓存/成本）");
 		await flux.handler("fork last", ctx);
-		check(notices.some(text => text.includes("fork success")), "TUI 从会话 entry 创建 fork");
+		check(notices.some(text => text.includes("Fork succeeded")), "TUI 从会话 entry 创建 fork");
 		for (const hook of pi.hooks.get("session_before_fork") ?? []) await hook({ targetEntryId: "entry-1" }, ctx);
-		const forkEvent = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.type === "agent.lifecycle" && event.origin === "fork");
-		check(forkEvent?.kind === "main" && forkEvent?.forkPoint === "entry-1", "Fork lineage 写入 Agent lifecycle telemetry");
+		const forkEvents = readFileSync(join(root, ".agentflux", "events.jsonl"), "utf-8").trim().split("\n").map(line => JSON.parse(line));
+		check(forkEvents.some(event => event.type === "context.event" && event.action === "fork_attempted" && event.detail.includes("entry-1"))
+			&& !forkEvents.some(event => event.type === "agent.lifecycle" && event.origin === "fork"), "before_fork 仅记录 context attempt，不制造未登记 Agent 身份");
 		await flux.handler("status", ctx);
 		check(notices.some(text => text.includes("active runs")), "TUI 状态汇总可用");
 		await flux.handler("gc dry-run", ctx);

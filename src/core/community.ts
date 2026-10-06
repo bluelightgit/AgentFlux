@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { registerActiveContext, releaseActiveContext, releaseActiveContexts } from "./active-context";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readJsonStore, updateJsonStore, writeJsonFileAtomic } from "./json-store";
+import { readJsonStore, withJsonStoreLock, writeJsonFileAtomic } from "./json-store";
+import { updateReferenceStore as updateJsonStore, withAgentReferenceFence } from "./agent-reference-fence";
+import { assertAgentReference } from "./agent-reference-target";
 
 export type IssueStatus = "open" | "triage" | "forming" | "executing" | "reviewing" | "resolved" | "blocked";
 export interface IssueComment { id: string; author: string; body: string; createdAt: string; }
 export interface IssueProposal { id: string; title: string; body: string; createdBy: string; createdAt: string; supporters: string[]; opposers: string[]; }
-export interface IssueClaim { id: string; agent: string; scope: string; status: "active" | "submitted" | "reviewed"; createdAt: string; proposalIds: string[]; plan: string; /** 与 active-context.json 中该 Claim 的具体 lease 对应。 */ leaseId?: string; }
+export interface IssueClaim { id: string; agent: string; agentId?: string; scope: string; status: "active" | "submitted" | "reviewed"; createdAt: string; proposalIds: string[]; plan: string; /** 与 active-context.json 中该 Claim 的具体 lease 对应。 */ leaseId?: string; }
 export type IssueEventType =
 	| "created" | "commented" | "claimed" | "submitted"
 	| "reviewed" | "reworked" | "resolved" | "blocked" | "unblocked"
@@ -116,9 +118,15 @@ function read(cwd: string): IssueStore {
 		throw new Error(`JSON store is corrupt and was not overwritten: ${path}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	if (isLegacyIssueArray(raw)) {
-		const store: IssueStore = { issues: migrateLegacyIssues(raw) };
-		writeJsonFileAtomic(path, store);
-		return store;
+		return withAgentReferenceFence(() => withJsonStoreLock(path, () => {
+			// 首次读之后可能已有另一个 writer 迁移或追加；持锁重新读，绝不回写旧快照。
+			const latest = readJsonStore<IssueStore | LegacyIssueRecord[]>(path, createStore,
+				(value): value is IssueStore | LegacyIssueRecord[] => isStore(value) || isLegacyIssueArray(value));
+			if (!isLegacyIssueArray(latest)) return { issues: latest.issues.map(normalizeIssue) };
+			const store: IssueStore = { issues: migrateLegacyIssues(latest) };
+			writeJsonFileAtomic(path, store);
+			return store;
+		}));
 	}
 	if (!isStore(raw)) throw new Error(`JSON store schema is invalid and was not overwritten: ${path}`);
 	raw.issues = raw.issues.map(normalizeIssue);
@@ -127,7 +135,10 @@ function read(cwd: string): IssueStore {
 function update<R>(cwd: string, action: (store: IssueStore) => R): R {
 	// 旧格式文件先经 read() 迁移并写回，updateJsonStore 才能通过 schema 校验。
 	read(cwd);
-	return updateJsonStore(pathFor(cwd), createStore, isStore, action);
+	return updateJsonStore(pathFor(cwd), createStore, isStore, store => {
+		store.issues = store.issues.map(normalizeIssue);
+		return action(store);
+	});
 }
 
 /** 终态守卫: resolved 后的 issue 不可再变更 (与 Task Registry 的不可变终态一致)。 */
@@ -161,7 +172,7 @@ export function setCommunityLimits(limits: { stallThreshold?: number; maxCostPer
 function assertRoundWithinLimits(issue: CommunityIssue): void {
 	const next = (issue.rounds ?? 0) + 1;
 	if (next > maxRounds) {
-		throw new Error(`Community stall guard: 最大轮次已超限（当前 ${issue.rounds ?? 0}/${maxRounds}），本次认领将被拒绝；请人工评估后调整 budget.max_iterations 或终止该问题`);
+		throw new Error(`Community stall guard: round limit exceeded (current ${issue.rounds ?? 0}/${maxRounds}); claim rejected. Request human review before changing budget.max_iterations or terminating the Issue`);
 	}
 }
 
@@ -169,14 +180,14 @@ function assertRoundWithinLimits(issue: CommunityIssue): void {
 function assertCostWithinLimits(issue: CommunityIssue, costUsd: number): void {
 	const next = (issue.costUsd ?? 0) + costUsd;
 	if (next > maxCostPerTask) {
-		throw new Error(`Community stall guard: 预算已超限（累计 $${(issue.costUsd ?? 0).toFixed(4)} + 本次 $${costUsd.toFixed(4)} > $${maxCostPerTask}），本次提交将被拒绝；请人工评估后调整 budget.max_cost_per_task 或终止该问题`);
+		throw new Error(`Community stall guard: budget exceeded (accumulated $${(issue.costUsd ?? 0).toFixed(4)} + submission $${costUsd.toFixed(4)} > $${maxCostPerTask}); submission rejected. Request human review before changing budget.max_cost_per_task or terminating the Issue`);
 	}
 }
 
 /** 无进展门禁：连续退回且反馈为空或与上一次相同，达到阈值后拒绝。 */
 function assertNoStall(issue: CommunityIssue): void {
 	if ((issue.stallStreak ?? 0) >= stallThreshold) {
-		throw new Error(`Community stall guard: 已连续 ${issue.stallStreak} 次退回且无新反馈（阈值 ${stallThreshold}），无进展；请人工介入评估，或 /flux issue resolve 直接解决`);
+		throw new Error(`Community stall guard: ${issue.stallStreak} consecutive rework decisions without new feedback (threshold ${stallThreshold}); no progress. Request human review or use /flux issue resolve`);
 	}
 }
 
@@ -196,7 +207,7 @@ function appendEvent(issue: CommunityIssue, type: IssueEventType, actor: string,
 export function nextActions(issue: CommunityIssue): string[] {
 	if (issue.status === "resolved") return [];
 	if ((issue.stallStreak ?? 0) >= stallThreshold) {
-		return [`停止条件已触发（连续 ${issue.stallStreak} 次退回无新反馈，阈值 ${stallThreshold}）：人工介入评估——可 /flux issue resolve <id> [reason] 直接解决，或调整 budget/community_stall_threshold 后继续`];
+		return [`Stop condition reached (${issue.stallStreak} consecutive rework decisions without new feedback, threshold ${stallThreshold}). Request human review: resolve with /flux issue resolve <id> [reason], or adjust budget/community_stall_threshold before continuing`];
 	}
 	if (issue.status === "reviewing") {
 		const pending = issue.claims.filter(claim => claim.status === "submitted");
@@ -253,7 +264,25 @@ export function proposeIssue(cwd: string, id: string, input: { title: string; bo
 export function supportProposal(cwd: string, issueId: string, proposalId: string, actor: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === issueId); if (!issue) throw new Error(`Issue not found: ${issueId}`); assertMutable(issue); const proposal = (issue.proposals ?? []).find(item => item.id === proposalId); if (!proposal) throw new Error(`Proposal not found: ${proposalId}`); if (proposal.supporters.includes(actor)) throw new Error(`Already supported by ${actor}: ${proposalId}`); if (proposal.opposers.includes(actor)) throw new Error(`${actor} already opposes this proposal: ${proposalId}`); proposal.supporters.push(actor); issue.updatedAt = new Date().toISOString(); appendEvent(issue, "supported", actor, `${proposalId} · ${proposal.title}`); return issue; }); }
 /** 反对提案：同一人不能既支持又反对；重复反对报错。 */
 export function opposeProposal(cwd: string, issueId: string, proposalId: string, actor: string): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === issueId); if (!issue) throw new Error(`Issue not found: ${issueId}`); assertMutable(issue); const proposal = (issue.proposals ?? []).find(item => item.id === proposalId); if (!proposal) throw new Error(`Proposal not found: ${proposalId}`); if (proposal.opposers.includes(actor)) throw new Error(`Already opposed by ${actor}: ${proposalId}`); if (proposal.supporters.includes(actor)) throw new Error(`${actor} already supports this proposal: ${proposalId}`); proposal.opposers.push(actor); issue.updatedAt = new Date().toISOString(); appendEvent(issue, "opposed", actor, `${proposalId} · ${proposal.title}`); return issue; }); }
-export function claimIssue(cwd: string, id: string, agent: string, scope: string, opts: { proposalIds?: string[]; plan?: string } = {}): CommunityIssue {
+export function claimIssue(cwd: string, id: string, agent: string, scope: string, opts: { proposalIds?: string[]; plan?: string; agentId?: string; ownerSessionId?: string } = {}): CommunityIssue {
+	return withAgentReferenceFence(() => claimIssueInternal(cwd, id, agent, scope, opts));
+}
+
+function claimIssueInternal(cwd: string, id: string, agent: string, scope: string, opts: NonNullable<Parameters<typeof claimIssue>[4]>): CommunityIssue {
+	const explicitId = opts.agentId !== undefined ? opts.agentId : /^agent-[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(agent) ? agent : undefined;
+	if (explicitId !== undefined) {
+		const target = assertAgentReference(cwd, explicitId, opts.ownerSessionId);
+		opts = { ...opts, agentId: target.id }; agent = target.name;
+	}
+	// F 阻止并发 Issue writer；业务拒绝在创建任何 lease 前完成。
+	const before = getIssue(cwd, id);
+	if (!before) throw new Error(`Issue not found: ${id}`);
+	assertMutable(before);
+	if (before.claims.some(claim => claim.status === "active" && claim.scope === scope)) throw new Error(`Scope already claimed: ${scope}`);
+	assertRoundWithinLimits(before); assertNoStall(before);
+	for (const proposalId of opts.proposalIds ?? []) {
+		if (!(before.proposals ?? []).some(proposal => proposal.id === proposalId)) throw new Error(`Proposal not found: ${proposalId}`);
+	}
 	const claimId = `claim-${randomUUID()}`;
 	const lease = registerActiveContext(cwd, {
 		name: `issue:${id}:${claimId}`,
@@ -275,6 +304,7 @@ export function claimIssue(cwd: string, id: string, agent: string, scope: string
 			const claim: IssueClaim = {
 				id: claimId,
 				agent,
+				agentId: opts.agentId,
 				scope,
 				status: "active",
 				createdAt: new Date().toISOString(),
@@ -290,12 +320,14 @@ export function claimIssue(cwd: string, id: string, agent: string, scope: string
 			return issue;
 		});
 	} catch (error) {
-		try { releaseActiveContext(cwd, lease.leaseId); } catch { /* 保留原始 claim 错误，后续启动/GC 可清理残留 lease */ }
+		try { releaseActiveContext(cwd, lease.leaseId); }
+		catch (cleanupError) { throw new AggregateError([error, cleanupError], `Claim failed and lease cleanup failed: ${lease.leaseId}`); }
 		throw error;
 	}
 }
 export function submitClaim(cwd: string, id: string, claimId: string, plan?: string, costUsd?: number): CommunityIssue { return update(cwd, store => { const issue = store.issues.find(item => item.id === id); if (!issue) throw new Error(`Issue not found: ${id}`); assertMutable(issue); const claim = issue.claims.find(item => item.id === claimId); if (!claim) throw new Error(`Claim not found: ${claimId}`); if (claim.status !== "active") throw new Error(`Claim is not active: ${claimId}`); if (costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0) assertCostWithinLimits(issue, costUsd); assertNoStall(issue); if (plan !== undefined) claim.plan = plan.trim(); claim.status = "submitted"; issue.status = "reviewing"; issue.costUsd = (issue.costUsd ?? 0) + (costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0 ? costUsd : 0); issue.updatedAt = new Date().toISOString(); appendEvent(issue, "submitted", claim.agent, `${claimId}${claim.plan ? ` · plan: ${claim.plan.slice(0, 120)}` : ""}`); return issue; }); }
 export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "pass" | "rework", reviewer: string, feedback = ""): CommunityIssue {
+	if (verdict !== "pass" && verdict !== "rework") throw new Error("review requires verdict pass or rework");
 	const issue = update(cwd, store => {
 		const item = store.issues.find(entry => entry.id === id);
 		if (!item) throw new Error(`Issue not found: ${id}`);
@@ -311,7 +343,7 @@ export function reviewClaim(cwd: string, id: string, claimId: string, verdict: "
 		} else {
 			const streak = nextStallStreak(item, feedback);
 			if (streak > stallThreshold) {
-				throw new Error(`Community stall guard: 本次退回将使连续无进展达 ${streak} 次（阈值 ${stallThreshold}），已拒绝；请给出新的具体反馈，或改为 pass 放行`);
+				throw new Error(`Community stall guard: this rework would reach ${streak} consecutive decisions without progress (threshold ${stallThreshold}); rejected. Provide new, specific feedback, or approve with pass if the work meets the criteria`);
 			}
 			claim.status = "active";
 			item.status = "executing";
@@ -365,7 +397,7 @@ export function resolveIssue(cwd: string, id: string, reason?: string): Communit
 	return issue;
 }
 export function formatIssue(issue: CommunityIssue): string { const stall = (issue.stallStreak ?? 0) >= stallThreshold;
-	return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `rounds ${issue.rounds ?? 0} · cost $${(issue.costUsd ?? 0).toFixed(4)} · claims ${issue.claims.length} · comments ${issue.comments.length} · proposals ${(issue.proposals ?? []).length}`, ...(issue.proposals ?? []).map(proposal => `  ${proposal.id} · ${proposal.title} · by ${proposal.createdBy} · support ${proposal.supporters.length} oppose ${proposal.opposers.length}`), ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}${claim.proposalIds?.length ? ` · proposals: ${claim.proposalIds.join(",")}` : ""}${claim.plan ? ` · plan: ${claim.plan.slice(0, 80)}` : ""}`), stall ? `⚠ 停止条件已触发：连续 ${issue.stallStreak} 次退回无新反馈（阈值 ${stallThreshold}）；请人工介入评估或 resolve` : "", issue.resolvedReason ? `resolved reason: ${issue.resolvedReason}` : "", ...(nextActions(issue).map(action => `next: ${action}`))].filter(Boolean).join("\n"); }
+	return [`${issue.id} · ${issue.status} · ${issue.title}`, issue.description, `rounds ${issue.rounds ?? 0} · cost $${(issue.costUsd ?? 0).toFixed(4)} · claims ${issue.claims.length} · comments ${issue.comments.length} · proposals ${(issue.proposals ?? []).length}`, ...(issue.proposals ?? []).map(proposal => `  ${proposal.id} · ${proposal.title} · by ${proposal.createdBy} · support ${proposal.supporters.length} oppose ${proposal.opposers.length}`), ...issue.claims.map(claim => `  ${claim.id} · ${claim.status} ${claim.agent} → ${claim.scope}${claim.proposalIds?.length ? ` · proposals: ${claim.proposalIds.join(",")}` : ""}${claim.plan ? ` · plan: ${claim.plan.slice(0, 80)}` : ""}`), stall ? `WARNING: Stop condition reached: ${issue.stallStreak} consecutive rework decisions without new feedback (threshold ${stallThreshold}); request human review or resolve` : "", issue.resolvedReason ? `resolved reason: ${issue.resolvedReason}` : "", ...(nextActions(issue).map(action => `next: ${action}`))].filter(Boolean).join("\n"); }
 export function formatIssueTimeline(issue: CommunityIssue): string {
 	const events = issue.timeline ?? [];
 	if (events.length === 0) return "(no timeline)";

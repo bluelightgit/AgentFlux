@@ -18,6 +18,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { buildChatCatalog } from "./model-catalog";
 
 // ──────────────────────────────── 类型 ────────────────────────────────
 
@@ -39,7 +40,13 @@ export interface RoleRequirement {
 
 export interface ModelEntry {
 	provider: string;
-	contextWindow: number;
+	contextWindow?: number;
+	id?: string;
+	type?: string;
+	api?: string;
+	available?: boolean;
+	virtual?: boolean;
+	requiresHostRegistration?: boolean;
 	pricing?: {
 		input: number;
 		output: number;
@@ -61,6 +68,8 @@ export interface ModelsConfig {
 interface PiModelEntry {
 	id: string;
 	name: string;
+	type?: string;
+	api?: string;
 	reasoning?: boolean;
 	contextWindow?: number;
 	maxInputTokens?: number;
@@ -87,27 +96,15 @@ interface PiModelsFile {
  */
 export function discoverPiModels(piModelsPath?: string): Record<string, ModelEntry> {
 	try {
-		const path = piModelsPath ?? join(homedir(), ".pi", "agent", "models.json");
+		const path = piModelsPath ?? join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "models.json");
 		if (!existsSync(path)) return {};
 		const raw = readFileSync(path, "utf-8");
 		const data = JSON.parse(raw) as PiModelsFile;
 		if (!data.providers) return {};
 
-		const result: Record<string, ModelEntry> = {};
-		for (const [provName, provCfg] of Object.entries(data.providers)) {
-			if (!provCfg?.models) continue;
-			for (const m of provCfg.models) {
-				// 跳过重复 (同一模型可能出现在多个 provider 下, 第一个出现为准)
-				if (result[m.id]) continue;
-				result[m.id] = {
-					provider: provName,
-					contextWindow: m.contextWindow ?? 200000,
-					// capability 不填, 由 resolveCapability 家族启发式推导
-					// pricing 不填, 由 loadPricing 的 OpenRouter/models.dev 填充
-				};
-			}
-		}
-		return result;
+		const models = Object.entries(data.providers).flatMap(([provider, config]) =>
+			Array.isArray(config?.models) ? config.models.map(model => ({ ...model, provider })) : []);
+		return buildChatCatalog(models);
 	} catch {
 		return {};
 	}
@@ -319,7 +316,7 @@ export function resolveCapability(
 	const heurCap = family ? (FAMILY_HEURISTICS[family] ?? {}) : {};
 
 	// context: 始终从 contextWindow 计算
-	const context = contextToScore(entry.contextWindow);
+	const context = contextToScore(entry.contextWindow ?? 0);
 
 	// cost_eff: 始终从 pricing 计算
 	const allPricings = Object.values(allEntries)
@@ -380,6 +377,8 @@ export function rankModels(
 ): AffinityResult[] {
 	const results: AffinityResult[] = [];
 	for (const [name, entry] of Object.entries(models)) {
+		if ((entry.type !== undefined && entry.type !== "chat") || entry.available === false || entry.virtual || entry.requiresHostRegistration) continue;
+		if (entry.id && name !== `${entry.provider}/${entry.id}`) continue; // 不让 alias 获得第二份排名
 		const capability = resolveCapability(name, entry, models);
 		const affinity = calcAffinity(capability, requirement);
 		results.push({ model: name, affinity, capability });
@@ -423,29 +422,17 @@ export function assignModel(
 				affinity: role.requirement ? calcAffinity(capability, role.requirement) : -1,
 				capability,
 				source: "model",
-				reason: `角色 ${roleName} 直接指定模型 ${role.model}`,
+				reason: `Role ${roleName} explicitly selects model ${role.model}`,
 			};
 		}
-		// model 不存在, 尝试 fallback 到 requirement
-		if (role.requirement) {
-			const ranked = rankModels(role.requirement, models);
-			if (ranked.length > 0) {
-				const best = ranked[0];
-				return {
-					...best,
-					source: "affinity",
-					reason: `角色 ${roleName} 指定模型 ${role.model} 不可用, fallback 到亲和度匹配 → ${best.model}`,
-				};
-			}
-		}
-		throw new Error(`角色 ${roleName} 指定模型 ${role.model} 不存在且无 requirement fallback`);
+		throw new Error(`Role ${roleName} explicitly requested missing or ambiguous chat model ${role.model}; select provider/model`);
 	}
 
 	// 2. 亲和度匹配
 	if (role.requirement) {
-		const modelNames = Object.keys(models);
+		const modelNames = rankModels(role.requirement, models).map(item => item.model);
 		if (modelNames.length === 0) {
-			throw new Error(`角色 ${roleName} 无可用模型 (models.json 为空)`);
+			throw new Error(`Role ${roleName} has no available model (models.json is empty)`);
 		}
 		if (modelNames.length === 1) {
 			const name = modelNames[0];
@@ -455,7 +442,7 @@ export function assignModel(
 				affinity: calcAffinity(capability, role.requirement),
 				capability,
 				source: "single",
-				reason: `角色 ${roleName} 只有一个可用模型 ${name}, 退化为同构`,
+				reason: `Role ${roleName} has only one available model: ${name}; using a homogeneous assignment`,
 			};
 		}
 		const ranked = rankModels(role.requirement, models);
@@ -463,11 +450,11 @@ export function assignModel(
 		return {
 			...best,
 			source: "affinity",
-			reason: `角色 ${roleName} 亲和度匹配: ${ranked.map(r => `${r.model}=${r.affinity.toFixed(2)}`).join(", ")}`,
+			reason: `Role ${roleName} affinity ranking: ${ranked.map(r => `${r.model}=${r.affinity.toFixed(2)}`).join(", ")}`,
 		};
 	}
 
-	throw new Error(`角色 ${roleName} 必须指定 model 或 requirement`);
+	throw new Error(`Role ${roleName} must specify a model or requirement`);
 }
 
 // ──────────────────────────────── 格式化 ────────────────────────────────
@@ -486,7 +473,7 @@ export function formatCapability(cap: ModelCapability): string {
 export function formatAffinityTable(results: AffinityResult[]): string {
 	const lines = ["Model Affinity Ranking:", ""];
 	for (const r of results) {
-		const marker = r === results[0] ? "★" : " ";
+		const marker = r === results[0] ? "*" : " ";
 		lines.push(`  ${marker} ${r.model.padEnd(20)} affinity=${r.affinity.toFixed(3)}  ${formatCapability(r.capability)}`);
 	}
 	return lines.join("\n");

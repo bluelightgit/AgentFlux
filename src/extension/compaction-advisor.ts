@@ -23,12 +23,39 @@ export interface CompactionAdvice {
 	turnCount: number;
 }
 
+export interface NativeCompactionObservation {
+	event: "session_before_compact" | "session_compact" | "session_compact_failed";
+	reason?: "manual" | "threshold" | "overflow";
+	willRetry?: boolean;
+	errorMessage?: string;
+	aborted?: boolean;
+	fromExtension?: boolean;
+}
+
+function recordNativeCompaction(
+	telemetry: TelemetryWriter | null,
+	sessionId: string,
+	observation: NativeCompactionObservation,
+	contextPercent: number | null,
+): void {
+	telemetry?.writeContextEvent({
+		sessionId,
+		turnIndex: -1,
+		action: "compaction_advice",
+		detail: `native ${JSON.stringify(observation)}`,
+		contextPercentBefore: contextPercent,
+		contextPercentAfter: null,
+	});
+}
+
 /**
  * 分析当前会话状态, 给出 compaction 建议.
  */
 export function analyzeCompaction(ctx: any): CompactionAdvice {
 	const usage = ctx.getContextUsage?.();
-	const contextPercent = usage?.percent ? usage.percent / 100 : 0;  // 归一化到 0-1
+	const rawPercent = typeof usage?.percent === "number" && Number.isFinite(usage.percent) ? usage.percent : 0;
+	const contextPercent = Math.max(0, Math.min(1, rawPercent / 100));  // 归一化到 0-1
+	const displayPercent = (contextPercent * 100).toFixed(1);
 	const branch = ctx.sessionManager?.getBranch?.() ?? [];
 
 	// 统计 toolResult 消息数
@@ -45,7 +72,7 @@ export function analyzeCompaction(ctx: any): CompactionAdvice {
 	if (contextPercent < 0.60) {
 		return {
 			action: "allow",
-			reason: `上下文占用 ${contextPercent.toFixed(1)}%, 远低于 compaction 阈值, 正常放行`,
+			reason: `Context usage ${displayPercent}%, well below the compaction threshold; allowing compaction`,
 			contextPercent, toolResultCount, turnCount,
 		};
 	}
@@ -53,7 +80,7 @@ export function analyzeCompaction(ctx: any): CompactionAdvice {
 	if (contextPercent >= 0.85) {
 		return {
 			action: "force_compact",
-			reason: `上下文占用 ${contextPercent.toFixed(1)}%, 极高, 必须 compact`,
+			reason: `Context usage ${displayPercent}%, critically high; compaction is required`,
 			contextPercent, toolResultCount, turnCount,
 		};
 	}
@@ -62,55 +89,77 @@ export function analyzeCompaction(ctx: any): CompactionAdvice {
 	if (turnCount > 15) {
 		return {
 			action: "suggest_fork",
-			reason: `上下文 ${contextPercent.toFixed(1)}%, ${turnCount} 轮对话, 建议 fork 新分支保留探索`,
+			reason: `Context usage ${displayPercent}%, ${turnCount} turns; consider forking a new branch to preserve exploration`,
 			contextPercent, toolResultCount, turnCount,
 		};
 	}
 
 	return {
 		action: "allow",
-		reason: `上下文 ${contextPercent.toFixed(1)}%, 无明显优化点, 放行 compaction`,
+		reason: `Context usage ${displayPercent}%, no clear optimization; allowing compaction`,
 		contextPercent, toolResultCount, turnCount,
 	};
 }
 
 /**
- * 注册 session_before_compact 事件处理.
+ * Observe Pi's native compaction lifecycle without replacing it.
+ * `session_before_compact` is deliberately read-only: no custom summary,
+ * cancel, retry, or second compactor is introduced here.
  */
 export function registerCompactionAdvisor(pi: ExtensionAPI, getState: () => { sessionId: string; telemetry: TelemetryWriter | null }) {
-	pi.on("session_before_compact", async (event: any, ctx: any) => {
+	const api = pi as any;
+	api.on("session_before_compact", async (event: any, ctx: any) => {
 		const { sessionId, telemetry } = getState();
 		const advice = analyzeCompaction(ctx);
+		recordNativeCompaction(telemetry, sessionId, {
+			event: "session_before_compact",
+			reason: event?.reason,
+			willRetry: event?.willRetry === true,
+		}, advice.contextPercent);
+		return undefined;
+	});
 
-		// 记录 telemetry
-		telemetry?.writeContextEvent({
-			sessionId,
-			turnIndex: -1,
-			action: "compaction_advice",
-			detail: `${advice.action}: ${advice.reason}`,
-			contextPercentBefore: advice.contextPercent,
-			contextPercentAfter: null,
-		});
+	// Success is also native fact; record the same reason/willRetry pair while
+	// leaving the compaction entry and usage untouched.
+	api.on("session_compact", async (event: any, ctx: any) => {
+		const { sessionId, telemetry } = getState();
+		const usage = ctx?.getContextUsage?.();
+		const percent = typeof usage?.percent === "number" ? Math.max(0, Math.min(1, usage.percent / 100)) : null;
+		recordNativeCompaction(telemetry, sessionId, {
+			event: "session_compact",
+			reason: event?.reason,
+			willRetry: event?.willRetry === true,
+		}, percent);
+		return undefined;
+	});
 
-		// 诊断信息已写入 telemetry（见上）, 不向 stderr 输出（TUI 模式下会干扰输入区）
-
-		// 当前阶段: 只建议不拦截
-		// Phase 3: 根据 advice.action 返回值拦截或修改 compaction 行为
+	api.on("session_compact_failed", async (event: any, ctx: any) => {
+		const { sessionId, telemetry } = getState();
+		const usage = ctx?.getContextUsage?.();
+		const percent = typeof usage?.percent === "number" ? Math.max(0, Math.min(1, usage.percent / 100)) : null;
+		recordNativeCompaction(telemetry, sessionId, {
+			event: "session_compact_failed",
+			reason: event?.reason,
+			willRetry: event?.willRetry === true,
+			errorMessage: typeof event?.errorMessage === "string" ? event.errorMessage.slice(0, 500) : undefined,
+			aborted: event?.aborted === true,
+			fromExtension: event?.fromExtension === true,
+		}, percent);
 		return undefined;
 	});
 }
 
 /** Format compaction advice as readable text (for /flux command) */
 export function formatCompactionAdvice(advice: CompactionAdvice): string {
-	const icons = {
-		allow: "✓",
-		suggest_fork: "⎇",
-		suggest_handoff: "⇄",
-		force_compact: "!",
+	const markers = {
+		allow: "[allow]",
+		suggest_fork: "[fork]",
+		suggest_handoff: "[handoff]",
+		force_compact: "[compact]",
 	};
 	return [
 		`Compaction Advice (B-dimension adaptive):`,
-		`  ${icons[advice.action]} action  ${advice.action}`,
+		`  ${markers[advice.action]} action  ${advice.action}`,
 		`    reason  ${advice.reason}`,
 		`    ctx     ${(advice.contextPercent * 100).toFixed(1)}%`,
 		`    tools   ${advice.toolResultCount} toolResult`,

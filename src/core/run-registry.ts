@@ -1,11 +1,17 @@
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { readJsonStore, updateJsonStore } from "./json-store";
+import { updateReferenceStore, withAgentReferenceFence } from "./agent-reference-fence";
+import { assertAgentReference } from "./agent-reference-target";
 import { assertSafeOpaqueId } from "./safe-path";
-import { isProcessAlive } from "./fs-lock";
+import { isProcessInstanceActive } from "./fs-lock";
+import { getProcessIdentity, isProcessIdentity, type ProcessIdentity } from "./process-identity";
 import { readActiveContext } from "./active-context";
 import { getTask, getTaskExecution, updateTaskStatus } from "./task-registry";
 import type { AgentRunHealth } from "./run-health";
+import type { PiRuntimeProvenance } from "./pi-runtime";
+import { isSdkRunOwner, isSdkRunOwnerActive, type SdkRunOwner } from "./runtime-owner";
 export type { AgentRunHealth } from "./run-health";
 
 export type AgentRunStatus =
@@ -30,6 +36,7 @@ export type AgentRunPhase =
 	| (string & {});
 
 export interface AgentRunEvent {
+	processIdentity?: ProcessIdentity;
 	at: string;
 	type: string;
 	phase: AgentRunPhase;
@@ -42,13 +49,26 @@ export interface AgentRunRecord {
 	executionId?: string;
 	sessionId: string;
 	agent: string;
+	/** 本次子 Pi 的 Host/CLI 可证明身份，不包含凭据。 */
+	invocation?: PiRuntimeProvenance;
+	responseModel?: string;
+	thinkingLevel?: string;
+	costAccounting?: { complete: boolean; attributionComplete: boolean; provisional: boolean };
+	/** 注册实例的稳定身份；ephemeral/逻辑 actor 无此字段。 */
+	agentId?: string;
 	role: string;
 	currentTask: string;
 	model?: string;
 	provider?: string;
 	kind: "ephemeral" | "persistent";
+	/** Missing in old records means process; immutable for this Run. */
+	backend?: "process" | "sdk";
+	sdkOwner?: SdkRunOwner;
+	sdkSessionId?: string;
 	status: AgentRunStatus;
 	pid?: number;
+	/** Last observed physical process birth; retained after terminalization. */
+	processIdentity?: ProcessIdentity;
 	attempt: number;
 	/** 累计 assistant 回合数（跨 retry attempt）。 */
 	turns: number;
@@ -108,6 +128,9 @@ export interface AgentRunParentBudget {
 
 export interface AgentRunSnapshot {
 	phase: AgentRunPhase;
+	responseModel?: string;
+	thinkingLevel?: string;
+	costAccounting?: { complete: boolean; attributionComplete: boolean; provisional: boolean };
 	turns: number;
 	input: number;
 	output: number;
@@ -178,8 +201,17 @@ const isStatus = (value: unknown): value is AgentRunStatus =>
 	value === "starting" || value === "running" || value === "stop_requested"
 	|| value === "completed" || value === "failed" || value === "cancelled" || value === "timed_out";
 const isHealth = (value: unknown): value is AgentRunHealth =>
-	value === "healthy" || value === "waiting_provider" || value === "waiting_tool"
+	value === "healthy" || value === "waiting_provider" || value === "waiting_tool" || value === "waiting_user"
 	|| value === "quiet" || value === "suspected_stall" || value === "suspected_loop" || value === "context_pressure";
+const isCostAccounting = (value: any): boolean => value === undefined || (!!value && typeof value.complete === "boolean" && typeof value.attributionComplete === "boolean" && typeof value.provisional === "boolean");
+const isInvocation = (value: any): boolean => value === undefined || (!!value && typeof value.sameVersion === "boolean" && (
+	value.kind === "test-override" ? value.sameVersion === false && value.override?.verified === false
+		: value.kind === "node-package" && value.sameVersion === true && typeof value.host?.version === "string" && value.host.version === value.cli?.version && typeof value.cli.cliPath === "string"
+			&& (value.host.selectionSource === undefined || ["sdk-module", "validated-cli-entry"].includes(value.host.selectionSource))
+			&& (value.host.sdkVersion === undefined || value.host.sdkVersion === value.host.version)
+			&& (value.host.sdkPackageDir === undefined || (typeof value.host.sdkPackageDir === "string" && value.host.sdkPackageDir.length > 0))
+			&& (value.host.selectionSource !== "validated-cli-entry" || (typeof value.host.processEntryPath === "string" && value.host.processEntryPath.length > 0))
+));
 const isNonNegativeFiniteOrMissing = (value: unknown): boolean =>
 	value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
 const isRunShape = (value: unknown): value is AgentRunRecord => {
@@ -189,10 +221,18 @@ const isRunShape = (value: unknown): value is AgentRunRecord => {
 		|| typeof run.agent !== "string" || typeof run.role !== "string"
 		|| typeof run.currentTask !== "string" || !isStatus(run.status)
 		|| (run.kind !== "ephemeral" && run.kind !== "persistent")) return false;
+	if (run.backend !== undefined && run.backend !== "process" && run.backend !== "sdk") return false;
+	if (run.backend === "sdk" && (!isSdkRunOwner(run.sdkOwner) || run.sdkOwner.runId !== run.id || run.pid !== undefined || run.processIdentity !== undefined)) return false;
+	if (run.backend !== "sdk" && (run.sdkOwner !== undefined || run.sdkSessionId !== undefined)) return false;
+	if (run.sdkSessionId !== undefined && (typeof run.sdkSessionId !== "string" || !run.sdkSessionId)) return false;
 	if (!USAGE_FIELDS.every(field => isNonNegativeFiniteOrMissing(run[field]))) return false;
 	if (!isNonNegativeFiniteOrMissing(run.attempt)) return false;
 	if (run.pid !== undefined && !(typeof run.pid === "number" && Number.isInteger(run.pid) && run.pid > 0)) return false;
+	if (run.processIdentity !== undefined && (!isProcessIdentity(run.processIdentity)
+		|| (run.pid !== undefined && run.processIdentity.pid !== run.pid))) return false;
 	if (run.health !== undefined && !isHealth(run.health)) return false;
+	if (!isCostAccounting(run.costAccounting) || !isInvocation(run.invocation)) return false;
+	if ([run.responseModel, run.thinkingLevel].some(value => value !== undefined && typeof value !== "string")) return false;
 	if (run.recentEvents !== undefined && (!Array.isArray(run.recentEvents) || run.recentEvents.some(event => !event || typeof event !== "object" || typeof (event as any).at !== "string" || typeof (event as any).type !== "string" || typeof (event as any).phase !== "string" || typeof (event as any).summary !== "string"))) return false;
 	for (const field of ["modelError", "providerError", "error", "healthReason", "lastProgressType", "lastProgressSummary", "repeatActionSignature"] as const) {
 		if (run[field] !== undefined && typeof run[field] !== "string") return false;
@@ -348,6 +388,9 @@ function assertUsageSnapshot(snapshot: AgentRunSnapshot): void {
 	assertOptionalText(snapshot.lastActivityType, "lastActivityType", 100);
 	assertOptionalText(snapshot.lastActivitySummary, "lastActivitySummary");
 	assertOptionalText(snapshot.modelError, "modelError");
+	assertOptionalText(snapshot.responseModel, "responseModel", 300);
+	assertOptionalText(snapshot.thinkingLevel, "thinkingLevel", 100);
+	if (!isCostAccounting(snapshot.costAccounting)) throw new Error("Invalid Run cost accounting coverage");
 	assertOptionalText(snapshot.providerError, "providerError");
 	if (snapshot.health !== undefined && !isHealth(snapshot.health)) throw new Error(`Run Registry health is invalid: ${snapshot.health}`);
 	assertOptionalText(snapshot.healthReason, "healthReason");
@@ -398,9 +441,17 @@ function applyAbsoluteSnapshot(run: AgentRunRecord, snapshot: AgentRunSnapshot, 
 	run.phase = snapshot.phase;
 	for (const field of USAGE_FIELDS) run[field] = snapshot[field];
 	if (snapshot.attempt !== undefined) run.attempt = snapshot.attempt;
-	if (snapshot.pid !== undefined) run.pid = snapshot.pid === null ? undefined : snapshot.pid;
+	if (snapshot.pid !== undefined) {
+		if (snapshot.pid !== null && snapshot.pid !== run.pid) {
+			throw new Error("Run process binding must use markAgentRunRunning");
+		}
+		run.pid = snapshot.pid === null ? undefined : snapshot.pid;
+	}
 	if (snapshot.model !== undefined) run.model = snapshot.model === null ? undefined : snapshot.model;
 	if (snapshot.provider !== undefined) run.provider = snapshot.provider === null ? undefined : snapshot.provider;
+	if (snapshot.responseModel !== undefined) run.responseModel = snapshot.responseModel;
+	if (snapshot.thinkingLevel !== undefined) run.thinkingLevel = snapshot.thinkingLevel;
+	if (snapshot.costAccounting !== undefined) run.costAccounting = { ...snapshot.costAccounting };
 	if (snapshot.lastActivityAt !== undefined) run.lastActivityAt = snapshot.lastActivityAt;
 	if (snapshot.lastActivityType !== undefined) run.lastActivityType = snapshot.lastActivityType ?? "";
 	if (snapshot.lastActivitySummary !== undefined) run.lastActivitySummary = snapshot.lastActivitySummary ?? "";
@@ -457,10 +508,17 @@ export function registerAgentRun(
 	limits: AgentRunRegistrationLimits = {},
 ): AgentRunRecord {
 	const id = assertSafeOpaqueId(input.id, "runId");
+	if (!isInvocation(input.invocation)) throw new Error("Invalid Run invocation provenance");
+	if (input.backend !== undefined && input.backend !== "process" && input.backend !== "sdk") throw new Error("Invalid Run backend");
+	if (input.backend === "sdk" ? !isSdkRunOwner(input.sdkOwner) || input.sdkOwner.runId !== id || input.pid !== undefined || input.processIdentity !== undefined : input.sdkOwner !== undefined) throw new Error("Invalid Run logical owner");
 	if (input.taskId) assertSafeOpaqueId(input.taskId, "taskId");
 	if (input.executionId) assertSafeOpaqueId(input.executionId, "executionId");
 	if (input.deadlineAt !== undefined) assertTimestamp(input.deadlineAt, "deadlineAt");
-	return updateJsonStore(registryPath(fluxDir), createStore, isStore, store => {
+	return updateReferenceStore(registryPath(fluxDir), createStore, isStore, store => {
+		if (input.agentId !== undefined) {
+			const target = assertAgentReference(dirname(fluxDir), input.agentId, input.sessionId);
+			if (input.agent !== target.name) throw new Error(`Registered Agent name does not match id: ${input.agentId}`);
+		}
 		if (store.runs.some(run => run.id === id)) throw new Error(`Agent run already exists: ${id}`);
 		if ((input.taskId || input.executionId) && store.recoveryFences?.some(fence =>
 			(input.taskId !== undefined && fence.taskId === input.taskId)
@@ -534,16 +592,26 @@ export function markAgentRunRunning(
 	runId: string,
 	pid: number,
 	attempt: number,
-	metadata: { model?: string | null; provider?: string | null } = {},
+	metadata: { model?: string | null; provider?: string | null; processIdentity?: ProcessIdentity } = {},
 ): AgentRunRecord {
 	assertAttempt(attempt);
 	if (!Number.isInteger(pid) || pid <= 0) throw new Error("Run Registry pid must be a positive integer");
+	const identity = Object.hasOwn(metadata, "processIdentity") ? metadata.processIdentity : getProcessIdentity(pid);
+	if (identity !== undefined && (!isProcessIdentity(identity) || identity.pid !== pid)) {
+		throw new Error("Run Registry process identity does not match pid");
+	}
 	return updateRun(fluxDir, runId, (run, now) => {
 		if (TERMINAL.has(run.status)) throw new Error(`Historical Agent run is immutable: ${runId} is ${run.status}`);
 		ensureMutableRunDefaults(run);
+		if (run.backend === "sdk") throw new Error("SDK Run must not bind a child process PID");
 		if (attempt < run.attempt) throw new Error(`Run Registry attempt cannot move backwards (${attempt} < ${run.attempt})`);
+		if (attempt === run.attempt && (run.pid !== pid
+			|| !isDeepStrictEqual(run.processIdentity, identity))) {
+			throw new Error("Run process identity is immutable within an attempt");
+		}
 		run.status = "running";
 		run.pid = pid;
+		run.processIdentity = identity;
 		run.attempt = attempt;
 		run.phase = "running";
 		run.health = "healthy";
@@ -554,10 +622,49 @@ export function markAgentRunRunning(
 		run.lastActivityAt = now;
 		run.lastActivityType = "process_started";
 		run.lastActivitySummary = `child process started (pid ${pid}, attempt ${attempt})`;
-		appendRecentRunEvent(run, { at: now, type: "process_started", phase: "running", summary: run.lastActivitySummary });
+		appendRecentRunEvent(run, { at: now, type: "process_started", phase: "running", summary: run.lastActivitySummary, processIdentity: identity });
+		if (!identity) appendRecentRunEvent(run, { at: now, type: "process_identity_unverified", phase: "running",
+			summary: "Process birth identity unavailable; destructive recovery and termination are restricted" });
 		if (metadata.model !== undefined) run.model = metadata.model === null ? undefined : metadata.model;
 		if (metadata.provider !== undefined) run.provider = metadata.provider === null ? undefined : metadata.provider;
 		run.heartbeatAt = now;
+	});
+}
+
+export function markSdkAgentRunRunning(fluxDir: string, runId: string, owner: SdkRunOwner, sdkSessionId: string, attempt: number, metadata: { model?: string | null; provider?: string | null } = {}): AgentRunRecord {
+	assertAttempt(attempt);
+	assertSafeOpaqueId(sdkSessionId, "SDK sessionId");
+	return updateRun(fluxDir, runId, (run, now) => {
+		if (TERMINAL.has(run.status)) throw new Error(`Historical Agent run is immutable: ${runId} is ${run.status}`);
+		if (run.backend !== "sdk" || !isDeepStrictEqual(run.sdkOwner, owner)) throw new Error("SDK owner fence does not match this Run");
+		if (attempt < run.attempt || (attempt === run.attempt && run.sdkSessionId !== sdkSessionId)) throw new Error("SDK session binding is immutable within an attempt");
+		run.status = "running";
+		run.attempt = attempt;
+		run.sdkSessionId = sdkSessionId;
+		run.phase = "running";
+		run.health = "healthy";
+		run.lastProgressAt = run.lastActivityAt = run.heartbeatAt = now;
+		run.lastProgressType = run.lastActivityType = "sdk_session_started";
+		run.lastProgressSummary = run.lastActivitySummary = `SDK session started (${sdkSessionId}, attempt ${attempt})`;
+		if (metadata.model !== undefined) run.model = metadata.model ?? undefined;
+		if (metadata.provider !== undefined) run.provider = metadata.provider ?? undefined;
+		appendRecentRunEvent(run, { at: now, type: "sdk_session_started", phase: "running", summary: run.lastActivitySummary });
+	});
+}
+
+/** Attach asynchronous birth evidence only to the same still-active attempt. */
+export function bindAgentRunProcessIdentity(fluxDir: string, runId: string, attempt: number, identity: ProcessIdentity): AgentRunRecord {
+	if (!isProcessIdentity(identity)) throw new Error("Invalid Run process birth identity");
+	return updateRun(fluxDir, runId, (run, now) => {
+		if (!ACTIVE.has(run.status) || run.attempt !== attempt || run.pid !== identity.pid) {
+			throw new Error("Process birth observation belongs to another or terminal Run attempt");
+		}
+		if (run.processIdentity && !isDeepStrictEqual(run.processIdentity, identity)) {
+			throw new Error("Run process identity is immutable within an attempt");
+		}
+		run.processIdentity = structuredClone(identity);
+		appendRecentRunEvent(run, { at: now, type: "process_identity_verified", phase: run.phase,
+			summary: `process birth verified (pid ${identity.pid}, attempt ${attempt})`, processIdentity: identity });
 	});
 }
 
@@ -754,7 +861,7 @@ export function finishAgentRun(
 	runId: string,
 	input: FinishAgentRunInput,
 ): AgentRunRecord {
-	return updateRun(fluxDir, runId, (run, now, store) => {
+	return withAgentReferenceFence(() => updateRun(fluxDir, runId, (run, now, store) => {
 		if (TERMINAL.has(run.status)) {
 			throw new Error(`Historical Agent run is immutable: ${runId} is ${run.status}`);
 		}
@@ -786,7 +893,7 @@ export function finishAgentRun(
 		run.finishedAt = now;
 		run.heartbeatAt = now;
 		run.pid = undefined;
-	});
+	}));
 }
 
 export function listAgentRuns(fluxDir: string, filter: { taskId?: string; agent?: string; activeOnly?: boolean } = {}): AgentRunRecord[] {
@@ -865,11 +972,11 @@ function isLiveRecoveryOwner(fluxDir: string, taskId: string, executionId: strin
 	} catch {
 		return true;
 	}
-	if (!execution || execution.taskId !== taskId) return true;
-	if (typeof execution.ownerPid === "number" && isProcessAlive(execution.ownerPid)) return true;
+	if (!execution || execution.taskId !== taskId || typeof execution.ownerPid !== "number") return true;
+	if (isProcessInstanceActive(execution.ownerPid, execution.ownerIdentity)) return true;
 	try {
 		return readActiveContext(dirname(fluxDir)).entries.some(entry =>
-			(entry.scope === executionId || entry.scope === taskId) && isProcessAlive(entry.pid));
+			(entry.scope === executionId || entry.scope === taskId));
 	} catch {
 		return true;
 	}
@@ -958,6 +1065,10 @@ export function reconcileStaleAgentRuns(
 	fluxDir: string,
 	options: { now?: Date; staleAfterMs?: number } = {},
 ): AgentRunRecord[] {
+	return withAgentReferenceFence(() => reconcileStaleAgentRunsInternal(fluxDir, options));
+}
+
+function reconcileStaleAgentRunsInternal(fluxDir: string, options: { now?: Date; staleAfterMs?: number }): AgentRunRecord[] {
 	const nowDate = options.now ?? new Date();
 	const nowMs = nowDate.getTime();
 	const staleAfterMs = options.staleAfterMs ?? 30_000;
@@ -980,8 +1091,11 @@ export function reconcileStaleAgentRuns(
 			}
 			const heartbeatMs = Date.parse(run.heartbeatAt);
 			if (Number.isFinite(heartbeatMs) && nowMs - heartbeatMs <= staleAfterMs) continue;
-			// 心跳超时但进程仍存活：可能是长操作或心跳写失败，不能误标为残留。
-			if (typeof run.pid === "number" && isProcessAlive(run.pid)) continue;
+			// Missing SDK handle/heartbeat is not death evidence. A matching drain
+			// fence or proven Host exit is required; process Runs still require PID.
+			if (run.backend === "sdk") {
+				if (!run.sdkOwner || isSdkRunOwnerActive(dirname(fluxDir), run.sdkOwner)) continue;
+			} else if (typeof run.pid !== "number" || isProcessInstanceActive(run.pid, run.processIdentity)) continue;
 			const timestamp = nowDate.toISOString();
 			run.status = "failed";
 			run.phase = "terminal";

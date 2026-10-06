@@ -177,7 +177,8 @@ async function main() {
 		check("identity-bound runtime fixes sender and run correlation",
 			runtimeSend.envelope.from === "runtime-sender"
 				&& runtimeSend.envelope.senderInstanceId === "runtime-sender:run-1"
-				&& runtimeSend.envelope.correlationId === "run-1",
+				&& runtimeSend.envelope.senderRunId === "run-1"
+				&& runtimeSend.envelope.correlationId === undefined,
 			`${runtimeSend.envelope.from}/${runtimeSend.envelope.senderInstanceId}`);
 		let deniedTarget = "";
 		try { runtime.execute({ action: "send", target: "worker-b", content: "must be denied" }); }
@@ -290,6 +291,14 @@ async function main() {
 		bus.sendDirect("runner-contract", "planner", "handoff", "completed", {
 			correlationId: "contract-complete", senderInstanceId: "runner-contract:contract-complete",
 		});
+		const legacyPath = join(fluxDir, "shared", "messages", "msg-preserved-legacy.json");
+		const legacyBytes = JSON.stringify({ id: "msg-preserved-legacy", from: "planner", to: "runner-contract", type: "handoff", content: "LEGACY_DIRECT_MUST_NOT_INJECT", timestamp: new Date().toISOString(), read: false });
+		writeFileSync(legacyPath, legacyBytes);
+		const legacyGroup = board.createGroup("legacy-fixture", ["planner", "runner-contract"], "team", "planner");
+		const legacyGroupPath = join(fluxDir, "shared", "groups", legacyGroup.id, "messages.jsonl");
+		const legacyGroupBytes = JSON.stringify({ id: "gm-preserved", groupId: legacyGroup.id, from: "planner", content: "LEGACY_GROUP_MUST_NOT_INJECT", timestamp: new Date().toISOString() }) + "\n";
+		writeFileSync(legacyGroupPath, legacyGroupBytes);
+		const v2Only = bus.sendDirect("planner", "runner-contract", "handoff", "V2_STARTUP_DELIVERY", { correlationId: "contract-complete" });
 		const capturePath = join(root, "subagent-runtime-capture.json");
 		process.env.AGENTFLUX_TEST_CAPTURE = capturePath;
 		let completedContract: AgentRunResult;
@@ -306,6 +315,11 @@ async function main() {
 			completedContract.exitCode === 0 && completedContract.communication?.passed === true,
 			`exit=${completedContract.exitCode} sent=${completedContract.communication?.sentTo}`);
 		const capture = JSON.parse(readFileSync(capturePath, "utf-8"));
+		check("runner consumes only V2 and does not inject or mutate preserved V1 history",
+			capture.argv.at(-1).includes("V2_STARTUP_DELIVERY") && !capture.argv.at(-1).includes("LEGACY_DIRECT_MUST_NOT_INJECT")
+			&& !capture.argv.at(-1).includes("LEGACY_GROUP_MUST_NOT_INJECT") && readFileSync(legacyPath, "utf8") === legacyBytes
+			&& readFileSync(legacyGroupPath, "utf8") === legacyGroupBytes
+			&& bus.getDelivery(v2Only.envelope.id, "runner-contract")?.status === "acknowledged", "V2-only startup/ACK and immutable V1 bytes");
 		const toolsIndex = capture.argv.indexOf("--tools");
 		check("subagent invocation activates identity tool and injects immutable runtime identity",
 			toolsIndex >= 0 && capture.argv[toolsIndex + 1].split(",").includes("flux_agent_message")
@@ -331,8 +345,16 @@ async function main() {
 
 			// V1 消息/群组单文件损坏容忍：聚合读取跳过损坏项，GC 不被阻塞
 			const v1Board = new SharedBoard(corruptFluxDir);
-			v1Board.sendMessage("planner", "worker-a", "handoff", "intact v1 message");
 			const v1Dir = join(corruptFluxDir, "shared", "messages");
+			const legacyFile = join(v1Dir, "intact-v1.json");
+			const preserved = JSON.stringify({ id: "old-v1", from: "planner", to: "worker-a", content: "intact v1 message", timestamp: "2026-01-01", read: false });
+			writeFileSync(legacyFile, preserved);
+			let retiredWrites = 0;
+			for (const action of [() => v1Board.sendMessage("planner", "worker-a", "handoff", "new V1 write"),
+				() => v1Board.sendGroupMessage("planner", "retired", "new V1 group"), () => v1Board.markMessageRead("old-v1")]) {
+				try { action(); } catch (error) { if (/Legacy message writes are disabled/.test(String(error))) retiredWrites++; }
+			}
+			check("retired V1 writers fail explicitly and preserve history bytes", retiredWrites === 3 && readFileSync(legacyFile, "utf8") === preserved, `${retiredWrites}/3 rejected`);
 			writeFileSync(join(v1Dir, "corrupt-broken.json"), "{ not json", "utf-8");
 			const v1Messages = v1Board.listMessages();
 			check("corrupt V1 message file is skipped by listMessages (GC not blocked)",

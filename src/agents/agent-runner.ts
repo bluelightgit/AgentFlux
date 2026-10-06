@@ -1,28 +1,20 @@
 /**
- * AgentFlux Extension — subagent runner (F1-7)
- * 统一执行一次性与持久 Agent，并负责并行、预算、权限和进程生命周期。
- *
- * 增量价值 (docs 反思 4b174b47): 不重写 subagent 原语, 而是确保:
- *   1. 子进程加载 subagent-entry.ts (精简入口) → 前缀布局自动应用, 但不注册 tool/command
- *      (完整 entry.ts 会改变 LLM 工具列表, 导致行为差异, 实验 C 暴露)
- *   2. 统一 system prompt 前缀 → 主+子共享 L1, 跨调用命中 (docs/06)
- *   3. subagent.run telemetry → cacheRead/cost 可观测, 支撑成本对比验证
- *
- * 对比 naive subagent (pi examples/extensions/subagent, 无前缀布局):
- *   - naive: 子进程无 AgentFlux 扩展, 历史不打 cache_control, 多轮 L2 不缓存
- *   - AgentFlux: 子进程加载 subagent-entry.ts, 前缀布局让 L2 命中, cache 监控可观测
- *   - 两者 LLM 工具列表完全一致 (都是内置工具), 行为可公平对比
+ * 统一的一次性/持久 Agent 执行入口。
+ * Pi 提供模型、原生会话、工具与缓存；Core 负责权限、预算、消息和真实进程事实。
+ * 子入口始终加载安全/Message V2/settle hooks，与可选缓存布局独立。
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import type { PricingTable } from "../core/pricing";
-import { calcCost, lookupPrice } from "../core/pricing";
+import { UsageAccounting } from "../core/usage-accounting";
+import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
+import { resolveSessionFileById } from "./agent-session-fork";
+import { observeProcessAsync, type ProcessIdentity } from "../core/process-identity";
 import { parseFrontmatter } from "./templates";
 import type { TelemetryWriter } from "../telemetry/events";
 import type { ModelEntry, RoleRequirement } from "../core/model-capability";
@@ -44,6 +36,8 @@ import {
 	finishAgentRun,
 	heartbeatAgentRun,
 	markAgentRunRunning,
+	markSdkAgentRunRunning,
+	bindAgentRunProcessIdentity,
 	markAgentRunStopRequested,
 	registerAgentRun,
 	listAgentRuns,
@@ -56,6 +50,14 @@ import {
 import { normalizeOptionalDurationMs, remainingDuration } from "../core/deadline";
 import { getTaskExecution } from "../core/task-registry";
 import { assessRunHealth, DEFAULT_RUN_HEALTH_CONFIG, shouldEmitHealthWarning, type AgentRunHealth, type RunHealthConfig } from "../core/run-health";
+import { ensureCapabilityForkSession } from "./agent-session-fork";
+import { loadConfig, loadSubagentRuntime } from "../core/config";
+import { getPiSdkHost, requirePiSdkHost, type PiSdkHostBinding } from "../core/pi-sdk";
+import { activateSdkRunOwner, createSdkRunOwner, retireSdkRunOwner, type SdkRunOwner } from "../core/runtime-owner";
+import { registerActiveContext, releaseActiveContext, readActiveContext } from "../core/active-context";
+import { createSdkRunDriver, type SdkRunDriver } from "./sdk-run-driver";
+import { resolvePiInvocation, type PiInvocationDescriptor, type PiInvocationOverride } from "../core/pi-runtime";
+import { IncrementalJsonlParser, usageCountersFromJson, type JsonlStreamIssue } from "../core/jsonl-stream";
 
 // ──────────────────────────────── Parallel Agents ────────────────────────────────
 
@@ -171,7 +173,12 @@ export async function runAgentsParallel(
 		health?: RunHealthConfig;
 		taskId?: string;                   // 父任务关联；每个并行 child 共享 taskId
 		executionId?: string;              // 父 execution 关联
-		invocationOverride?: { command: string; args: string[] };
+		requireBoundaryReceipt?: boolean;
+		onEvent?: (event: unknown, context: AgentRunnerJsonEventContext) => void;
+		onJsonEvent?: (event: unknown, context: AgentRunnerJsonEventContext) => void;
+		onEntry?: (entry: unknown, context: AgentRunnerJsonEventContext) => void;
+		onProtocolIssue?: (issue: JsonlStreamIssue) => void;
+		invocationOverride?: PiInvocationOverride;
 	},
 ): Promise<ParallelRunResult> {
 	const wallStart = Date.now();
@@ -270,6 +277,11 @@ export async function runAgentsParallel(
 				parentMaxParallel: common.parentMaxParallel ?? common.maxParallel,
 				taskId: common.taskId,
 				executionId: common.executionId,
+				requireBoundaryReceipt: common.requireBoundaryReceipt,
+				onEvent: common.onEvent,
+				onJsonEvent: common.onJsonEvent,
+				onEntry: common.onEntry,
+				onProtocolIssue: common.onProtocolIssue,
 				runId: runIds[i],
 				liveTeamCommunication: true,
 				invocationOverride: common.invocationOverride,
@@ -363,8 +375,58 @@ export interface AgentTemplate {
 	communication?: CommunicationPolicyInput; // 角色模板默认；运行实例可收窄或增加完成门
 }
 
+export interface AgentRunnerJsonEventContext {
+	sequence: number;
+	raw: string;
+}
+
+export interface AgentBoundaryReceiptDetails {
+	schemaVersion: 1;
+	generation: number;
+	outcome: "completed" | "aborted" | "error";
+	terminalFailure: boolean;
+	terminalFailureOutcome?: "aborted" | "error";
+	consumed: boolean;
+	consumedGeneration?: number;
+	consumedMessageIds: string[];
+	settled: false;
+	continueRequested: boolean;
+}
+
+export const AGENTFLUX_BOUNDARY_RECEIPT_CUSTOM_TYPE = "agentflux.boundary.receipt";
+
+/** Validate the fixed custom entry emitted by the safe subagent boundary hook. */
+export function readAgentBoundaryReceipt(value: unknown): AgentBoundaryReceiptDetails | null {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const entry = value as Record<string, unknown>;
+	if (entry.customType !== AGENTFLUX_BOUNDARY_RECEIPT_CUSTOM_TYPE) return null;
+	const details = entry.data !== null && typeof entry.data === "object" && !Array.isArray(entry.data)
+		? entry.data as Record<string, unknown>
+		: entry.details !== null && typeof entry.details === "object" && !Array.isArray(entry.details)
+			? entry.details as Record<string, unknown> : undefined;
+	if (!details || details.schemaVersion !== 1 || !Number.isInteger(details.generation) || (details.generation as number) < 1
+		|| !["completed", "aborted", "error"].includes(details.outcome as string)
+		|| typeof details.terminalFailure !== "boolean"
+		|| details.terminalFailure !== (details.outcome !== "completed")
+		|| typeof details.consumed !== "boolean"
+		|| !Array.isArray(details.consumedMessageIds)
+		|| !details.consumedMessageIds.every(item => typeof item === "string")
+		|| details.settled !== false
+		|| typeof details.continueRequested !== "boolean") return null;
+	if (details.terminalFailure && details.terminalFailureOutcome !== details.outcome) return null;
+	if (!details.terminalFailure && details.terminalFailureOutcome !== undefined) return null;
+	if (details.consumedGeneration !== undefined
+		&& (!Number.isInteger(details.consumedGeneration) || (details.consumedGeneration as number) < 1)) return null;
+	return details as unknown as AgentBoundaryReceiptDetails;
+}
+
 export interface AgentRunResult {
 	agent: string;
+	/** Physical Pi session identity actually opened by this Run, when persistent. */
+	sessionId?: string;
+	sessionFile?: string;
+	backend?: "process" | "sdk";
+	sdkOwner?: SdkRunOwner;
 	/** 本次运行实际选择的角色。 */
 	role?: string;
 	exitCode: number;
@@ -381,6 +443,17 @@ export interface AgentRunResult {
 		contextTokens: number;
 	};
 	model: string | null;
+	provider?: string;
+	responseModel?: string;
+	thinkingLevel?: string;
+	costAccounting?: { complete: boolean; attributionComplete: boolean; provisional: boolean };
+	/** Host/CLI identity used for this physical child (test overrides are unverified). */
+	invocation?: PiInvocationDescriptor["provenance"];
+	/** Base invocation descriptor retained for Main/supervisor evidence. */
+	invocationDescriptor?: PiInvocationDescriptor;
+	/** JSONL protocol diagnostics; incomplete means no complete boundary was proven. */
+	protocolErrors?: string[];
+	incomplete?: boolean;
 	assistantMessages?: string[];
 	errorMessage?: string;
 	retryCount?: number;  // 自动重试次数 (0=首次成功)
@@ -436,7 +509,7 @@ export function loadAgentTemplate(cwd: string, name: string): AgentTemplate | nu
 			provider: "octopus-completions",
 			thinking: "xhigh",
 			tools: ["read", "grep", "find", "ls", "bash"],
-			systemPrompt: "你是一名资深代码评审者。从代码质量、安全性、可维护性角度分析。Bash 仅允许只读命令（git diff/log/show）。输出：## 已审查文件 / ## 严重问题 / ## 警告 / ## 建议 / ## 总结。指明具体文件路径与行号。",
+			systemPrompt: "You are a senior code reviewer. Assess code quality, security, and maintainability. Bash is limited to read-only commands (git diff/log/show). Use these sections: ## Reviewed Files / ## Critical Issues / ## Warnings / ## Suggestions / ## Summary. Cite specific file paths and line numbers.",
 		};
 	}
 	return null;
@@ -449,11 +522,7 @@ export function withSharedSkills(agent: AgentTemplate, sharedSkills?: string[]):
 	return { ...agent, skills: skills.length > 0 ? skills : undefined };
 }
 
-/** 子进程要加载的 entry 路径:
- *  - prefixLayout=true: 用 subagent-entry.ts (精简, 只加载 prefix-layout, 不注册 tool/command)
- *    避免改变子进程 LLM 工具列表和行为 (实验 C 暴露的问题)
- *  - prefixLayout=false: 不加载任何 AgentFlux 扩展 (naive 对照)
- */
+/** process driver始终加载package-owned安全/Message V2入口，与缓存开关无关。 */
 function getSubagentEntryPath(_cwd: string): string {
 	// 从已安装 package 自身定位，不能假设目标项目也有 src/subagent-entry.ts。
 	const ownFile = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
@@ -465,34 +534,20 @@ function getSubagentEntryPath(_cwd: string): string {
 	return resolve(ownDir, "..", "subagent-entry.ts");
 }
 
-/** 决定 pi 可执行路径: 用 node + pi 的 cli.js (shell:false, 避免 Windows shell 分词) */
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+/**
+ * Add the package-owned Windows preload after the Host resolver has selected the
+ * CLI. The preload is an AgentFlux process policy, not part of Pi provenance.
+ */
+function addBackgroundPreload(invocation: PiInvocationDescriptor): PiInvocationDescriptor {
+	if (process.platform !== "win32" || !invocation.cliPath) return invocation;
 	const ownFile = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
-	const req = createRequire(ownFile);
-	let cliPath: string = "";
-
-	// Method 1: 直接 resolve (如果 exports 字段允许)
-	try {
-		cliPath = req.resolve("@earendil-works/pi-coding-agent/dist/cli.js");
-	} catch { /* exports 限制, 继续尝试 */ }
-
-	// Method 2: 通过 resolve.paths 找到 node_modules 目录, 手动拼接
-	if (!cliPath) {
-		try {
-			const searchPaths = req.resolve.paths("@earendil-works/pi-coding-agent") ?? [];
-			for (const p of searchPaths) {
-				const candidate = join(p, "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-				if (existsSync(candidate)) { cliPath = candidate; break; }
-			}
-		} catch { /* 继续回退 */ }
-	}
-
-	// Method 3: 最终回退 — process.argv[1] (主进程入口)
-	if (!cliPath) {
-		cliPath = process.argv[1] ?? "";
-	}
-
-	return { command: process.execPath, args: [cliPath, ...args] };
+	const preload = join(dirname(ownFile), "background-preload.mjs");
+	if (!existsSync(preload)) throw new Error(`AgentFlux background preload not found: ${preload}`);
+	const preloadArgs: string[] = [];
+	preloadArgs.push("--import", pathToFileURL(preload).href);
+	const cliPath = invocation.cliPath;
+	const args = invocation.cliArgs ?? [];
+	return { ...invocation, command: process.execPath, args: [...preloadArgs, cliPath, ...args] };
 }
 
 /**
@@ -502,7 +557,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
  * @param task 任务描述
  * @param sessionId 主 session id (telemetry 关联)
  * @param telemetry telemetry writer (可选, 不传则不写)
- * @param prefixLayout 是否加载 entry.ts (true=AgentFlux优化, false=naive对照)
+ * @param prefixLayout 缓存布局观测标记，不控制安全入口或执行后端
  * @param model 覆盖 agent.model
  * @param provider 覆盖 agent.provider
  * @param pricing 父进程用价格表重算子进程成本
@@ -513,16 +568,13 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 // ── SharedBoard 集成: agent 启动前读 inbox + 注册 ──
 
 /**
- * 读取 agent 的 inbox + 群组消息, 拼接到 task 前面
- * 让 agent 能看到其他 agent 的反馈, 不需要主 agent 桥接
+ * 只从 Message V2 注入 Run 对应的消息；旧 SharedBoard inbox/group 不再进入模型上下文。
+ * ACK 统一在本次 Run 成功收敛后由调用方完成，避免把“已读”冒充实际消费。
  */
 function prependInboxMessages(task: string, agentName: string, cwd: string, runId: string): { task: string; v2MessageIds: string[] } {
 	try {
 		const fluxDir = join(cwd, ".agentflux");
-		const board = new SharedBoard(fluxDir);
-		const unread = board.getUnreadMessages(agentName);
-		const groupInbox = board.getGroupInbox(agentName);
-		const v2Messages = new MessageBus(fluxDir).poll(agentName, {
+		const v2Messages = new MessageBus(fluxDir, { redeliveryAfterMs: loadConfig(cwd).communication.redelivery_after_ms }).poll(agentName, {
 			limit: 20,
 			correlationId: runId,
 			includeUncorrelated: true,
@@ -531,33 +583,15 @@ function prependInboxMessages(task: string, agentName: string, cwd: string, runI
 			accept: envelope => !readAgentRunStop(cwd, runId)
 				&& (envelope.type !== "steer" || envelope.correlationId === runId),
 		});
-
-		// 收集所有群组中的最新消息 (只取最后 5 条 per group)
-		const groupMsgs: string[] = [];
-		for (const { group, messages } of groupInbox) {
-			const recent = messages.slice(-5);
-			for (const m of recent) {
-				if (m.from === agentName) continue;  // 跳过自己发的
-				groupMsgs.push(`[${group.name}] ${m.from}: ${m.content.slice(0, 200)}`);
-			}
-		}
-
-		const dmMsgs = unread.map(m => `[DM from ${m.from}] ${m.content.slice(0, 200)}`);
-
-		const v2Msgs = v2Messages.map(({ envelope }) =>
-			`[V2 ${envelope.channel.type}/${envelope.channel.id} from ${envelope.from}] ${envelope.content.slice(0, 500)}`);
-		const allMsgs = [...dmMsgs, ...groupMsgs, ...v2Msgs];
-		if (allMsgs.length === 0) return { task, v2MessageIds: [] };
-
-		// 标记消息为已读
-		for (const m of unread) board.markMessageRead(m.id);
-
+		if (v2Messages.length === 0) return { task, v2MessageIds: [] };
+		const messages = v2Messages.map(({ envelope }) =>
+			`[V2 ${envelope.channel.type}/${envelope.channel.id} from ${envelope.from} id=${envelope.id}] ${envelope.content.slice(0, 500)}`);
 		return {
-			task: `=== Messages from other agents ===\n${allMsgs.join("\n")}\n=== End messages ===\n\n${task}`,
+			task: `=== Messages from other agents ===\n${messages.join("\n")}\n=== End messages ===\n\n${task}`,
 			v2MessageIds: v2Messages.map(item => item.envelope.id),
 		};
 	} catch {
-		return { task, v2MessageIds: [] };  // SharedBoard 不存在时静默跳过
+		return { task, v2MessageIds: [] };
 	}
 }
 
@@ -577,6 +611,7 @@ function isTransientError(msg?: string, output?: string): boolean {
 export function canCompletionProofRecover(
 	result: Pick<AgentRunResult, "exitCode" | "output" | "errorMessage">,
 ): boolean {
+	if (result.exitCode === 72) return false;
 	if (result.exitCode === 74) return true;
 	return result.exitCode !== 0
 		&& result.output.trim().length > 0
@@ -694,15 +729,21 @@ function updateAgentStatusInBoard(agentName: string, status: "done" | "failed", 
 	} catch { /* 静默 */ }
 }
 
-const activeSubagentProcesses = new Map<string, ChildProcess>();
+const activeSubagentProcesses = new Map<string, ChildProcess | SdkRunDriver>();
+const childProcessIdentities = new WeakMap<ChildProcess, ProcessIdentity>();
 
 /** 当前进程内仍在运行的 pi 子进程，供状态页和取消测试使用。 */
 export function getActiveAgentRunIds(): string[] {
 	return [...activeSubagentProcesses.keys()];
 }
 
-async function terminateProcessTree(proc: ChildProcess): Promise<void> {
-	if (!proc.pid) return;
+async function terminateProcessTree(proc: ChildProcess): Promise<boolean> {
+	if (!proc.pid || proc.exitCode !== null || proc.signalCode !== null) return true;
+	const expected = childProcessIdentities.get(proc);
+	const observed = await observeProcessAsync(proc.pid);
+	if (proc.exitCode !== null || proc.signalCode !== null || observed.state === "dead") return true;
+	if (!expected || observed.state !== "alive") return false;
+	if (observed.identity.birth !== expected.birth || observed.identity.platform !== expected.platform) return true;
 	if (process.platform === "win32") {
 		// Synchronously wait for taskkill to finish its /T traversal. An async
 		// taskkill child can outlive the run's parent-close event and keep the
@@ -710,15 +751,16 @@ async function terminateProcessTree(proc: ChildProcess): Promise<void> {
 		const killed = spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
 			shell: false, stdio: "ignore", windowsHide: true, timeout: 7000,
 		});
-		if (killed.error) {
-			try { proc.kill(); } catch { /* process already exited */ }
+		if (killed.error || killed.status !== 0) {
+			try { if (!proc.kill()) return false; } catch { return false; }
 		}
 		await new Promise(resolveDone => setTimeout(resolveDone, 500));
-		return;
+		return true;
 	}
 	// POSIX 下子进程以独立 process group 启动，负 PID 可终止其整个后代树。
 	try { process.kill(-proc.pid, "SIGTERM"); }
-	catch { try { proc.kill("SIGTERM"); } catch { /* process 已退出 */ } }
+	catch { try { return proc.kill("SIGTERM"); } catch { return false; } }
+	return true;
 }
 
 function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
@@ -750,6 +792,8 @@ export async function runAgent(opts: {
 	pricing?: PricingTable;  // F1-14: 父进程用价格表重算子进程成本
 	persistent?: boolean;
 	persistentSessionId?: string; // 持久 session 的作用域 key；未传时沿用 agent 名
+	/** Native Pi fork target. When set, open this exact file instead of deriving a key. */
+	persistentSessionFile?: string;
 	sessionDir?: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	timeoutMs?: number | null; // 可选相对 deadline；未设置时不因模型执行 wall-clock 自动终止
@@ -782,12 +826,24 @@ export async function runAgent(opts: {
 	capabilityOverride?: CapabilityPolicyInput;         // 单次运行覆盖；只能收窄模板和注册实例
 	/** 注册实例允许的角色集合；用于选择多角色 Agent 的本次角色。 */
 	registeredRoles?: string[];
+	/** 显式注册身份；persistent 仅表示会话持久化，不隐含 Agent registry 引用。 */
+	agentId?: string;
 	/** 仅供确定性生命周期测试注入本地假进程；生产入口不会暴露。 */
-	invocationOverride?: { command: string; args: string[] };
+	invocationOverride?: PiInvocationOverride;
 	/** 仅供确定性测试注入一次 Registry 写失败；生产入口不会暴露。 */
 	runRegistry?: AgentRunRegistryHooks;
 	/** 运行过程实时回调（assistant 消息 / 工具调用 / 回合），供 UI 直播子代理运行过程。 */
 	onProgress?: (event: { type: "message" | "tool"; text: string }) => void;
+	/** Main/Core hook for every complete JSON event; callback failure is fail-closed. */
+	onEvent?: (event: unknown, context: AgentRunnerJsonEventContext) => void;
+	/** Alias with explicit JSON naming for Main/UsageAccounting integration. */
+	onJsonEvent?: (event: unknown, context: AgentRunnerJsonEventContext) => void;
+	/** Entry hook for UsageAccounting/session-entry consumers. */
+	onEntry?: (entry: unknown, context: AgentRunnerJsonEventContext) => void;
+	/** Protocol/consumer diagnostics retained in the Run result. */
+	onProtocolIssue?: (issue: JsonlStreamIssue) => void;
+	/** Production runs require safe-agent boundary receipt + agent_settled; test overrides default off. */
+	requireBoundaryReceipt?: boolean;
 	/** 健康状态发生变化或需要限频提示时回调；不会改变 Run 终态。 */
 	onHealthChange?: (event: { health: AgentRunHealth; reason?: string; warning: boolean }) => void;
 	health?: RunHealthConfig;
@@ -800,6 +856,51 @@ export async function runAgent(opts: {
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null, errorMessage: `workspace does not exist: ${workspaceCwd}`, retryCount: 0,
 		};
+	}
+	if (opts.persistent && opts.persistentSessionFile && !existsSync(opts.persistentSessionFile)) {
+		return {
+			agent: agent.name, exitCode: 72, output: "",
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+			model: null, errorMessage: `persistent native fork session does not exist: ${opts.persistentSessionFile}`, retryCount: 0,
+		};
+	}
+	// 配置方式/Host身份在创建Run前冻结；未知值和SDK不支持的env/CLI覆盖不得fallback。
+	let runtimeMode: "process" | "sdk";
+	let sdkBinding: PiSdkHostBinding | undefined;
+	try {
+		runtimeMode = loadSubagentRuntime(cwd);
+		if (runtimeMode === "sdk") {
+			if (opts.invocationOverride || (opts.env && Object.keys(opts.env).length)) throw new Error("SDK subagents do not support process invocation or environment overrides");
+			sdkBinding = requirePiSdkHost(cwd);
+		}
+	} catch (error: any) {
+		return { agent: agent.name, exitCode: 72, output: "", model: null, retryCount: 0,
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, errorMessage: String(error?.message ?? error) };
+	}
+	// 包边界错误必须在登记 Run/lease 之前拒绝，不能留下没有 PID 的 starting Run。
+	let defaultInvocation: PiInvocationDescriptor | undefined;
+	if (!opts.invocationOverride) {
+		try {
+			const binding = sdkBinding ?? getPiSdkHost(cwd);
+			defaultInvocation = addBackgroundPreload(resolvePiInvocation(binding ? { hostPackageDir: binding.sdk.getPackageDir(), hostVersion: binding.sdk.VERSION } : {}));
+		}
+		catch (error: any) {
+			return { agent: agent.name, exitCode: 72, output: "", model: null, retryCount: 0,
+				usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+				errorMessage: String(error?.message ?? error) };
+		}
+	}
+	let invocationDescriptor: PiInvocationDescriptor | undefined = defaultInvocation;
+	let invocationProvenance: PiInvocationDescriptor["provenance"] | undefined = defaultInvocation?.provenance;
+	if (opts.invocationOverride) {
+		try {
+			invocationDescriptor = resolvePiInvocation({ invocationOverride: opts.invocationOverride });
+			invocationProvenance = invocationDescriptor.provenance;
+		} catch (error: any) {
+			return { agent: agent.name, exitCode: 72, output: "", model: null, retryCount: 0,
+				usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
+				errorMessage: String(error?.message ?? error) };
+		}
 	}
 	const lockFiles = opts.lockFiles?.map(file => resolve(workspaceCwd, file));
 	const runStartedAt = Date.now();
@@ -816,6 +917,13 @@ export async function runAgent(opts: {
 		? (deadline === undefined ? "none" : "absolute deadline")
 		: `${timeoutMs / 1000}s`;
 	const processRunId = opts.runId ?? `subagent-${randomUUID()}`;
+	const requireBoundaryReceipt = opts.requireBoundaryReceipt ?? !opts.invocationOverride;
+	let sdkOwner: SdkRunOwner | undefined;
+	try { if (runtimeMode === "sdk") sdkOwner = createSdkRunOwner(processRunId); }
+	catch (error) {
+		return { agent: agent.name, backend: runtimeMode, exitCode: 72, output: "", model: null, retryCount: 0,
+			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 }, errorMessage: String(error) };
+	}
 	const runRegistry = opts.runRegistry ?? {};
 	const registerRun = runRegistry.register ?? registerAgentRun;
 	const markRunningRun = runRegistry.markRunning ?? markAgentRunRunning;
@@ -856,21 +964,8 @@ export async function runAgent(opts: {
 			return `parent budget state unavailable: ${error instanceof Error ? error.message : String(error)}`;
 		}
 	};
-	const registeredRecord = loadRegisteredCapabilityOverrideForRole(fluxDir, agent.name, capabilityRole);
-	const baseRegisteredRecord = loadRegisteredCapabilityOverride(fluxDir, agent.name);
 	const initialParentBudgetError = parentBudgetError();
-	// 直接调用 runAgent 时没有 Agent 注册表可校验角色；只有显式传入允许角色集合
-	// 才能安全地把旧的单角色收窄配置与新的角色绑定区分开。
-	if (baseRegisteredRecord && !registeredRecord && !opts.registeredRoles?.includes(capabilityRole)) {
-		return {
-			agent: agent.name, exitCode: 77, output: "",
-			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
-			model: null,
-			errorMessage: `capability policy rejected: registered role ${baseRegisteredRecord.role} does not match ${capabilityRole}`,
-			retryCount: 0,
-		};
-	}
-	const registeredCapability = registeredRecord?.override;
+	let registeredCapability: CapabilityPolicyInput | undefined;
 	const runCapability: CapabilityPolicyInput | undefined = opts.capabilityOverride || opts.communicationOverride
 		? { ...(opts.capabilityOverride ?? {}), communication: opts.communicationOverride ?? opts.capabilityOverride?.communication }
 		: undefined;
@@ -879,6 +974,13 @@ export async function runAgent(opts: {
 	const capabilitySnapshotRole = opts.registeredRoles && opts.registeredRoles.length > 1 ? capabilityRole : undefined;
 	let previousEffectiveCapability: any = null;
 	try {
+		const registeredRecord = loadRegisteredCapabilityOverrideForRole(fluxDir, agent.name, capabilityRole);
+		const baseRegisteredRecord = loadRegisteredCapabilityOverride(fluxDir, agent.name);
+		// 角色绑定及存储损坏均走同一拒绝路径，且在启动子进程前失败关闭。
+		if (baseRegisteredRecord && !registeredRecord && !opts.registeredRoles?.includes(capabilityRole)) {
+			throw new Error(`registered role ${baseRegisteredRecord.role} does not match ${capabilityRole}`);
+		}
+		registeredCapability = registeredRecord?.override;
 		capabilityPolicy = resolveCapabilityPolicy({
 			cwd: workspaceCwd, agentName: agent.name, role: capabilityRole, runId: processRunId, instanceId: agentInstanceId,
 			template: {
@@ -888,7 +990,6 @@ export async function runAgent(opts: {
 			registered: registeredCapability,
 			run: runCapability,
 		});
-		if (!prefixLayout) capabilityPolicy.effective.workspace.enforcement = "unavailable";
 		previousEffectiveCapability = loadEffectiveCapabilitySnapshot(fluxDir, agent.name, capabilitySnapshotRole)?.effective ?? null;
 		capabilitySnapshotPath = writeEffectiveCapabilitySnapshot(fluxDir, capabilityPolicy, capabilitySnapshotRole);
 	} catch (error: any) {
@@ -904,6 +1005,10 @@ export async function runAgent(opts: {
 		};
 	}
 	const communicationPolicy = capabilityPolicy.effective.communication;
+	// The package-owned safe entry is independent of cache/prefix layout. It is
+	// always explicit, while --no-extensions still excludes every discovered or
+	// configured extension. This keeps workspace/lock/message hooks available in
+	// both native and prefix-none child modes.
 	const shapeChanged = (key: "tools" | "skills" | "mcpServers" | "communication" | "workspace") =>
 		previousEffectiveCapability != null
 		&& JSON.stringify(previousEffectiveCapability[key]) !== JSON.stringify(capabilityPolicy.effective[key]);
@@ -937,8 +1042,10 @@ export async function runAgent(opts: {
 		detail: `snapshot=${capabilitySnapshotPath}`,
 	});
 	try {
+		if (sdkOwner) activateSdkRunOwner(cwd, sdkOwner);
 		registerRun(fluxDir, {
 			id: processRunId,
+			agentId: opts.agentId,
 			taskId: opts.taskId,
 			executionId: opts.executionId,
 			sessionId,
@@ -948,12 +1055,15 @@ export async function runAgent(opts: {
 			model: opts.model ?? agent.model,
 			provider: opts.provider ?? agent.provider,
 			kind: opts.persistent ? "persistent" : "ephemeral",
+			backend: runtimeMode, sdkOwner,
+			invocation: invocationProvenance,
 			deadlineAt: deadline === undefined ? undefined : new Date(deadline).toISOString(),
 		}, {
 			parentMaxParallel: opts.parentMaxParallel,
 			parentBudget: { maxCostUsd: opts.parentMaxCostUsd, maxTurns: opts.parentMaxTurns, maxInputTokens: opts.parentMaxInputTokens },
 		});
 	} catch (error) {
+		if (sdkOwner) retireSdkRunOwner(cwd, sdkOwner);
 		if (error instanceof Error && error.message.includes("parent concurrency budget exhausted")) {
 			return {
 				agent: agent.name, exitCode: 75, output: "",
@@ -981,7 +1091,7 @@ export async function runAgent(opts: {
 		: opts.task;
 	const communicationInstruction = formatCommunicationContractInstruction(communicationPolicy);
 	if (communicationInstruction) scopedTask = `${scopedTask}\n\n${communicationInstruction}`;
-	if (opts.liveTeamCommunication && prefixLayout && communicationPolicy.enabled && communicationPolicy.actions.includes("poll")) {
+	if (opts.liveTeamCommunication && communicationPolicy.enabled && communicationPolicy.actions.includes("poll")) {
 		scopedTask = `${scopedTask}\n\n=== Live team communication ===\nAfter completing substantive work and before your final response, call flux_agent_message with action=poll. Process relevant operator or peer updates and acknowledge every message you consumed.\n=== End live team communication ===`;
 	}
 	const inboxInjection = prependInboxMessages(scopedTask, agent.name, cwd, processRunId);
@@ -1005,9 +1115,14 @@ export async function runAgent(opts: {
 	// 文件锁: 获取要编辑的文件的锁。任何冲突都 fail-closed。
 	const lockedFiles: string[] = [];
 	let lockError: string | undefined;
+	let sdkLease: ReturnType<typeof registerActiveContext> | undefined;
+	if (sdkOwner) {
+		try { sdkLease = registerActiveContext(cwd, { name: `sdk:${processRunId}`, context: readActiveContext(cwd).context ?? "main", scope: processRunId, task: opts.task, runtimeOwner: sdkOwner }); }
+		catch (error) { lockError = `SDK context ownership rejected: ${String(error)}`; }
+	}
 	if (lockFiles && lockFiles.length > 0) {
 		try {
-			const board = new SharedBoard(join(cwd, ".agentflux"));
+			const board = new SharedBoard(join(cwd, ".agentflux"), { runtimeOwner: sdkOwner });
 			for (const fp of lockFiles) {
 				if (board.acquireFileLock(lockOwner, fp)) {
 					lockedFiles.push(fp);
@@ -1025,14 +1140,21 @@ export async function runAgent(opts: {
 	let retryCount = 0;
 	let lastResult: AgentRunResult | null = null;
 	let attemptCount = 0;
+	let nativeForkTargetFile: string | undefined;
+	let nativeForkTargetId: string | undefined;
 	const aggregateUsage: AgentRunResult["usage"] = {
 		turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0,
 	};
+	const aggregateProtocolErrors: string[] = [];
+	let aggregateProtocolIncomplete = false;
+	let aggregateCostComplete = true;
+	let aggregateAttributionComplete = true;
 	let modelError: string | undefined;
 	let providerError: string | undefined;
 	let observedProvider = opts.provider ?? agent.provider;
 	const healthConfig = opts.health ?? DEFAULT_RUN_HEALTH_CONFIG;
 	let currentPhase: AgentRunSnapshot["phase"] = "starting";
+	let currentCostAccounting: AgentRunResult["costAccounting"];
 	let currentHealth: AgentRunHealth = "healthy";
 	// 以 Registry 注册后的时刻为进度基线；注册可能跨毫秒，不能再用更早的 runStartedAt 写回快照。
 	let lastProgressAt = new Date().toISOString();
@@ -1167,7 +1289,7 @@ export async function runAgent(opts: {
 		contextTokensObserved = Math.max(contextTokensObserved, aggregateUsage.contextTokens, usageNumber(current?.contextTokens));
 		const activityType = fields.lastActivityType;
 		const semanticProgress = fields.lastProgressAt !== undefined
-			|| ["process_started", "message_end", "tool_start", "tool_end", "model_error", "provider_error"].includes(activityType ?? "");
+			|| ["process_started", "sdk_session_started", "message_end", "tool_start", "tool_end", "model_error", "provider_error"].includes(activityType ?? "");
 		if (fields.lastProgressAt !== undefined) lastProgressAt = fields.lastProgressAt;
 		else if (semanticProgress) lastProgressAt = fields.lastActivityAt ?? new Date().toISOString();
 		if (fields.lastProgressType !== undefined) lastProgressType = fields.lastProgressType;
@@ -1179,6 +1301,7 @@ export async function runAgent(opts: {
 		writeLiveSnapshot({
 			...usage,
 			...fields,
+			costAccounting: currentCostAccounting,
 			health: health.health,
 			healthReason: health.reason ?? null,
 			lastProgressAt,
@@ -1198,21 +1321,15 @@ export async function runAgent(opts: {
 		});
 	};
 
-	const communicationUnavailable = !prefixLayout
-		&& (communicationPolicy.requiredSendTo.length > 0 || communicationPolicy.requireExplicitInboxAck);
-	const workspaceGuardUnavailable = !prefixLayout
-		&& !!(agent.workspace || registeredCapability?.workspace || runCapability?.workspace);
-	if (initialParentBudgetError || lockError || opts.signal?.aborted || communicationUnavailable || workspaceGuardUnavailable) {
-		const preflightExitCode = initialParentBudgetError ? 75 : lockError ? 73 : opts.signal?.aborted ? 130 : communicationUnavailable ? 76 : 77;
+	if (initialParentBudgetError || lockError || opts.signal?.aborted) {
+		const preflightExitCode = initialParentBudgetError ? 75 : lockError ? 73 : 130;
 		lastResult = {
 			agent: agent.name,
 			exitCode: preflightExitCode,
 			output: "",
 			usage: { ...aggregateUsage },
 			model: null,
-			errorMessage: initialParentBudgetError ?? lockError ?? (opts.signal?.aborted ? "cancelled before start"
-				: communicationUnavailable ? "communication contract requires prefixLayout subagent extension"
-					: "workspace capability requires prefixLayout subagent tool hook"),
+			errorMessage: initialParentBudgetError ?? lockError ?? "cancelled before start",
 			retryCount: 0,
 		};
 		activeRunSnapshot(undefined, {
@@ -1253,30 +1370,59 @@ export async function runAgent(opts: {
 			activeRunSnapshot(undefined, { phase: "stopping", lastActivityType: "timeout", lastActivitySummary: lastResult.errorMessage });
 			break;
 		}
+		// Native fork targets get a deterministic second branch per effective
+		// role/capability generation. Never let reviewer and implementer append to
+		// the same physical Pi file.
+		if (opts.persistent && opts.persistentSessionFile && !nativeForkTargetFile) {
+			const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
+			try {
+				if (!opts.persistentSessionId) throw new Error("native fork requires a persistent base session ID");
+				const branch = ensureCapabilityForkSession(
+					opts.persistentSessionFile, cwd, sDir, opts.persistentSessionId, capabilityGeneration,
+				);
+				nativeForkTargetFile = branch.targetFile;
+				nativeForkTargetId = branch.targetSessionId;
+			} catch (error) {
+				lastResult = {
+					agent: agent.name, exitCode: 72, output: "",
+					usage: { ...aggregateUsage }, model: null,
+					errorMessage: `native capability fork rejected: ${error instanceof Error ? error.message : String(error)}`,
+					retryCount: Math.max(0, attemptCount - 1),
+				};
+				activeRunSnapshot(undefined, { phase: "error", lastActivityType: "start_rejected", lastActivitySummary: lastResult.errorMessage });
+				break;
+			}
+		}
 		// 每次迭代重建 args (因为 tmpDir 路径会变)
 		const attemptArgs: string[] = ["--mode", "json", "-p", "--no-prompt-templates", "--no-context-files", "--approve"];
+		let attemptSessionId: string | undefined;
+		let attemptSessionFile: string | undefined;
 
 		// Persistent Agent 复用 session；Ephemeral Agent 不保留 session。
 		if (opts.persistent) {
 			const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
-			const rawSessionId = `${opts.persistentSessionId ?? `flux-${agent.name}`}-cap-${capabilityGeneration}`;
-			const agentSessionId = rawSessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
 			attemptArgs.push("--session-dir", sDir);
-			attemptArgs.push("--session-id", agentSessionId);
+			if (opts.persistentSessionFile) {
+				if (!nativeForkTargetFile || !nativeForkTargetId) throw new Error("native fork target was not materialized");
+				attemptSessionId = nativeForkTargetId;
+				attemptSessionFile = nativeForkTargetFile;
+				attemptArgs.push("--session", nativeForkTargetFile);
+			} else {
+				const rawSessionId = `${opts.persistentSessionId ?? `flux-${agent.name}`}-cap-${capabilityGeneration}`;
+				const agentSessionId = rawSessionId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
+				attemptSessionId = agentSessionId;
+				attemptArgs.push("--session-id", agentSessionId);
+			}
 		} else {
 			attemptArgs.push("--no-session");
 		}
-		// skills
-		if (capabilityPolicy.effective.skills.length > 0) {
-			for (const skill of capabilityPolicy.effective.skills) attemptArgs.push("--skill", skill);
-		} else {
-			attemptArgs.push("--no-skills");
-		}
-		if (prefixLayout) {
-			attemptArgs.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
-		} else {
-			attemptArgs.push("--no-extensions");
-		}
+		// Always disable discovery first. Explicit skills are the only resource
+		// allowlist and must follow --no-skills in the CLI argv.
+		attemptArgs.push("--no-skills");
+		for (const skill of capabilityPolicy.effective.skills) attemptArgs.push("--skill", skill);
+		// --no-extensions remains unconditional; only the package-owned safe entry
+		// is loaded, independently of cache/prefix layout.
+		attemptArgs.push("--no-extensions", "-e", getSubagentEntryPath(cwd));
 		const model = opts.model ?? agent.model ?? null;
 		const provider = opts.provider ?? agent.provider ?? null;
 		if (provider) {
@@ -1298,24 +1444,47 @@ export async function runAgent(opts: {
 		attemptArgs.push(`Task: ${taskWithInbox}`);
 
 		const result: AgentRunResult = {
-			agent: agent.name, role: capabilityRole, exitCode: 0, output: "",
+			agent: agent.name, role: capabilityRole, backend: runtimeMode, sdkOwner, exitCode: 0, output: "",
+			sessionId: attemptSessionId,
+			sessionFile: attemptSessionFile,
 			usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0 },
 			model: null,
+			invocation: invocationProvenance,
+			invocationDescriptor,
+			protocolErrors: [],
+			incomplete: false,
 			retryCount,
 			fallbackModel: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? (opts.model ?? agent.model ?? undefined) : undefined,
 			fallbackFrom: opts.fallbackHistory && opts.fallbackHistory.length > 1 ? opts.fallbackHistory[0] : undefined,
 		};
 		attemptCount++;
+		const sDir = opts.sessionDir ?? join(cwd, ".agentflux", "runtime", "sessions");
+		const accounting = new UsageAccounting({ sessionId: attemptSessionId ?? `${processRunId}:${attemptCount}`, pricing: opts.pricing });
+		const syncUsage = (): void => {
+			const snapshot = accounting.snapshot();
+			Object.assign(result.usage, { turns: snapshot.turns, input: snapshot.input, output: snapshot.output, cacheRead: snapshot.cacheRead, cacheWrite: snapshot.cacheWrite, cost: snapshot.cost });
+			result.costAccounting = { complete: snapshot.complete && !result.incomplete, attributionComplete: snapshot.attributionComplete, provisional: snapshot.provisional };
+			currentCostAccounting = { complete: aggregateCostComplete && result.costAccounting.complete, attributionComplete: aggregateAttributionComplete && snapshot.attributionComplete, provisional: snapshot.provisional };
+		};
 
 		try {
+			const baselineFile = attemptSessionFile ?? (attemptSessionId ? resolveSessionFileById(sDir, attemptSessionId) : undefined);
+			if (baselineFile) accounting.setBaselineEntryIds(parseSessionEntries(readFileSync(baselineFile, "utf8")).flatMap(entry => "id" in entry ? [entry.id] : []));
+			const sdkDriver = runtimeMode === "sdk" ? await createSdkRunDriver({ binding: sdkBinding!, owner: sdkOwner!,
+				controlCwd: cwd, cwd: workspaceCwd, runId: processRunId, agentName: agent.name, instanceId: agentInstanceId, role: capabilityRole, taskId: opts.taskId,
+				model: model ?? "", provider: provider ?? undefined, thinking: thinkingLevel, appendSystemPrompt: agent.systemPrompt,
+				capability: capabilityPolicy.effective, lockFiles: lockFiles ?? [], startupMessageIds: inboxInjection.v2MessageIds,
+				persistent: opts.persistent === true, sessionId: attemptSessionId, sessionFile: baselineFile, sessionDir: sDir, signal: opts.signal }) : undefined;
+			if (sdkDriver) { result.sessionId = sdkDriver.sessionId; result.sessionFile = sdkDriver.sessionFile; }
 			const outputParts: string[] = [];
 			const assistantMessages: string[] = [];
+			let lastAssistantError: string | undefined;
 			let stderrBuf = "";
 			const exitCode = await new Promise<number>((resolveExit) => {
 				const invocation = opts.invocationOverride
 					? { command: opts.invocationOverride.command, args: [...opts.invocationOverride.args, ...attemptArgs] }
-					: getPiInvocation(attemptArgs);
-				const proc = spawn(invocation.command, invocation.args, {
+					: { command: defaultInvocation!.command, args: [...defaultInvocation!.args, ...attemptArgs] };
+				const proc = sdkDriver ? undefined : spawn(invocation.command, invocation.args, {
 					cwd: workspaceCwd,
 					shell: false,
 					stdio: ["ignore", "pipe", "pipe"],
@@ -1339,44 +1508,44 @@ export async function runAgent(opts: {
 						AGENTFLUX_COMMUNICATION_POLICY: JSON.stringify(communicationPolicy),
 						AGENTFLUX_CAPABILITY_POLICY: JSON.stringify(capabilityPolicy.effective),
 						AGENTFLUX_RPC_INBOX_PUMP: opts.persistent ? "1" : "",
+						AGENTFLUX_STARTUP_MESSAGE_IDS: JSON.stringify(inboxInjection.v2MessageIds),
 					},
 				});
-				if (!proc.pid) throw new Error(`Agent process did not expose a pid: ${processRunId}`);
+				let startupFailure: string | undefined;
 				try {
-					markRunningRun(fluxDir, processRunId, proc.pid, attemptCount, { model, provider });
+					if (sdkDriver) markSdkAgentRunRunning(fluxDir, processRunId, sdkOwner!, sdkDriver.sessionId, attemptCount, { model, provider });
+					else {
+						if (!proc?.pid) throw new Error(`Agent process did not expose a pid: ${processRunId}`);
+						markRunningRun(fluxDir, processRunId, proc.pid, attemptCount, { model, provider, processIdentity: undefined });
+					}
 					activeRunSnapshot(undefined, {
-						phase: "running", lastActivityType: "process_started",
-						lastActivitySummary: `child process started (pid ${proc.pid}, attempt ${attemptCount})`, model, provider,
+						phase: "running", lastActivityType: sdkDriver ? "sdk_session_started" : "process_started",
+						lastActivitySummary: sdkDriver ? `SDK session started (${sdkDriver.sessionId}, attempt ${attemptCount})` : `child process started (pid ${proc!.pid}, attempt ${attemptCount})`, model, provider,
 					});
 				} catch (error: any) {
-					void terminateProcessTree(proc);
-					try {
-						finishRun(fluxDir, processRunId, {
-							status: "failed",
-							phase: "terminal",
-							turns: aggregateUsage.turns,
-							input: aggregateUsage.input,
-							output: aggregateUsage.output,
-							cacheRead: aggregateUsage.cacheRead,
-							cacheWrite: aggregateUsage.cacheWrite,
-							contextTokens: aggregateUsage.contextTokens,
-							costUsd: aggregateUsage.cost,
-							attempt: attemptCount,
-							model,
-							provider,
-							modelError,
-							providerError,
-							error: `Run Registry start failed: ${error?.message ?? error}`,
-						});
-					} catch (finishError) {
-						reportRegistryFailure("start failure convergence", finishError);
-					}
-					throw error;
+					startupFailure = `Run Registry start failed: ${error?.message ?? error}`;
+					result.errorMessage = startupFailure;
+					reportRegistryFailure("start", error);
+					// Keep the same listeners, usage ledger and process ownership until actual exit.
 				}
-				let buffer = "";
+				const jsonlParser = new IncrementalJsonlParser<any>();
 				let settled = false;
+				let assistantMessageOpen = false;
+				let userWaitDepth = 0;
+				let phaseBeforeUserWait = currentPhase;
+				let providerWaitBeforeUserWait = false;
+				let provisionalMessageUsage: AgentRunResult["usage"] | undefined;
+				let sawAgentSettled = false;
+				let boundaryGeneration = 0;
+				let sawValidBoundaryReceipt = false;
+				let sawInvalidBoundaryReceipt = false;
+				let assistantSource: string | undefined;
+				let assistantSequence = 0;
+				let lastBoundaryReceipt: AgentBoundaryReceiptDetails | null = null;
+				let latestSettledGeneration = 0;
 				let forcedExitCode: number | null = null;
 				let terminationPromise: Promise<void> | null = null;
+				let identityObservation: Promise<void> = Promise.resolve();
 				let killGraceTimer: NodeJS.Timeout | undefined;
 				let controlTimer: NodeJS.Timeout | undefined;
 				let deadlineTimer: NodeJS.Timeout | undefined;
@@ -1407,13 +1576,30 @@ export async function runAgent(opts: {
 					// reaping its descendants. Keep the caller blocked on the tree-kill
 					// command so a cancelled run cannot report completion while child
 					// processes still hold files or consume resources.
-					terminationPromise = terminateProcessTree(proc);
-					// 正常情况下等待 close + tree reaping；极端卡死时 10 秒后解除调用方等待。
-					// Windows taskkill can close the parent before descendant handles disappear.
-					killGraceTimer = setTimeout(() => done(exitCode), 10_000);
+					terminationPromise = identityObservation.then(() => sdkDriver ? sdkDriver.abort() : terminateProcessTree(proc!)).then(accepted => {
+						if (!accepted) {
+							result.errorMessage = [result.errorMessage, "Process termination refused or failed: birth identity or signal delivery could not be verified"].filter(Boolean).join("; ");
+							activeRunSnapshot(result.usage, {
+								phase: "stopping", lastActivityType: "termination_refused",
+								lastActivitySummary: result.errorMessage, model, provider,
+							});
+							// Keep the Run active until its actual close; a refusal is not exit evidence.
+							return;
+						}
+						if (!settled && proc) killGraceTimer = setTimeout(() => {
+							if (proc.exitCode !== null || proc.signalCode !== null) done(exitCode);
+							else activeRunSnapshot(result.usage, {
+								phase: "stopping", lastActivityType: "termination_pending",
+								lastActivitySummary: "Termination has not produced exit evidence; retaining process ownership", model, provider,
+							});
+						}, 10_000);
+					}).catch(error => {
+						result.errorMessage = [result.errorMessage, `Process termination failed: ${String(error)}`].filter(Boolean).join("; ");
+						activeRunSnapshot(result.usage, { phase: "stopping", lastActivityType: "termination_refused", lastActivitySummary: result.errorMessage, model, provider });
+					});
 				};
 				const onAbort = () => requestTermination(130);
-				activeSubagentProcesses.set(processRunId, proc);
+				activeSubagentProcesses.set(processRunId, sdkDriver ?? proc!);
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
 				let lastHeartbeatAttemptAt = Date.now();
 				let lastHealthRefreshAt = Date.now();
@@ -1439,18 +1625,54 @@ export async function runAgent(opts: {
 						refreshHealth();
 					}
 				}, 200);
-				if (readAgentRunStop(cwd, processRunId)) {
-					try { markAgentRunStopRequested(fluxDir, processRunId); }
-					catch (error) { reportRegistryFailure("stop request", error); }
-					requestTermination(130);
-				}
-				deadlineTimer = attemptTimeoutMs === undefined ? undefined : setTimeout(() => requestTermination(124), attemptTimeoutMs);
-
-				const processLine = (line: string) => {
-					if (!line.trim()) return;
-					let ev: any;
-					try { ev = JSON.parse(line); } catch { return; }
+				const provisionalSnapshot = (): AgentRunResult["usage"] => { syncUsage(); return { ...result.usage }; };
+				const recordProtocolIssue = (issue: JsonlStreamIssue): void => {
+					try { opts.onProtocolIssue?.(issue); } catch { /* observer failure cannot hide protocol failure */ }
+					const detail = `${issue.kind}${issue.sequence === undefined ? "" : ` frame=${issue.sequence}`}: ${issue.message}`;
+					if (!result.protocolErrors?.includes(detail)) result.protocolErrors?.push(detail);
+					if (issue.incomplete) result.incomplete = true;
+					result.errorMessage = [result.errorMessage, `Pi JSONL protocol error: ${detail}`].filter(Boolean).join("; ");
+					activeRunSnapshot(provisionalSnapshot(), {
+						phase: "error", lastActivityType: "jsonl_protocol_error",
+						lastActivitySummary: detail.slice(0, 2000), model, provider,
+					});
+				};
+				const processEvent = (ev: any) => {
+					if (settled) return;
+					if (!ev || typeof ev !== "object" || Array.isArray(ev) || typeof ev.type !== "string") {
+						recordProtocolIssue({ kind: "invalid_record", message: "Pi JSONL event is missing a string type", incomplete: true });
+						return;
+					}
+					if (ev.type === "agent_start") {
+						boundaryGeneration++;
+						sawAgentSettled = false;
+						lastBoundaryReceipt = null;
+					}
+					if (ev.type === "compaction_end" && ev.result?.usage && !opts.persistent && !sdkDriver) {
+						accounting.ingestEntry({ ...ev.result, type: "compaction", id: `${processRunId}:${attemptCount}:summary:${assistantSequence}`, usage: ev.result.usage });
+						syncUsage();
+					}
+					if (ev.type === "ui_prompt_start") {
+						if (userWaitDepth++ === 0) { phaseBeforeUserWait = currentPhase; providerWaitBeforeUserWait = waitingForProvider; }
+						waitingForProvider = false;
+						activeRunSnapshot(result.usage, { phase: "waiting_user", lastActivityType: "ui_prompt_start", lastActivitySummary: "waiting for user input" });
+						return;
+					}
+					if (ev.type === "ui_prompt_end") {
+						if (userWaitDepth > 0) userWaitDepth--;
+						if (userWaitDepth === 0) {
+							waitingForProvider = providerWaitBeforeUserWait;
+							activeRunSnapshot(result.usage, { phase: phaseBeforeUserWait, lastActivityType: "ui_prompt_end", lastActivitySummary: "user input wait ended", lastProgressAt: new Date().toISOString() });
+						}
+						return;
+					}
 					if (ev.type === "message_start") {
+						if (ev.message?.role === "assistant") {
+							assistantSource = `${processRunId}:${attemptCount}:assistant:${++assistantSequence}`;
+							assistantMessageOpen = true;
+							provisionalMessageUsage = undefined;
+						}
+
 						waitingForProvider = true;
 						activeRunSnapshot(result.usage, {
 							phase: "running", lastActivityType: "provider_request",
@@ -1458,28 +1680,76 @@ export async function runAgent(opts: {
 						});
 						return;
 					}
+					if (ev.type === "message_update") {
+						const assistantMessageEvent = ev.assistantMessageEvent;
+						if (!assistantMessageEvent || typeof assistantMessageEvent.type !== "string") {
+							recordProtocolIssue({ kind: "invalid_record", message: "message_update is missing assistantMessageEvent.type", incomplete: true });
+							return;
+						}
+						assistantMessageOpen = true;
+						const rawUsage = ev.usage;
+						if (rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)) {
+							accounting.ingestStream(ev, { sourceId: assistantSource });
+							const counters = usageCountersFromJson(rawUsage);
+							provisionalMessageUsage = {
+								turns: 1,
+								input: counters.input,
+								output: counters.output,
+								cacheRead: counters.cacheRead,
+								cacheWrite: counters.cacheWrite,
+								contextTokens: counters.contextTokens,
+								cost: counters.cost,
+							};
+							activeRunSnapshot(provisionalSnapshot(), {
+								phase: "running", lastActivityType: "message_update",
+								lastActivitySummary: `assistant ${assistantMessageEvent.type} (provisional usage)`, model, provider,
+							});
+							if (parentBudgetSnapshotError || (opts.maxCostUsd !== undefined && aggregateUsage.cost + result.usage.cost >= opts.maxCostUsd)) {
+								result.errorMessage = parentBudgetSnapshotError ?? "run budget exhausted during provisional usage";
+								requestTermination(75);
+							}
+						}
+						return;
+					}
+					if (ev.type === "message_end" && !ev.message) {
+						recordProtocolIssue({ kind: "invalid_record", message: "message_end is missing its authoritative message", incomplete: true });
+						return;
+					}
 					if (ev.type === "message_end" && ev.message) {
 						waitingForProvider = false;
 						const msg = ev.message;
-						if (msg.role !== "assistant") return;
-						result.usage.turns += 1;
+						accounting.settleStream(ev, { sourceId: msg.role === "assistant" ? assistantSource : undefined });
+						syncUsage();
+						if (opts.maxCostUsd !== undefined && aggregateUsage.cost + result.usage.cost >= opts.maxCostUsd) {
+							result.errorMessage = "run budget exhausted at finalized usage";
+							requestTermination(75);
+						}
+						if (msg.role !== "assistant") {
+							activeRunSnapshot(result.usage, { phase: "running", lastActivityType: "usage_settled", lastActivitySummary: "tool usage settled", model, provider });
+							if (parentBudgetSnapshotError) { result.errorMessage = parentBudgetSnapshotError; requestTermination(75); }
+							return;
+						}
+						assistantMessageOpen = false;
+						provisionalMessageUsage = undefined;
+						if (!msg.usage || typeof msg.usage !== "object" || Array.isArray(msg.usage)) {
+							recordProtocolIssue({ kind: "invalid_record", message: "assistant message_end is missing a complete usage snapshot", incomplete: true });
+						}
 						const u = msg.usage && typeof msg.usage === "object" ? msg.usage : {};
-						result.usage.input += usageNumber(u.input);
-						result.usage.output += usageNumber(u.output);
-						result.usage.cacheRead += usageNumber(u.cacheRead);
-						result.usage.cacheWrite += usageNumber(u.cacheWrite);
 						if (typeof u.contextWindow === "number" && Number.isFinite(u.contextWindow) && u.contextWindow > 0) contextWindow = u.contextWindow;
 						result.usage.contextTokens = Math.max(result.usage.contextTokens, usageNumber(u.totalTokens ?? u.contextTokens));
 						if (typeof u.contextPercent === "number" && Number.isFinite(u.contextPercent)) contextPercent = u.contextPercent;
 						else if (contextWindow && result.usage.contextTokens > 0) contextPercent = result.usage.contextTokens / contextWindow;
-						const reportedCost = u.cost && typeof u.cost === "object" ? u.cost.total : undefined;
-						const calculatedCost = opts.pricing && typeof msg.model === "string"
-							? calcCost(u, lookupPrice(opts.pricing, msg.model))
-							: usageNumber(reportedCost);
-						result.usage.cost += usageNumber(calculatedCost);
-						if (!result.model && typeof msg.model === "string") result.model = msg.model;
-						const messageError = msg.errorMessage === undefined || msg.errorMessage === null ? "" : String(msg.errorMessage);
-						if (messageError) result.errorMessage = messageError;
+						if (typeof msg.model === "string") result.model = msg.model;
+						if (typeof msg.responseModel === "string") result.responseModel = msg.responseModel;
+						if (typeof msg.provider === "string") result.provider = msg.provider;
+						if (typeof msg.thinkingLevel === "string") result.thinkingLevel = msg.thinkingLevel;
+						const messageError = (msg.errorMessage === undefined || msg.errorMessage === null ? "" : String(msg.errorMessage))
+							|| (msg.stopReason === "error" ? "assistant ended with error" : msg.stopReason === "aborted" ? "assistant aborted" : "");
+						// Pi 的自动重试可在同一进程内恢复。只替换 assistant 自己的结局，不能清除 Host 终止/预算/存储错误。
+						if (forcedExitCode === null && (!result.errorMessage || result.errorMessage === lastAssistantError)) {
+							if (messageError) result.errorMessage = lastAssistantError = messageError;
+							else if (msg.stopReason === "stop" || msg.stopReason === "toolUse" || msg.stopReason === "deferred") result.errorMessage = lastAssistantError = undefined;
+						}
 						if (typeof msg.provider === "string" && msg.provider.trim()) observedProvider = msg.provider;
 						const textBlocks: string[] = [];
 						if (Array.isArray(msg.content)) {
@@ -1537,36 +1807,123 @@ export async function runAgent(opts: {
 					}
 				};
 
-				proc.stdout.on("data", (data) => {
-					buffer += data.toString();
-					const lines = buffer.split("\n");
-					buffer = lines.pop() ?? "";
-					for (const ln of lines) processLine(ln);
+				const consumeJsonl = (items: ReturnType<typeof jsonlParser.push>): void => {
+					for (const item of items) {
+						if (item.kind === "error") {
+							recordProtocolIssue(item.error);
+							continue;
+						}
+						const context: AgentRunnerJsonEventContext = { sequence: item.frame.sequence, raw: item.frame.text };
+						const record = item.record as Record<string, unknown>;
+						try {
+							opts.onEvent?.(record, context);
+							if (typeof record.type === "string") opts.onJsonEvent?.(record, context);
+						} catch (error) {
+							recordProtocolIssue({
+								kind: "consumer_error", incomplete: true,
+								message: `JSONL event consumer failed: ${error instanceof Error ? error.message : String(error)}`,
+							});
+							continue;
+						}
+						if (record.type === "entry_appended") {
+							const entry = record.entry;
+							const receipt = readAgentBoundaryReceipt(entry);
+							if (receipt && receipt.generation === boundaryGeneration) { sawValidBoundaryReceipt = true; lastBoundaryReceipt = receipt; }
+							else if (receipt) sawInvalidBoundaryReceipt = true;
+							else if (entry && typeof entry === "object"
+								&& (entry as Record<string, unknown>).customType === AGENTFLUX_BOUNDARY_RECEIPT_CUSTOM_TYPE) sawInvalidBoundaryReceipt = true;
+							accounting.ingestEntry(entry as any);
+							syncUsage();
+							if ((entry as any)?.usage || (entry as any)?.message?.usage) {
+								activeRunSnapshot(result.usage, { phase: currentPhase, lastActivityType: "usage_entry", lastActivitySummary: "session usage entry accounted", model, provider });
+								if (parentBudgetSnapshotError || (opts.maxCostUsd !== undefined && aggregateUsage.cost + result.usage.cost >= opts.maxCostUsd)) {
+									result.errorMessage = parentBudgetSnapshotError ?? "run budget exhausted at session usage entry";
+									requestTermination(75);
+								}
+							}
+							try { opts.onEntry?.(entry, context); }
+							catch (error) {
+								recordProtocolIssue({
+									kind: "consumer_error", incomplete: true,
+									message: `JSONL entry consumer failed: ${error instanceof Error ? error.message : String(error)}`,
+								});
+								continue;
+							}
+						}
+						if (record.type === "agent_settled") {
+							sawAgentSettled = true;
+							latestSettledGeneration = lastBoundaryReceipt?.generation ?? 0;
+						}
+						processEvent(record);
+					}
+				};
+				let sdkEventSequence = 0;
+				sdkDriver?.on("event", (event: any) => {
+					const text = JSON.stringify(event);
+					consumeJsonl([{ kind: "record", record: event, frame: { sequence: ++sdkEventSequence, text } }]);
 				});
-				proc.stderr.on("data", (data) => { stderrBuf += data.toString(); });
-				proc.on("error", (err) => {
-					result.errorMessage = `spawn error: ${err.message}`;
+				const lifecycle: { on(event: string, listener: (...args: any[]) => void): unknown } = sdkDriver ?? proc!;
+				proc?.stdout?.on("data", (data) => {
+					if (settled) return;
+					consumeJsonl(jsonlParser.push(data as Uint8Array));
+				});
+				proc?.stderr?.on("data", (data) => { if (!settled) stderrBuf += data.toString(); });
+				lifecycle.on("error", (err: Error) => {
+					if (settled) return;
+					result.errorMessage = `${sdkDriver ? "SDK session" : "spawn"} error: ${err.message}`;
 					activeRunSnapshot(result.usage, { phase: "error", lastActivityType: "spawn_error", lastActivitySummary: result.errorMessage, model, provider });
 					if (deadlineTimer) clearTimeout(deadlineTimer);
-					done(forcedExitCode ?? 1);
+					if (!sdkDriver) done(forcedExitCode ?? 1);
 				});
-				proc.on("close", (code, signal) => {
+				lifecycle.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+					if (settled) return;
 					if (deadlineTimer) clearTimeout(deadlineTimer);
-					if (buffer.trim()) processLine(buffer);
-					const resolvedCode = forcedExitCode ?? (code ?? (signal ? 130 : 1));
+					consumeJsonl(jsonlParser.finish());
+					if (sdkDriver) { accounting.ingestEntries(sdkDriver.getEntries() as any); syncUsage(); }
+					if (assistantMessageOpen) {
+						recordProtocolIssue({ kind: "truncated_frame", message: "assistant stream ended before message_end", incomplete: true });
+					}
+					if (requireBoundaryReceipt && forcedExitCode === null && (code ?? 1) === 0
+						&& (!sawAgentSettled || !sawValidBoundaryReceipt || sawInvalidBoundaryReceipt || !lastBoundaryReceipt || latestSettledGeneration !== boundaryGeneration || latestSettledGeneration !== lastBoundaryReceipt.generation || lastBoundaryReceipt.continueRequested)) {
+						recordProtocolIssue({
+							kind: "invalid_record", incomplete: true,
+							message: `missing valid settle boundary receipt (agent_settled=${sawAgentSettled}, receipt=${sawValidBoundaryReceipt})`,
+						});
+					}
+					if (requireBoundaryReceipt && lastBoundaryReceipt?.terminalFailure) result.errorMessage ??= `Pi boundary ${lastBoundaryReceipt.outcome}`;
+					const resolvedCode = forcedExitCode ?? code ?? 1;
+					if (forcedExitCode === null && signal) result.errorMessage = `child process terminated by signal ${signal}`;
 					if (resolvedCode === 124 && !result.errorMessage) {
 						result.errorMessage = `explicit deadline (${deadlineLabel}) exhausted`;
 					}
 					activeRunSnapshot(result.usage, {
 						phase: result.errorMessage ? "error" : "running",
-						lastActivityType: result.errorMessage ? "process_error" : "process_exit",
-						lastActivitySummary: result.errorMessage?.slice(0, 2000) ?? `child process exited (${resolvedCode})`,
+						lastActivityType: sdkDriver ? result.errorMessage ? "sdk_error" : "sdk_closed" : result.errorMessage ? "process_error" : "process_exit",
+						lastActivitySummary: result.errorMessage?.slice(0, 2000) ?? (sdkDriver ? `SDK session drained and disposed (${resolvedCode})` : `child process exited (${resolvedCode})`),
 						model: result.model ?? model,
 						provider,
 					});
-					if (terminationPromise) void terminationPromise.finally(() => done(resolvedCode));
-					else done(resolvedCode);
+					void (terminationPromise ?? identityObservation).finally(() => done(resolvedCode));
 				});
+				identityObservation = proc?.pid ? observeProcessAsync(proc.pid).then(observation => {
+					if (settled || proc.exitCode !== null || proc.signalCode !== null || observation.state !== "alive") return;
+					childProcessIdentities.set(proc, observation.identity);
+					try { bindAgentRunProcessIdentity(fluxDir, processRunId, attemptCount, observation.identity); }
+					catch (error) { reportRegistryFailure("process identity binding", error); }
+				}).catch(error => { reportRegistryFailure("process identity observation", error); }) : Promise.resolve();
+				if (startupFailure) requestTermination(72);
+				if (opts.signal?.aborted || readAgentRunStop(cwd, processRunId)) {
+					try { markAgentRunStopRequested(fluxDir, processRunId); }
+					catch (error) { reportRegistryFailure("stop request", error); }
+					requestTermination(130);
+				}
+				// Startup work (including birth inspection) consumes the absolute deadline.
+				const remaining = remainingDuration(deadline);
+				if (remaining !== undefined) {
+					if (remaining <= 0) requestTermination(124);
+					else deadlineTimer = setTimeout(() => requestTermination(124), remaining);
+				}
+				sdkDriver?.start(`Task: ${taskWithInbox}`);
 			});
 
 			result.exitCode = exitCode;
@@ -1586,10 +1943,31 @@ export async function runAgent(opts: {
 					provider,
 				});
 			}
+		} catch (error) {
+			result.exitCode = 72;
+			result.errorMessage = `Agent driver startup failed: ${error instanceof Error ? error.message : String(error)}`;
+			activeRunSnapshot(result.usage, { phase: "error", lastActivityType: "start_rejected", lastActivitySummary: result.errorMessage, model, provider });
 		} finally {
 			if (tmpDir) { try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* */ } }
 		}
 
+		if (opts.persistent && attemptSessionId) {
+			try {
+				const file = attemptSessionFile ?? resolveSessionFileById(sDir, attemptSessionId);
+				if (!file && !opts.invocationOverride) throw new Error("Persistent Pi session was not found after child exit");
+				if (file) {
+					result.sessionFile = file;
+					accounting.ingestEntries(parseSessionEntries(readFileSync(file, "utf8")) as any);
+				}
+			} catch (error) {
+				result.incomplete = true;
+				result.errorMessage ??= `Pi accounting session read failed: ${String(error)}`;
+				if (result.exitCode === 0) result.exitCode = 1;
+			}
+		}
+		syncUsage();
+		aggregateCostComplete &&= result.costAccounting?.complete === true;
+		aggregateAttributionComplete &&= result.costAccounting?.attributionComplete === true;
 		lastResult = result;
 		aggregateUsage.turns += usageNumber(result.usage.turns);
 		aggregateUsage.input += usageNumber(result.usage.input);
@@ -1598,6 +1976,11 @@ export async function runAgent(opts: {
 		aggregateUsage.cacheWrite += usageNumber(result.usage.cacheWrite);
 		aggregateUsage.cost += usageNumber(result.usage.cost);
 		aggregateUsage.contextTokens = Math.max(aggregateUsage.contextTokens, usageNumber(result.usage.contextTokens));
+		for (const error of result.protocolErrors ?? []) if (!aggregateProtocolErrors.includes(error)) aggregateProtocolErrors.push(error);
+		aggregateProtocolIncomplete ||= result.incomplete === true;
+		// A malformed or incomplete JSONL boundary is a Host protocol failure,
+		// not a provider retry candidate. Do not let a later attempt erase it.
+		if (aggregateProtocolErrors.length > 0) break;
 
 		// 成功 → 返回 (exitCode=0 且无 errorMessage)
 		if (result.exitCode === 0 && !result.errorMessage) {
@@ -1605,7 +1988,7 @@ export async function runAgent(opts: {
 		}
 
 		// 失败 → 判断是否应该重试
-		if ([74, 75, 130].includes(result.exitCode) || opts.signal?.aborted) break;
+		if ([72, 74, 75, 130].includes(result.exitCode) || opts.signal?.aborted) break;
 		const isTimeout = result.timedOut === true;
 		const isProcessError = result.exitCode !== 0 && !isTimeout;
 		const modelErr = isModelError(result.errorMessage);
@@ -1690,7 +2073,15 @@ export async function runAgent(opts: {
 		errorMessage: "subagent finished without a result", retryCount: Math.max(0, attemptCount - 1),
 	};
 	finalResult.usage = { ...aggregateUsage };
+	finalResult.costAccounting = { complete: aggregateCostComplete && !aggregateProtocolIncomplete, attributionComplete: aggregateAttributionComplete, provisional: false };
 	finalResult.retryCount = Math.max(finalResult.retryCount ?? 0, attemptCount - 1);
+	finalResult.protocolErrors = aggregateProtocolErrors.length > 0 ? [...aggregateProtocolErrors] : finalResult.protocolErrors;
+	finalResult.incomplete = aggregateProtocolIncomplete || finalResult.incomplete === true;
+	if (aggregateProtocolErrors.length > 0) {
+		finalResult.errorMessage = [finalResult.errorMessage, ...aggregateProtocolErrors.map(error => `Pi JSONL protocol error: ${error}`)]
+			.filter(Boolean).filter((message, index, all) => all.indexOf(message) === index).join("; ");
+		if (finalResult.exitCode === 0) finalResult.exitCode = 1;
+	}
 	finalResult.capability = {
 		snapshotPath: capabilitySnapshotPath,
 		narrowed: [...capabilityPolicy.narrowed],
@@ -1749,7 +2140,7 @@ export async function runAgent(opts: {
 		costUsd: Number(finalResult.usage.cost.toFixed(6)), contextTokens: finalResult.usage.contextTokens,
 		cacheHitRate: Number(hitRate.toFixed(4)), prefixLayout, exitCode: finalResult.exitCode,
 		timedOut: finalResult.timedOut,
-		persistent: opts.persistent ?? false, thinking: thinkingLevel,
+		persistent: opts.persistent ?? false, thinking: finalResult.thinkingLevel ?? thinkingLevel,
 		retryCount: finalResult.retryCount,
 		communication: finalResult.communication ? {
 			passed: finalResult.communication.passed,
@@ -1794,7 +2185,10 @@ export async function runAgent(opts: {
 		costUsd: aggregateUsage.cost,
 		attempt: attemptCount,
 		model: finalResult.model ?? opts.model ?? agent.model ?? null,
-		provider: observedProvider ?? opts.provider ?? agent.provider ?? null,
+		provider: finalResult.provider ?? observedProvider ?? opts.provider ?? agent.provider ?? null,
+		responseModel: finalResult.responseModel,
+		thinkingLevel: finalResult.thinkingLevel ?? thinkingLevel,
+		costAccounting: finalResult.costAccounting,
 		modelError,
 		providerError,
 		error: finalResult.errorMessage,
@@ -1824,12 +2218,14 @@ export async function runAgent(opts: {
 	} catch (error) {
 		reportRegistryFailure("terminal message rejection", error);
 	}
+	if (sdkOwner) retireSdkRunOwner(cwd, sdkOwner);
+	if (sdkLease) releaseActiveContext(cwd, sdkLease.leaseId);
 	clearAgentRunStop(cwd, processRunId);
 
 	// 文件锁: 释放所有锁
 	if (lockedFiles.length > 0) {
 		try {
-			const board = new SharedBoard(join(cwd, ".agentflux"));
+			const board = new SharedBoard(join(cwd, ".agentflux"), { runtimeOwner: sdkOwner });
 			board.releaseAllLocks(lockOwner);
 		} catch { /* */ }
 	}
@@ -1837,9 +2233,6 @@ export async function runAgent(opts: {
 	return finalResult;
 }
 
-/** 格式化 subagent 结果为工具返回 content */
-/** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
-/** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
 /** 格式化 subagent 结果为工具返回 content（last: 展示最近几条对话消息，默认最后 1 条） */
 export function formatAgentRunResult(r: AgentRunResult, last = 1): string {
 	const hitRate = r.usage.cacheRead / (r.usage.cacheRead + r.usage.input + 1e-9);
@@ -1855,7 +2248,7 @@ export function formatAgentRunResult(r: AgentRunResult, last = 1): string {
 		: r.output.trim() ? r.output : r.errorMessage ?? "(no message)";
 	const header = [
 		`[AgentFlux subagent: ${r.agent}${r.role ? ` · role=${r.role}` : ""}] ${succeeded ? "SUCCESS" : "FAILED"} (exit=${r.exitCode})`,
-		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}`,
+		`turns ${r.usage.turns} · in ${r.usage.input} · read ${r.usage.cacheRead} · hit ${(hitRate * 100).toFixed(0)}% · $${r.usage.cost.toFixed(4)}${retryInfo}${modelInfo}${r.backend ? ` · backend=${r.backend}` : ""}`,
 		...(r.errorMessage ? [`error: ${r.errorMessage}`] : []),
 		...(!succeeded ? ["next: choose one bounded action — continue directly without this delegation, select a healthy provider, or stop and report; do not repeat the same failed delegation without a new plan"] : []),
 	].join("\n");

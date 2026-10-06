@@ -51,9 +51,7 @@ export class AgentMessageRuntime {
 			let result: unknown;
 			if (input.action === "send") result = this.send(input);
 			else if (input.action === "poll") {
-				// Correlated mail belongs to one physical Run.  Keep legacy/general
-				// uncorrelated mail eligible, but never let a later Run consume an
-				// earlier Run's steer or handoff.
+				// correlationId 是目标 Run fence；peer handoff 通过 senderRunId 记录发送事实。
 				result = this.bus.poll(this.identity.agent, {
 					limit: input.limit,
 					correlationId: this.identity.runId,
@@ -110,11 +108,12 @@ export class AgentMessageRuntime {
 		const metadata = {
 			priority: input.priority,
 			dedupeKey: input.dedupeKey,
-			correlationId: this.identity.runId,
+			senderRunId: this.identity.runId,
 			taskId: this.identity.taskId,
 			senderInstanceId: this.identity.instanceId,
 		};
 		const type = input.type?.trim() || "handoff";
+		if (type === "steer") throw new Error("steer requires a target Run fence; use the Agent steer entry");
 		if (target === "broadcast") {
 			return this.bus.sendBroadcast(this.identity.agent, type, input.content, metadata);
 		}
@@ -126,6 +125,6 @@ export class AgentMessageRuntime {
 
 	private sentThisRunCount(): number {
 		return this.bus.listEnvelopes().filter(envelope =>
-			envelope.from === this.identity.agent && envelope.correlationId === this.identity.runId).length;
+			envelope.from === this.identity.agent && (envelope.senderRunId ?? envelope.correlationId) === this.identity.runId).length;
 	}
 }

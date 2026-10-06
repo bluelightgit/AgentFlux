@@ -1,9 +1,9 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createWorkflowDefinition } from "../../src/workflows/workflow-registry";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * P0-05 production-dist 真实链路：在全新 Pi 中运行真实 Provider Agent，
@@ -11,9 +11,10 @@ import { loadLiveConfig } from "./live-config";
  * heartbeat、阶段、最近活动、provider/model 以及最终单调收敛。
  */
 const sourceRoot = resolve(import.meta.dirname, "../..");
-const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `run-telemetry-${process.pid}`);
-const reportPath = join(sourceRoot, ".agentflux", "test-results", "run-telemetry-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `run-telemetry-${Date.now()}-${process.pid}`);
+const reportPath = join(sourceRoot, ".agentflux", "test-results", `run-telemetry-${Date.now()}-${process.pid}.json`);
+const latestReportPath = join(sourceRoot, ".agentflux", "test-results", "run-telemetry-latest.json");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
 interface RunFact {
@@ -23,6 +24,9 @@ interface RunFact {
 	status: string;
 	phase?: string;
 	pid?: number;
+	backend?: "process" | "sdk";
+	sdkSessionId?: string;
+	sdkOwner?: { host: { pid: number; birth: string }; generation: string };
 	attempt?: number;
 	turns?: number;
 	input?: number;
@@ -107,6 +111,7 @@ async function main(): Promise<void> {
 		models.roles.implementer.tools = ["read", "grep", "find", "ls", "bash"];
 		models.roles["failure-recovery"] = { model: unavailableModel, provider: config.providerId, thinking: "off", tools: [] };
 		writeFileSync(join(fixtureRoot, ".agentflux", "agentflux.json"), JSON.stringify({
+			subagent_runtime: config.subagentRuntime,
 			budget: { max_cost_per_task: 0.15, max_iterations: 3, max_wall_clock_seconds: 180 },
 			pricing: { enable_remote_fetch: false },
 		}, null, 2));
@@ -114,7 +119,7 @@ async function main(): Promise<void> {
 		createWorkflowDefinition(join(fixtureRoot, ".agentflux"), {
 			name: "p0-05-provider-recovery",
 			dag: {
-				description: "Recover an explicit model-resolution failure through the real production runner",
+				description: "Reject an unavailable explicit model before spawning; never silently downgrade",
 				nodes: [{
 					id: "recover", title: "Recover model", role: "failure-recovery", dependsOn: [],
 					parallelizable: false, acceptanceCriteria: [], files: [],
@@ -126,21 +131,19 @@ async function main(): Promise<void> {
 			"必须严格按顺序实际调用 AgentFlux 工具，不要调用 issue 或 message。",
 			"1) flux_agent action=create，name=telemetry-live，roles=[implementer]，scope=project。",
 			"2) flux_agent action=run，agent=telemetry-live，role=implementer，background=false。task 必须原样使用：先调用 bash 工具执行 node -e \"setTimeout(()=>process.exit(0),3000)\"；工具结束后再次调用 bash 执行同一命令；第二次工具结束后只回复 RUN_TELEMETRY_AGENT_OK。",
-			"3) Agent 成功后调用 flux_workflow，action=reuse，workflow=p0-05-provider-recovery。该固定 Workflow 的首选模型故意不存在，必须由 production runner 降级到健康模型并完成。",
-			"三个步骤都成功后，只输出 RUN_TELEMETRY_MAIN_OK。",
+			"3) Agent 成功后调用 flux_workflow，action=reuse，workflow=p0-05-provider-recovery。该固定 Workflow 的显式模型故意不存在，必须被拒绝。这是预期负例，不重试，不诊断，不改模型，不把 Workflow 失败说成成功。",
+			"只有前两步成功且第三步准确拒绝后，只输出 RUN_TELEMETRY_EXPECTED_REJECTION_OK。",
 		].join("\n");
 		const extensionEntry = useBuiltExtension
-			? join(fixtureRoot, "dist", "extension", "entry.js")
+			? join(fixtureRoot, "dist", "extension", "host-entry.ts")
 			: join(fixtureRoot, "src", "entry.ts");
 		const args = [
 			piCli, "--mode", "json", "-p", "--approve", "--no-extensions", "-e", extensionEntry,
 			"--no-skills", "--tools", "read,grep,find,ls,flux_task,flux_agent,flux_workflow",
 			...config.cliArgs(config.mainModel), prompt,
 		];
-		// AgentFlux 模型发现读取 os.homedir()，而 Pi 自身通过
-		// PI_CODING_AGENT_DIR 继续使用真实凭据。隔离 USERPROFILE 可确保
-		// 此恢复场景只有“故障模型 + 指定健康模型”两个候选，不漂移到
-		// 开发机全局模型目录中的其他通道。
+		// 隔离用户资源 discovery，真实凭据/typed runtime 仍来自显式 agentDir。
+		// 显式不可用模型必须在运行前拒绝，不能靠能力排序更换通道。
 		const childEnv: NodeJS.ProcessEnv = {
 			...config.env,
 			HOME: fixtureRoot,
@@ -192,7 +195,7 @@ async function main(): Promise<void> {
 			(snapshot.turns ?? 0) > 0
 			&& (snapshot.input ?? 0) + (snapshot.output ?? 0) > 0
 			&& (snapshot.costUsd ?? 0) > 0
-			&& !!snapshot.pid
+			&& (config.subagentRuntime === "sdk" ? snapshot.backend === "sdk" && snapshot.pid === undefined && snapshot.sdkOwner?.host.pid === piPid && !!snapshot.sdkSessionId : !!snapshot.pid)
 			&& !!snapshot.lastActivityAt
 			&& !!snapshot.heartbeatAt,
 		);
@@ -211,6 +214,7 @@ async function main(): Promise<void> {
 			provider: config.providerId,
 			model: config.workerModel,
 			thinking: config.thinking,
+			backend: config.subagentRuntime,
 			builtExtension: useBuiltExtension,
 			extensionEntry,
 			subagentEntry: useBuiltExtension ? join(fixtureRoot, "dist", "extension", "subagent-entry.js") : join(fixtureRoot, "src", "subagent-entry.ts"),
@@ -218,7 +222,7 @@ async function main(): Promise<void> {
 			piPid,
 			timedOut,
 			wallClockMs: Date.now() - startedAt,
-			marker: stdout.includes("RUN_TELEMETRY_MAIN_OK") || stderr.includes("RUN_TELEMETRY_MAIN_OK"),
+			marker: stdout.includes("RUN_TELEMETRY_EXPECTED_REJECTION_OK"),
 			sawActiveRun: activeSnapshots.length > 0,
 			sawToolPhase: activeSnapshots.some(snapshot => snapshot.phase === "tool" || snapshot.lastActivityType === "tool_start"),
 			sawOnlineNonzero: !!onlineNonzero,
@@ -237,6 +241,8 @@ async function main(): Promise<void> {
 			&& terminal.phase === "terminal"
 			&& !!terminal.finishedAt
 			&& terminal.pid === undefined
+			&& (terminal.backend ?? "process") === config.subagentRuntime
+			&& (config.subagentRuntime !== "sdk" || (terminal.sdkOwner?.host.pid === piPid && !!terminal.sdkSessionId))
 			&& (terminal.turns ?? 0) >= maximum("turns")
 			&& (terminal.input ?? 0) >= maximum("input")
 			&& (terminal.output ?? 0) >= maximum("output")
@@ -247,24 +253,23 @@ async function main(): Promise<void> {
 			&& (terminal.costUsd ?? 0) > 0
 			&& terminal.model === config.workerModel
 			&& terminal.provider === config.providerId;
-		const recoveryConsistent = !!recoveryRun
-			&& recoveryRun.status === "completed"
-			&& recoveryRun.phase === "terminal"
-			&& (recoveryRun.attempt ?? 0) >= 2
-			&& recoveryRun.model === config.workerModel
-			&& recoveryRun.provider === config.providerId
-			&& recoveryRun.modelError?.toLowerCase().includes("model") === true
-			&& !recoveryRun.error;
+		const taskStore = JSON.parse(readFileSync(join(fixtureRoot, ".agentflux/runtime/tasks.json"), "utf8"));
+		const expectedRejection = taskStore.executions.some((execution: any) => execution.status === "failed"
+			&& execution.invocationOutcomes?.some((outcome: any) => outcome.status === "failure"));
+		const recoveryConsistent = recoveryRun === undefined && expectedRejection
+			&& !JSON.parse(readFileSync(join(fixtureRoot, ".agentflux/runtime/runs.json"), "utf8")).runs.some((run: any) => run.model === unavailableModel);
 		const passed = !(timedOut || exitCode !== 0 || !useBuiltExtension || !evidence.marker || !evidence.sawActiveRun
 			|| !evidence.sawToolPhase || !evidence.sawOnlineNonzero || heartbeatValues.size < 2
 			|| !monotonic || !terminalConsistent || !recoveryConsistent || !terminal?.taskId || !terminal.executionId);
 		const report = { ...evidence, terminalConsistent, recoveryConsistent, passed };
 		writeFileSync(reportPath, JSON.stringify(report, null, 2));
+		writeFileSync(latestReportPath, JSON.stringify(report, null, 2));
 		if (!passed) throw new Error(`P0-05 live telemetry evidence failed; report=${reportPath}`);
 		console.log(JSON.stringify({ ...report, reportPath }, null, 2));
 	} finally {
-		try { rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); }
-		catch (error) { console.warn(`run telemetry fixture cleanup deferred: ${String(error)}`); }
+		// 成功/失败都保留原始进程流和工作区，不用删除负证据制造通过。
+		writeFileSync(join(fixtureRoot, "pi.stdout.jsonl"), stdout);
+		writeFileSync(join(fixtureRoot, "pi.stderr.log"), stderr);
 		config.cleanup();
 	}
 }

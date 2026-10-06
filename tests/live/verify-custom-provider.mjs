@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { getPiCliPath } from "../../src/core/pi-runtime.ts";
 
 const requests = [];
 const server = createServer((req, res) => {
@@ -44,12 +45,12 @@ writeFileSync(join(agentDir, "models.json"), JSON.stringify({
 }, null, 2));
 writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ "agentflux-ci": { type: "api_key", key: "ci-secret-key" } }, null, 2));
 
-const piCli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+const piCli = getPiCliPath();
 const child = spawn(process.execPath, [
 	piCli, "--mode", "json", "-p", "--no-extensions", "--no-skills",
 	"--model", "agentflux-ci/mock-model", "--thinking", "off",
 	"请只回复精确文本 REPLY_FROM_MOCK",
-], { cwd: "E:/agent-projects/AgentFlux", env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: ["ignore", "pipe", "pipe"] });
+], { cwd: resolve(import.meta.dirname, "../.."), windowsHide: true, env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, stdio: ["ignore", "pipe", "pipe"] });
 let stdout = "", stderr = "";
 child.stdout.on("data", (d) => (stdout += d));
 child.stderr.on("data", (d) => (stderr += d));

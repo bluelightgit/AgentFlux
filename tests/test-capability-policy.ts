@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	evaluateLockFileToolCall,
-	evaluateCapabilityToolCall, loadRegisteredCapabilityOverride, loadRegisteredCapabilityOverrideForRole, normalizeRuntimeCapabilityOverride,
+	evaluateCapabilityToolCall, capabilityToolUnsupportedReason, loadRegisteredCapabilityOverride, loadRegisteredCapabilityOverrideForRole, normalizeRuntimeCapabilityOverride,
 	normalizeRuntimeCommunicationOverride, resolveCapabilityPolicy, saveRegisteredCapabilityOverride,
 	writeEffectiveCapabilitySnapshot,
 	type CapabilityPolicyInput,
@@ -95,6 +95,14 @@ async function main() {
 			evaluateCapabilityToolCall(bashPolicy.effective, root, "bash", { command: "git reset --hard" })?.includes("Dangerous") === true
 				&& evaluateCapabilityToolCall(bashPolicy.effective, root, "bash", { command: "type ../secret" })?.includes("traversal") === true,
 			"bash gates active");
+		check("PowerShell is rejected before capability execution when no reliable gate exists",
+			capabilityToolUnsupportedReason("powershell")?.includes("reliable capability/path gate") === true
+				&& evaluateCapabilityToolCall({ ...bashPolicy.effective, tools: ["powershell"] }, root, "powershell", { command: "Get-ChildItem" })?.includes("unavailable") === true,
+			"PowerShell fail-closed");
+		rejects("PowerShell capability cannot widen the supported execution set", () => resolveCapabilityPolicy({
+			cwd: root, agentName: "powershell-agent", role: "reviewer", runId: "ps-run",
+			template: { ...template, tools: ["read", "powershell"] },
+		}), /PowerShell capability is unavailable/);
 
 		rejects("run tools cannot widen a registered allowlist", () => resolveCapabilityPolicy({
 			cwd: root, agentName: "a", role: "reviewer", runId: "r", template,
@@ -138,11 +146,12 @@ async function main() {
 			override: { tools: ["read"] },
 		}), /revision conflict/);
 		const foreignLock = join(fluxDir, "runtime", "capability-overrides", "reviewer-1.json.lock");
-		writeFileSync(foreignLock, "foreign-owner", "utf-8");
+		writeFileSync(foreignLock, `${process.pid}:foreign-owner`, "utf-8");
+		utimesSync(foreignLock, new Date(0), new Date(0));
 		rejects("concurrent override writer fails closed without deleting the foreign lock", () => saveRegisteredCapabilityOverride({
 			fluxDir, agentName: "reviewer-1", role: "reviewer", expectedRevision: 1,
 			override: { tools: ["read"] },
-		}), /already in progress/);
+		}), /lock timeout/);
 		check("failed concurrent writer preserves lock ownership", existsSync(foreignLock), foreignLock);
 		unlinkSync(foreignLock);
 		const roleBase = saveRegisteredCapabilityOverride({
@@ -156,6 +165,34 @@ async function main() {
 				&& loadRegisteredCapabilityOverride(fluxDir, "role-switch")?.role === "reviewer"
 				&& loadRegisteredCapabilityOverrideForRole(fluxDir, "role-switch", "implementer")?.override.tools?.join(",") === "read,bash",
 			`${roleBase.role}/${roleSecondary.role}`);
+		const badPath = join(fluxDir, "runtime", "capability-overrides", "corrupt-agent.json");
+		const valid = { ...saved, agentName: "corrupt-agent", override: { tools: ["read"] } };
+		for (const bad of ["{broken", "null", "[]", JSON.stringify({ ...valid, schemaVersion: 2 }),
+			JSON.stringify({ ...valid, agentName: "someone-else" }), JSON.stringify({ ...valid, revision: 0 }),
+			JSON.stringify({ ...valid, override: { tools: null } }), JSON.stringify({ ...valid, override: { workspace: { roots: [42] } } }),
+			JSON.stringify({ ...valid, override: { communication: { maxMessagesPerRun: 0 } } }),
+			JSON.stringify({ ...valid, override: { communication: { enabled: "false" } } })]) {
+			writeFileSync(badPath, bad);
+			rejects("corrupt override cannot restore template permissions", () => loadRegisteredCapabilityOverride(fluxDir, "corrupt-agent"), /[Cc]orrupt|[Ii]nvalid/);
+			rejects("save cannot overwrite corrupt evidence", () => saveRegisteredCapabilityOverride({ fluxDir, agentName: "corrupt-agent", role: "reviewer", override: {} }), /[Cc]orrupt|[Ii]nvalid/);
+			check("bad file preserved byte-for-byte", readFileSync(badPath, "utf8") === bad, bad);
+		}
+		const scopedFile = readdirSync(join(fluxDir, "runtime", "capability-overrides")).find(file => /^role-switch\.[a-f0-9]+\.json$/.test(file))!;
+		const scopedPath = join(fluxDir, "runtime", "capability-overrides", scopedFile);
+		const scopedBefore = readFileSync(scopedPath, "utf8");
+		for (const bad of ["{broken", JSON.stringify({ ...roleSecondary, role: "reviewer" })]) {
+			writeFileSync(scopedPath, bad);
+			rejects("bad role-scoped override cannot fall back to base", () => loadRegisteredCapabilityOverrideForRole(fluxDir, "role-switch", "implementer"), /[Cc]orrupt|[Ii]nvalid/);
+		}
+		writeFileSync(scopedPath, scopedBefore);
+		check("only missing override returns null", loadRegisteredCapabilityOverride(fluxDir, "absent") === null, "ENOENT");
+		const neverSpawned = join(root, "never-spawned.json");
+		process.env.AGENTFLUX_TEST_CAPTURE = neverSpawned;
+		const deniedRun = await runAgent({ cwd: root, agent: { name: "corrupt-agent", role: "reviewer", description: "bad policy", tools: ["read", "write"], systemPrompt: "x" },
+			task: "must not start", sessionId: "test", prefixLayout: true,
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests/helpers/successful-subagent.cjs")] } });
+		check("corrupt registered policy rejects before spawn", deniedRun.exitCode === 77 && !existsSync(neverSpawned), deniedRun.errorMessage ?? "");
+		delete process.env.AGENTFLUX_TEST_CAPTURE;
 		const snapshot = writeEffectiveCapabilitySnapshot(fluxDir, policy);
 		check("effective capability snapshot is a stable Desktop-readable contract",
 			existsSync(snapshot) && JSON.parse(readFileSync(snapshot, "utf-8")).schemaVersion === 1,
@@ -226,9 +263,14 @@ async function main() {
 			task: "must reject", sessionId: "test", prefixLayout: false,
 			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests", "helpers", "successful-subagent.cjs")] },
 		});
-		check("explicit workspace policy fails closed without the tool-hook extension",
-			noHook.exitCode === 77 && noHook.errorMessage?.includes("tool hook") === true,
-			noHook.errorMessage ?? "missing error");
+		const nativeCacheCapture = JSON.parse(readFileSync(capturePath, "utf-8"));
+		check("native cache mode still loads the mandatory tool-hook safety extension",
+			noHook.exitCode === 0 && nativeCacheCapture.argv.includes("--no-extensions")
+				&& nativeCacheCapture.argv.includes("-e")
+				&& /subagent-entry/.test(nativeCacheCapture.argv[nativeCacheCapture.argv.indexOf("-e") + 1])
+				&& nativeCacheCapture.argv.includes("--no-skills")
+				&& nativeCacheCapture.capability.workspace.roots.includes(root),
+			JSON.stringify(nativeCacheCapture.argv));
 	} finally {
 		delete process.env.AGENTFLUX_TEST_CAPTURE;
 		rmSync(root, { recursive: true, force: true });

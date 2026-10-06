@@ -1,13 +1,14 @@
+import { createAgent } from "../../src/agents/agent-store";
 import { createTaskExecutionPlan } from "../../src/core/task-execution";
-import { registerTask } from "../../src/core/task-registry";
+import { registerTask, updateTaskMetadata } from "../../src/core/task-registry";
 import { DEFAULT_CONFIG } from "../../src/core/types";
 import { createIssue } from "../../src/core/community";
-import { reviseWorkflowDefinition } from "../../src/workflows/workflow-registry";
+import { deleteWorkflowDefinition, reviseWorkflowDefinition } from "../../src/workflows/workflow-registry";
 
 const [mode, root, prefix, countRaw, selector] = process.argv.slice(2);
 const count = Number(countRaw);
 if (!mode || !root || !prefix || !Number.isInteger(count) || count < 1) {
-	throw new Error("usage: transactional-store-worker <task|workflow|issue> <root> <prefix> <count> [selector]");
+	throw new Error("usage: transactional-store-worker <task|workflow|issue|agent|workflow-bind|workflow-delete> <root> <prefix> <count> [selector]");
 }
 
 if (mode === "task") {
@@ -35,6 +36,14 @@ if (mode === "task") {
 			createdBy: prefix,
 		});
 	}
+} else if (mode === "workflow-bind") {
+	if (!selector) throw new Error("workflow-bind requires selector");
+	updateTaskMetadata(root, prefix, { resource: { type: "workflow", id: selector, version: 1 } });
+} else if (mode === "workflow-delete") {
+	if (!selector) throw new Error("workflow-delete requires selector");
+	deleteWorkflowDefinition(root, selector);
+} else if (mode === "agent") {
+	for (let index = 0; index < count; index++) createAgent(root, { name: prefix, modelsConfig: { models: {} } });
 } else {
 	throw new Error(`unknown mode: ${mode}`);
 }

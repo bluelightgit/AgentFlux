@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MessageBus } from "../src/core/message-bus";
 import { SharedBoard } from "../src/core/shared-board";
-import { RpcInboxPump } from "../src/extension/rpc-inbox-pump";
+import { readBoundaryStateOutcome, RpcInboxPump } from "../src/extension/rpc-inbox-pump";
 
 const results: Array<{ name: string; passed: boolean; detail: string }> = [];
 function check(name: string, passed: boolean, detail: string) {
@@ -66,22 +66,54 @@ async function main() {
 				&& idlePump.onAssistantMessageEnd(true) === 0,
 			bus.getDelivery(idleMessage.envelope.id, "desktop-a")?.status ?? "missing");
 		idlePump.onAgentStart();
-		check("successful injected prompt acknowledges V2 delivery",
-			idlePump.onAssistantMessageEnd(true, new Date("2026-07-16T12:00:01.000Z")) === 1
+		check("agent_start alone cannot acknowledge a queued prompt", idlePump.onAssistantMessageEnd(true) === 0, "needs actual user consumption");
+		idlePump.onMessageStart({ role: "user", content: [{ type: "text", text: idleCalls[0].content }] });
+		idlePump.onAssistantMessageEnd(true);
+		check("boundary outcome is cached before settlement", idlePump.onAgentBeforeSettle({ generation: 1, outcome: "completed" }), "completed boundary accepted");
+		check("successful consumed prompt acknowledges V2 delivery only at settled",
+			idlePump.onAgentSettled(new Date("2026-07-16T12:00:01.000Z")) === 1
 				&& bus.getDelivery(idleMessage.envelope.id, "desktop-a")?.status === "acknowledged",
 			bus.getDelivery(idleMessage.envelope.id, "desktop-a")?.status ?? "missing");
+		check("invalid BoundaryState cannot provide a settlement outcome",
+			readBoundaryStateOutcome({ outcome: "completed", entries: [], continue: false }) === null,
+			"context preview is mandatory");
+		check("valid BoundaryState exposes only its native outcome",
+			readBoundaryStateOutcome({
+				type: "agent_before_settle", entries: [], continue: false,
+				context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false },
+				outcome: "completed",
+			}) === "completed",
+			"completed");
+		const noBoundaryMessage = bus.sendDirect("main", "desktop-no-boundary", "handoff", "must wait for native boundary");
+		let noBoundaryContent = "";
+		const noBoundaryPump = new RpcInboxPump({
+			fluxDir, recipient: "desktop-no-boundary", isIdle: () => true,
+			sendUserMessage: content => { noBoundaryContent = content; },
+		});
+		await noBoundaryPump.tick();
+		noBoundaryPump.onAgentStart();
+		noBoundaryPump.onMessageStart({ role: "user", content: noBoundaryContent });
+		noBoundaryPump.onAssistantMessageEnd(true);
+		check("agent_settled without a valid before_settle outcome never ACKs", noBoundaryPump.onAgentSettled() === 0
+			&& bus.getDelivery(noBoundaryMessage.envelope.id, "desktop-no-boundary")?.status === "delivered", "delivery retained");
 
 		const steerCalls: Array<string | undefined> = [];
-		const steerMessage = bus.sendDirect("main", "desktop-b", "steer", "stop editing generated files", { priority: "critical" });
+		let steerContent = "";
+		const steerMessage = bus.sendDirect("main", "desktop-b", "steer", "stop editing generated files", { priority: "critical", correlationId: "desktop-b-run" });
 		const steerPump = new RpcInboxPump({
-			fluxDir, recipient: "desktop-b", isIdle: () => false,
-			sendUserMessage: (_content, options) => steerCalls.push(options?.deliverAs),
+			fluxDir, recipient: "desktop-b", runId: "desktop-b-run", isIdle: () => false,
+			sendUserMessage: (content, options) => { steerContent = content; steerCalls.push(options?.deliverAs); },
 		});
 		await steerPump.tick(new Date("2026-07-16T12:01:00.000Z"));
 		check("critical live message is delivered as steer",
 			steerCalls[0] === "steer", `mode=${steerCalls[0]}`);
-		check("steered turn acknowledges on its next successful assistant response",
-			steerPump.onAssistantMessageEnd(true) === 1
+		check("pre-injection streaming response cannot ACK steer", steerPump.onAssistantMessageEnd(true) === 0, "old response ignored");
+		steerPump.onAgentStart();
+		steerPump.onMessageStart({ role: "user", content: steerContent });
+		steerPump.onAssistantMessageEnd(true);
+		steerPump.onAgentBeforeSettle({ generation: 1, outcome: "completed" });
+		check("consumed steer acknowledges only after successful settled",
+			steerPump.onAgentSettled() === 1
 				&& bus.getDelivery(steerMessage.envelope.id, "desktop-b")?.status === "acknowledged",
 			bus.getDelivery(steerMessage.envelope.id, "desktop-b")?.status ?? "missing");
 
@@ -97,15 +129,25 @@ async function main() {
 		bus.reject("desktop-scoped", oldRunSteer.envelope.id, "test cleanup");
 
 		const followCalls: Array<string | undefined> = [];
+		let followContent = "";
 		const followMessage = bus.sendDirect("main", "desktop-c", "task_update", "after the current task, run tests");
 		const followPump = new RpcInboxPump({
 			fluxDir, recipient: "desktop-c", isIdle: () => false,
-			sendUserMessage: (_content, options) => followCalls.push(options?.deliverAs),
+			sendUserMessage: (content, options) => { followContent = content; followCalls.push(options?.deliverAs); },
 		});
 		await followPump.tick(new Date("2026-07-16T12:02:00.000Z"));
+		followPump.onAgentStart();
 		const currentTurnAck = followPump.onAssistantMessageEnd(true);
-		const followUpAck = followPump.onAssistantMessageEnd(true);
-		check("normal live message ACKs on the queued response without a second agent_start",
+		check("two current-task toolUse responses do not consume followUp", followPump.onAssistantMessageEnd(true) === 0 && bus.getDelivery(followMessage.envelope.id, "desktop-c")?.status === "delivered", "no early ACK");
+		check("unrelated task settled preserves queued followUp fence", followPump.onAgentSettled() === 0
+			&& followPump.getStats().inFlight && bus.getDelivery(followMessage.envelope.id, "desktop-c")?.status === "delivered", "no ACK and no reset");
+		followPump.onMessageStart({ role: "assistant", content: followContent }); // 回显不是 user 注入消费。
+		check("assistant echo cannot prove delivery consumption", followPump.onAssistantMessageEnd(true) === 0, "role checked");
+		followPump.onMessageStart({ role: "user", content: followContent });
+		followPump.onAssistantMessageEnd(true);
+		followPump.onAgentBeforeSettle({ generation: 1, outcome: "completed" });
+		const followUpAck = followPump.onAgentSettled();
+		check("normal live message ACKs on consumed/settled response without a second agent_start",
 			followCalls[0] === "followUp" && currentTurnAck === 0 && followUpAck === 1
 				&& bus.getDelivery(followMessage.envelope.id, "desktop-c")?.status === "acknowledged",
 			`mode=${followCalls[0]} currentAck=${currentTurnAck} followAck=${followUpAck}`);
@@ -118,7 +160,10 @@ async function main() {
 		});
 		await retryPump.tick(new Date("2026-07-16T12:03:00.000Z"));
 		retryPump.onAgentStart();
-		const failedAck = retryPump.onAssistantMessageEnd(false);
+		retryPump.onMessageStart({ role: "user", content: retryCalls[0] });
+		retryPump.onAssistantMessageEnd(false);
+		retryPump.onAgentBeforeSettle({ generation: 1, outcome: "error" });
+		const failedAck = retryPump.onAgentSettled();
 		const beforeLease = await retryPump.tick(new Date("2026-07-16T12:04:00.000Z"));
 		const afterLease = await retryPump.tick(new Date("2026-07-16T12:09:00.001Z"));
 		check("failed assistant response retains delivery for lease redelivery",
@@ -204,31 +249,58 @@ async function main() {
 			bus.getDelivery(wdMessage.envelope.id, "desktop-wd")?.status ?? "missing");
 		const afterWatchdog = await wdPump.tick(new Date("2026-07-16T12:23:03.000Z"));
 		check("watchdog reset unblocks later injection after lease",
-			afterWatchdog === 1 && wdCalls.length === 2,
+			afterWatchdog === 1 && wdCalls.length === 2 && wdCalls[0] !== wdCalls[1],
 			`after=${afterWatchdog} calls=${wdCalls.length}`);
+		wdPump.onMessageStart({ role: "user", content: wdCalls[0] });
 		wdPump.onAssistantMessageEnd(true);
+		check("late old injection cannot ACK a redelivered batch", wdPump.onAgentSettled() === 0 && bus.getDelivery(wdMessage.envelope.id, "desktop-wd")?.status === "delivered", "batch identity checked");
 
-		// ── followUp 卡死（下一次 message_end 永不出现）同样由 watchdog 兜底 ──
+		// ── 长任务队列不受握手超时限制；空闲后的真正丢失握手仍可重投 ──
 		const fuCalls: Array<string | undefined> = [];
+		let fuIdle = false;
 		const fuMessage = bus.sendDirect("main", "desktop-fu-wd", "task_update", "queued follow-up never drains");
 		const fuPump = new RpcInboxPump({
-			fluxDir, recipient: "desktop-fu-wd", isIdle: () => false,
+			fluxDir, recipient: "desktop-fu-wd", isIdle: () => fuIdle,
 			agentStartTimeoutMs: 1_000,
 			sendUserMessage: (_content, options) => fuCalls.push(options?.deliverAs),
 		});
 		await fuPump.tick(new Date("2026-07-16T12:24:00.000Z"));
-		// 某些宿主会为当前活动 lifecycle 再发 agent_start；不能清掉 followUp watchdog。
+		// 当前活动 lifecycle 的 agent_start/settled 均不能证明队列丢失。
 		fuPump.onAgentStart();
 		// 当前轮次正常结束（第一次 message_end 属于当前轮次，不 ACK followUp）
 		fuPump.onAssistantMessageEnd(true);
 		check("followUp batch waits for the queued message_end",
 			fuCalls[0] === "followUp" && fuPump.getStats().inFlightMessageIds[0] === fuMessage.envelope.id,
 			`mode=${fuCalls[0]} inFlight=${fuPump.getStats().inFlightMessageIds.length}`);
-		const fuTimedOut = fuPump.checkAgentStartTimeout(Date.now() + 2_000) ?? false;
-		check("followUp watchdog fires when the queued message_end never arrives",
+		const afterLongWork = Date.now() + 3_600_000;
+		check("busy one-hour followUp queue has no handshake timeout", !fuPump.checkAgentStartTimeout(afterLongWork), "no model deadline invented");
+		fuPump.onAgentSettled(new Date(afterLongWork));
+		await fuPump.tick(new Date(afterLongWork));
+		check("busy queue does not reinject after delivery lease expires", fuCalls.length === 1
+			&& bus.getDelivery(fuMessage.envelope.id, "desktop-fu-wd")?.attempts === 1, "same accepted queue batch");
+		fuIdle = true;
+		check("idle transition starts a fresh handshake window", !fuPump.checkAgentStartTimeout(afterLongWork), "queue wait not charged");
+		const fuTimedOut = fuPump.checkAgentStartTimeout(afterLongWork + 2_000);
+		check("idle lost followUp handshake remains bounded",
 			fuTimedOut === true && fuPump.getStats().inFlightMessageIds.length === 0
 				&& bus.getDelivery(fuMessage.envelope.id, "desktop-fu-wd")?.status === "delivered",
 			`timedOut=${fuTimedOut} inFlight=${fuPump.getStats().inFlightMessageIds.length}`);
+		let retryContent = "";
+		const autoRetryMail = bus.sendDirect("main", "retry-settled", "message", "handle after retry");
+		const autoRetryPump = new RpcInboxPump({ fluxDir, recipient: "retry-settled", isIdle: () => true,
+			agentStartTimeoutMs: 1, sendUserMessage: content => { retryContent = content; } });
+		await autoRetryPump.tick();
+		autoRetryPump.onAgentStart();
+		autoRetryPump.onMessageStart({ role: "user", content: retryContent });
+		autoRetryPump.onAssistantMessageEnd(false);
+		check("consumed batch has no model wall-clock watchdog", !autoRetryPump.checkAgentStartTimeout(Date.now() + 600000), "only handshake is bounded");
+		autoRetryPump.onAssistantMessageEnd(true);
+		autoRetryPump.onAgentBeforeSettle({ generation: 1, outcome: "completed" });
+		check("automatic retry may settle successfully before ACK", autoRetryPump.onAgentSettled() === 1 && bus.getDelivery(autoRetryMail.envelope.id, "retry-settled")?.status === "acknowledged", "final response wins");
+		const stoppedMail = bus.sendDirect("main", "retry-settled", "message", "stop before ACK");
+		await autoRetryPump.tick(); autoRetryPump.onMessageStart({ role: "user", content: retryContent });
+		autoRetryPump.onAssistantMessageEnd(true); autoRetryPump.stop();
+		check("stop prevents delayed settled from acknowledging", autoRetryPump.onAgentSettled() === 0 && bus.getDelivery(stoppedMail.envelope.id, "retry-settled")?.status === "delivered", "delivery retained");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

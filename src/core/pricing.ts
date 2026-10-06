@@ -5,13 +5,14 @@
  * 成本公式: cost = input×p_in + output×p_out + cacheRead×p_cacheRead + cacheWrite×p_cacheWrite
  *
  * 四层降级 (优先级从高到低):
- *   1. .agentflux/models.json  — 用户手填 relay 真实价 (覆盖一切)
- *   2. 远程价格源 (source_url)  — 默认 OpenRouter, 缓存 .agentflux/pricing-cache.json (TTL)
- *   3. 兜底均值               — 未知模型用价格表内所有模型各单价均值
- *   (4. source_url 可配置, 后续 GitHub Action 生成的 pricing-latest.json 替换, 不改代码)
+ *   1. .agentflux/models.json  — 用户显式覆盖，按 token 重算
+ *   2. Pi usage.cost.total    — 有限非负的原生请求级估计（保留 tier/1h/Fast 等语义）
+ *   3. 远程价格源 (source_url)  — 仅在没有原生总额时作 simple quote
+ *   4. 未知                  — 无可用报价时不捏造单价
+ *   (source_url 可配置, 后续 GitHub Action 生成的 pricing-latest.json 替换, 不改代码)
  *
- * token 本地算: pi 的 usage.input/output/cacheRead/cacheWrite 是 token 计数,
- *              本地 × 单价即得成本, 不依赖上游 cost.total (relay 可能返回 0).
+ * 用户价、Pi 原生估计、远程 simple quote 和未知是不同来源；模型元数据不是显式零价。
+ * cacheWrite1h 是 cacheWrite 的子集，reasoning 已包含在 output；这些均不是供应商账单。
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -82,7 +83,7 @@ function normalizeOpenRouter(json: any): RawPriceRow[] {
 	for (const m of data) {
 		const id = m.id;
 		const p = m.pricing ?? {};
-		if (!id || !p) continue;
+		if (typeof id !== "string" || !id || !hasExplicitPrices(p)) continue;
 		rows.push({
 			id,
 			input: num(p.prompt),
@@ -94,13 +95,22 @@ function normalizeOpenRouter(json: any): RawPriceRow[] {
 	return rows;
 }
 
+const PRICE_FIELDS = ["input", "prompt", "output", "completion", "cacheRead", "input_cache_read", "cacheWrite", "input_cache_write"] as const;
+function hasExplicitPrices(value: any): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const values = PRICE_FIELDS.filter(key => value[key] !== undefined && value[key] !== null).map(key => value[key]);
+	return values.length > 0 && values.every(value => (typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
+		&& Number.isFinite(Number(value)) && Number(value) >= 0);
+}
+
 /** 未来价格文件格式: {models:[{id,input,output,cacheRead,cacheWrite}]} 或 {[id]:{...}} */
 function normalizePriceFile(json: any): RawPriceRow[] {
 	const rows: RawPriceRow[] = [];
 	if (Array.isArray(json?.models)) {
 		for (const m of json.models) {
+			if (!m || typeof m.id !== "string" || !m.id || !hasExplicitPrices(m)) continue;
 			rows.push({
-				id: m.id,
+				id: m.provider ? `${m.provider}/${m.id}` : m.id,
 				input: num(m.input ?? m.prompt),
 				output: num(m.output ?? m.completion),
 				cacheRead: num(m.cacheRead ?? m.input_cache_read),
@@ -114,9 +124,9 @@ function normalizePriceFile(json: any): RawPriceRow[] {
 		for (const [id, p] of Object.entries(priceMap)) {
 			const model = p as any;
 			const pp = model?.pricing ?? model;
-			if (pp && typeof pp === "object") {
+			if (hasExplicitPrices(pp)) {
 				rows.push({
-					id,
+					id: model?.provider && !id.startsWith(`${model.provider}/`) ? `${model.provider}/${id}` : id,
 					input: num(pp.input ?? pp.prompt),
 					output: num(pp.output ?? pp.completion),
 					cacheRead: num(pp.cacheRead ?? pp.input_cache_read),
@@ -148,6 +158,7 @@ function normalizeModelsDev(json: any): RawPriceRow[] {
 			const mm = m as any;
 			if (!mm?.cost) continue;
 			const c = mm.cost;
+			if (!hasExplicitPrices(c)) continue;
 			// models.dev cost 单位是 $/M token → 转为 $/token
 			rows.push({
 				id: modelId,
@@ -399,7 +410,7 @@ export async function loadPricing(dir: string, cfg: PricingConfig, model?: strin
 	if (model) {
 		const found = lookupPrice({ entries, avg, fetchedAt, sourceUrl: cfg.source_url, remoteOk }, model);
 		if (found.source === "unknown") {
-			console.error(`[flux pricing] model=${model} → ⚠ UNKNOWN (no price data, cost will show $0/?). Add to models.json for accurate cost.`);
+			console.error(`[flux pricing] model=${model} -> WARNING: UNKNOWN quote; use available Pi usage estimates, not a billing guarantee. Add explicit prices to models.json.`);
 		} else {
 			console.error(`[flux pricing] model=${model} → source=${found.source} in=${found.input} out=${found.output} cacheRead=${found.cacheRead} | remote=${remoteOk} (${Object.keys(entries).length} entries)`);
 		}
@@ -423,24 +434,113 @@ function rowsToOpenRouterShape(rows: RawPriceRow[]): any[] {
 
 // ---------- 成本计算 ----------
 
+export interface UsageCostLike {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	total?: number;
+}
+
 export interface UsageLike {
 	input?: number;
 	output?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
+	/** Subset of cacheWrite retained for one hour; never add it separately. */
+	cacheWrite1h?: number;
+	/** Subset of output; never add it separately. */
+	reasoning?: number;
+	cost?: UsageCostLike;
 }
 
-/** 单条 usage × 单价 → 美元成本 */
+/** The source used for a Core estimate. `native` is Pi's finite cost.total. */
+export type UsageCostSource = "user" | "native" | "remote" | "fallback" | "unknown";
+
+export interface UsageCostResolution {
+	cost: number;
+	source: UsageCostSource;
+	/** True means the amount came from an explicit/native/simple quote. */
+	known: boolean;
+}
+
+export interface UsageCostResolutionOptions {
+	/** 物理 provider 身份；不能把其他 provider 的同名用户价格套过来。 */
+	provider?: string;
+	/** Override the native total when the caller has a request-level aggregate. */
+	nativeCost?: unknown;
+	/** Set false only when the caller intentionally wants to ignore native total. */
+	preferNative?: boolean;
+	/** Aggregated/heterogeneous usage must set this false when no native total exists. */
+	allowRemoteQuote?: boolean;
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function usageNumber(value: unknown): number {
+	return finiteNonNegative(value) ?? 0;
+}
+
+/** 单条 usage × 单价 → 美元成本。reasoning/cacheWrite1h 均不另加总量。 */
 export function calcCost(usage: UsageLike, price: PriceEntry): number {
 	if (price.source === "unknown") return 0; // 未知模型不估算
-	return (usage.input || 0) * price.input
-		+ (usage.output || 0) * price.output
-		+ (usage.cacheRead || 0) * price.cacheRead
-		+ (usage.cacheWrite || 0) * price.cacheWrite;
+	return usageNumber(usage.input) * price.input
+		+ usageNumber(usage.output) * price.output
+		+ usageNumber(usage.cacheRead) * price.cacheRead
+		+ usageNumber(usage.cacheWrite) * price.cacheWrite;
 }
 
-/** 多条 usage 累加成本 (按模型查价) */
+/**
+ * Resolve a single usage amount without losing the provenance of the estimate.
+ * The order is deliberately user override → native finite total → remote simple
+ * quote → unknown. A native total is authoritative for request-wide tiers,
+ * cache retention, Fast/fallback routing, and aggregated tool usage.
+ */
+export function resolveUsageCostDetailed(
+	usage: UsageLike,
+	model?: string,
+	table?: PricingTable,
+	options: UsageCostResolutionOptions = {},
+): UsageCostResolution {
+	const qualified = model && options.provider ? `${options.provider}/${model}` : model;
+	let price = table && qualified ? lookupPrice(table, qualified) : UNKNOWN_PRICE;
+	if (table && model && options.provider && price.source === "user") {
+		const exact = table.entries[qualified!]?.source === "user" ? table.entries[qualified!]
+			: table.entries[model]?.source === "user" ? table.entries[model] : undefined;
+		price = exact ?? UNKNOWN_PRICE;
+	}
+
+	// An explicit user quote is the only source allowed to replace native cost.
+	if (price.source === "user") {
+		return { cost: calcCost(usage, price), source: "user", known: true };
+	}
+
+	const native = options.nativeCost ?? usage.cost?.total;
+	if (options.preferNative !== false) {
+		const reported = finiteNonNegative(native);
+		if (reported !== undefined) return { cost: reported, source: "native", known: true };
+	}
+
+	if (options.allowRemoteQuote !== false && (price.source === "remote" || price.source === "fallback")) {
+		return { cost: calcCost(usage, price), source: price.source, known: true };
+	}
+
+	return { cost: 0, source: "unknown", known: false };
+}
+
+/** Main 与子 Run 共用同一费用来源规则；显式零价仍保留最高优先级。 */
+export function resolveUsageCost(
+	usage: UsageLike,
+	model?: string,
+	table?: PricingTable,
+	options?: UsageCostResolutionOptions,
+): number {
+	return resolveUsageCostDetailed(usage, model, table, options).cost;
+}
+
+/** 多条 usage 累加成本，沿用 user → native → remote → unknown 优先级。 */
 export function calcCostCumulative(usages: UsageLike[], table: PricingTable, relayName: string): number {
-	const price = lookupPrice(table, relayName);
-	return usages.reduce((sum, u) => sum + calcCost(u, price), 0);
+	return usages.reduce((sum, usage) => sum + resolveUsageCost(usage, relayName, table), 0);
 }

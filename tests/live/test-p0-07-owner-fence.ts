@@ -2,7 +2,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_pr
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { markAgentRunRunning, registerAgentRun } from "../../src/core/run-registry";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * Built-extension owner-fence regression.  A real Main Pi owns a running
@@ -14,7 +14,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-owner-fence-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-owner-fence-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
 interface ProcessEvidence {
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
 		const models: any = config.fluxModelsJson();
 		models.roles.implementer.tools = ["read", "grep", "find", "ls", "bash"];
 		writeJson(join(fixtureRoot, ".agentflux", "models.json"), models);
-		const extensionEntry = join(fixtureRoot, "dist", "extension", "entry.js");
+		const extensionEntry = join(fixtureRoot, "dist", "extension", "host-entry.ts");
 		mainPi = launch(extensionEntry, "owner-fence-main", [
 			"严格按顺序调用 AgentFlux 工具，不要自行完成任务。",
 			"1) 调用 flux_agent action=create，name=owner-fence-live，role=implementer，scope=project。",

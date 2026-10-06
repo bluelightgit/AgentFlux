@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readJsonStore, updateJsonStore } from "../core/json-store";
+import { readJsonStore, withJsonStoreLock } from "../core/json-store";
+import { updateReferenceStore as updateJsonStore, withAgentReferenceFence } from "../core/agent-reference-fence";
+import { resolveAgentReference } from "../core/agent-reference-target";
+import { dirname } from "node:path";
 import type { TaskDAG } from "./dag-executor";
+import { getTask, listTasks } from "../core/task-registry";
 
 export interface WorkflowDefinition {
 	id: string;
@@ -65,13 +69,28 @@ export function listWorkflowDefinitions(fluxDir: string, includeVersions = false
 	return [...latest.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+/** 引用绑定与删除共用同一 registry fence；锁序固定为 Workflow → Task。 */
+export function withWorkflowReference<R>(fluxDir: string, reference: { id: string; version?: number }, bind: () => R): R {
+	return withAgentReferenceFence(() => withJsonStoreLock(storePath(fluxDir), () => {
+		const selector = reference.version === undefined ? reference.id : `${reference.id}@${reference.version}`;
+		const definition = findDefinition(readStore(fluxDir), selector);
+		if (!definition) throw new Error(`Workflow not found: ${selector}`);
+		if (definition.id !== reference.id) throw new Error("Workflow binding requires a stable definition id");
+		return bind();
+	}));
+}
+
+function activeReferences(fluxDir: string): Array<{ id: string; version?: number }> {
+	return listTasks(fluxDir).filter(task => ["created", "running"].includes(task.status) && task.resource?.type === "workflow").map(task => task.resource!);
+}
+
 /** 删除保存的 Workflow 定义（含全部版本）；运行中的定义拒绝删除。 */
 export function deleteWorkflowDefinition(fluxDir: string, selector: string, activeSelectors: ReadonlySet<string> = new Set()): WorkflowDefinition {
 	let removed: WorkflowDefinition | undefined;
 	updateStore(fluxDir, store => {
 		const target = findDefinition(store, selector);
 		if (!target) throw new Error(`Workflow not found: ${selector}`);
-		if (activeSelectors.has(target.name) || activeSelectors.has(target.id)) {
+		if (activeSelectors.has(target.name) || activeSelectors.has(target.id) || activeReferences(fluxDir).some(ref => ref.id === target.id || ref.id === target.name)) {
 			throw new Error(`Workflow is currently running and cannot be deleted: ${target.name}`);
 		}
 		const kept = store.definitions.filter(definition => definition.id !== target.id);
@@ -86,10 +105,18 @@ export function getWorkflowDefinition(fluxDir: string, selector: string): Workfl
 	return findDefinition(readStore(fluxDir), selector);
 }
 
+function bindAgentReferences(fluxDir: string, dag: TaskDAG, sourceTaskId?: string): TaskDAG {
+	const copy = structuredClone(dag);
+	const owner = sourceTaskId ? getTask(fluxDir, sourceTaskId)?.sessionId : undefined;
+	for (const node of copy.nodes) if (node.agentId !== undefined) node.agentId = resolveAgentReference(dirname(fluxDir), node.agentId, owner).id;
+	return copy;
+}
+
 export function createWorkflowDefinition(
 	fluxDir: string,
 	input: { name: string; dag: TaskDAG; sourceTaskId?: string },
 ): WorkflowDefinition {
+	if (input.dag.invocationTask !== undefined) throw new Error("Saved Workflow definitions cannot contain invocationTask");
 	const name = input.name.trim();
 	if (!name) throw new Error("Workflow name cannot be empty");
 	const now = new Date().toISOString();
@@ -107,6 +134,7 @@ export function createWorkflowDefinition(
 		if (store.definitions.some(item => item.name === name)) {
 			throw new Error(`Workflow name already exists: ${name}`);
 		}
+		definition.dag = bindAgentReferences(fluxDir, input.dag, input.sourceTaskId);
 		store.definitions.push(definition);
 		return definition;
 	});
@@ -117,6 +145,7 @@ export function reviseWorkflowDefinition(
 	selector: string,
 	input: { dag: TaskDAG; sourceTaskId?: string; name?: string },
 ): WorkflowDefinition {
+	if (input.dag.invocationTask !== undefined) throw new Error("Saved Workflow definitions cannot contain invocationTask");
 	return updateStore(fluxDir, store => {
 		const previous = findDefinition(store, selector);
 		if (!previous) throw new Error(`Workflow not found: ${selector}`);
@@ -129,7 +158,7 @@ export function reviseWorkflowDefinition(
 			name,
 			version: Math.max(...store.definitions.filter(item => item.id === previous.id).map(item => item.version)) + 1,
 			description: input.dag.description,
-			dag: structuredClone(input.dag),
+			dag: bindAgentReferences(fluxDir, input.dag, input.sourceTaskId),
 			sourceTaskId: input.sourceTaskId,
 			createdAt: previous.createdAt,
 			updatedAt: new Date().toISOString(),
@@ -139,7 +168,9 @@ export function reviseWorkflowDefinition(
 		// （与 Agent GC keepLatestK 同一语义；最新版本永远保留）
 		const history = store.definitions.filter(item => item.id === previous.id)
 			.sort((a, b) => b.version - a.version);
+		const refs = activeReferences(fluxDir);
 		for (const stale of history.slice(MAX_VERSIONS_PER_WORKFLOW)) {
+			if (refs.some(ref => (ref.id === stale.id || ref.id === stale.name) && (ref.version === undefined || ref.version === stale.version))) continue;
 			const index = store.definitions.indexOf(stale);
 			if (index !== -1) store.definitions.splice(index, 1);
 		}

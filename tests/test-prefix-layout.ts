@@ -79,7 +79,7 @@ check("cache_control is added to last content block of history message", () => {
 	assert.deepStrictEqual(lastBlock.cache_control, { type: "ephemeral" });
 });
 
-check("removes existing cache_control from all blocks before adding", () => {
+check("preserves existing native cache_control without rewriting", () => {
 	const msgs = [
 		{
 			role: "user",
@@ -92,13 +92,21 @@ check("removes existing cache_control from all blocks before adding", () => {
 	];
 	const payload = makePayload(msgs);
 	const result = applyPrefixLayout(payload, enabledConfig);
-	const histMsg = result.payload.messages[0];
-	for (const block of histMsg.content) {
-		if (block !== histMsg.content[histMsg.content.length - 1]) {
-			assert.strictEqual(block.cache_control, undefined);
-		}
-	}
-	assert.deepStrictEqual(histMsg.content[histMsg.content.length - 1].cache_control, { type: "ephemeral" });
+	assert.strictEqual(result.result.applied, false);
+	assert.strictEqual(result.payload, payload);
+	assert.deepStrictEqual(result.payload.messages[0].content.map((block: any) => block.cache_control), [{ type: "ephemeral" }, { type: "ephemeral" }]);
+});
+
+check("preserves native 1h TTL, system and tools", () => {
+	const payload = { system: [{ text: "stable", cache_control: { type: "ephemeral", ttl: "1h" } }], tools: [{ name: "read", cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [
+		{ role: "user", content: [{ type: "text", text: "history", cache_control: { type: "ephemeral", ttl: "1h" } }] },
+		{ role: "user", content: [{ type: "text", text: "next" }] },
+	] };
+	const original = JSON.stringify(payload);
+	const result = applyPrefixLayout(payload, enabledConfig);
+	assert.strictEqual(result.result.applied, false);
+	assert.strictEqual(result.payload, payload);
+	assert.strictEqual(JSON.stringify(result.payload), original);
 });
 
 check("does not modify the last message", () => {

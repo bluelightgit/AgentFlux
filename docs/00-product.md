@@ -1,6 +1,6 @@
 # AgentFlux 产品目标
 
-更新日期：2026-09-01。
+更新日期：2026-10-02。
 
 ## 产品定位
 
@@ -23,14 +23,17 @@ AgentFlux 是基于 pi 的 Agent 调度扩展，提供 Core + pi TUI。用户只
 
 - Core：Agent、Task、Execution、Workflow、Community、Message V2、权限、成本、缓存影响、生命周期和持久化。
 - TUI：Tasks、Workflows、Agents、Community、Messages、Fork、Spaces、Runtime 和 Maintenance。
-- 真实 pi 子进程、模型/provider 继承、角色级能力收窄、在线进度/成本、运行 steer/取消/重试、写密集型 Run 的可选独立 checkout 和外部 dogfood 验证。
+- 配置选择真实 pi 子进程或 Main 内独立 SDK 会话，保持同一 Core Agent/Run；模型/provider 继承、角色级能力收窄、在线进度/成本、运行 steer/取消/重试、写密集型 Run 的可选独立 checkout 和外部 dogfood 验证。
 
 ### 明确边界
 
-- 没有独立的执行方式选择器；Main 根据目标决定直接执行或调用可选协作能力。
+- 没有独立的用户工作方式选择器；Main 根据目标决定直接执行或调用可选协作能力。子代理底层 `process`/`sdk` 由配置文件选择，不建立另一套业务身份或调度入口。
+- 同进程 SDK 会话共享 Main 的故障域，只能协作式取消；需要独立生存/进程级强制终止时使用 process 后端。两者均不是 OS 沙箱，SDK 也不减少模型 Token 费用。
 - 当前 Host 文件/进程门禁以及 Git worktree/独立 checkout 都不等于操作系统隔离；需要强隔离时使用外部受控运行环境。
 - Workflow 和 Community 是可选执行方法，不替代 Main 的判断，也不创建第二套 Agent 身份系统。
 - 运行时事实必须来自 Core Registry，TUI 不能依据零散事件推测状态。
+- 产品自带提示、TUI、通知、错误、日志及运行时提示词统一使用英文，不使用 emoji。用户输入、历史记录和外部原始输出保持原文，不为文案统一改写持久事实；开发文档与代码注释可使用中文。
+- Windows 后台 Agent 启动与控制不应弹出额外终端；只有用户明确请求交互式终端时才允许显示。
 - Agent、planner、Workflow 节点和 judge 的模型执行默认没有硬 wall-clock deadline；项目、父 Task 或单次 Run 可显式设置，成本、轮次、并发预算和用户取消仍然有效。
 
 ## 成功标准

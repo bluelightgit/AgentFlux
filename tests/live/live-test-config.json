@@ -3,12 +3,12 @@
   "defaultProfile": "local",
   "profiles": {
     "local": {
-      "provider": { "value": "openai-codex", "env": "PI_PROVIDER" },
-      "mainModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
-      "plannerModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
-      "workerModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
-      "judgeModel": { "value": "gpt-5.6-luna", "env": "PI_MODEL" },
-      "thinking": { "value": "max", "env": "PI_THINKING" }
+      "provider": "openai-codex",
+      "mainModel": "gpt-5.6-luna",
+      "plannerModel": "gpt-5.6-luna",
+      "workerModel": "gpt-5.6-luna",
+      "judgeModel": "gpt-5.6-luna",
+      "thinking": "max"
     },
     "environment": {
       "provider": { "env": "AGENTFLUX_LIVE_PROVIDER_ID" },

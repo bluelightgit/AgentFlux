@@ -1,14 +1,27 @@
 /** Three-layer capability policy: role template -> registered instance -> run. */
-import {
-	existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
-} from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { withJsonStoreLock, writeJsonFileAtomic } from "./json-store";
 import {
 	resolveCommunicationPolicy, type CommunicationPolicy, type CommunicationPolicyInput,
 } from "./communication-policy";
 
 export type CapabilityLayer = "template" | "registered" | "run";
+
+/**
+ * Pi exposes PowerShell as a separate tool, but AgentFlux does not yet have a
+ * reliable cross-platform parser/path gate for it.  It must therefore stay
+ * fail-closed at both capability resolution and the runtime tool hook.  This
+ * is deliberately not a Bash allowlist expansion.
+ */
+export const UNSUPPORTED_CAPABILITY_TOOLS = ["powershell"] as const;
+
+export function capabilityToolUnsupportedReason(toolName: string): string | null {
+	return UNSUPPORTED_CAPABILITY_TOOLS.includes(toolName.toLowerCase() as (typeof UNSUPPORTED_CAPABILITY_TOOLS)[number])
+		? "PowerShell capability is unavailable: a reliable capability/path gate is not implemented"
+		: null;
+}
 
 export interface WorkspaceCapabilityInput {
 	roots?: string[];
@@ -274,6 +287,10 @@ export function resolveCapabilityPolicy(input: {
 	if (mcpServers.length > 0) {
 		throw new Error(`MCP server policy cannot be enforced by the current pi runtime: ${mcpServers.join(", ")}`);
 	}
+	const unsupportedTool = tools.find(tool => capabilityToolUnsupportedReason(tool));
+	if (unsupportedTool) {
+		throw new Error(capabilityToolUnsupportedReason(unsupportedTool)!);
+	}
 	if (communication.enabled && !tools.includes("flux_agent_message")) tools = [...tools, "flux_agent_message"].sort();
 	return {
 		schemaVersion: 1,
@@ -290,16 +307,63 @@ export function resolveCapabilityPolicy(input: {
 }
 
 function readJson<T>(path: string): T | null {
-	if (!existsSync(path)) return null;
-	try { return JSON.parse(readFileSync(path, "utf-8")) as T; } catch { return null; }
+	let text: string;
+	try { text = readFileSync(path, "utf-8"); } catch (error: any) {
+		if (error?.code === "ENOENT") return null;
+		throw new Error(`Cannot read capability store: ${path}`, { cause: error });
+	}
+	try {
+		const value = JSON.parse(text);
+		if (value === null) throw new Error("null is not a capability record");
+		return value as T;
+	} catch (error) {
+		throw new Error(`Corrupt capability store (not overwritten): ${path}`, { cause: error });
+	}
 }
 
-function writeAtomic(path: string, value: unknown): void {
-	mkdirSync(dirname(path), { recursive: true });
-	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	writeFileSync(temp, JSON.stringify(value, null, 2), "utf-8");
-	renameSync(temp, path);
+function objectWithKeys(value: unknown, keys: string[]): value is Record<string, any> {
+	return value !== null && typeof value === "object" && !Array.isArray(value)
+		&& Object.keys(value).every(key => keys.includes(key));
 }
+
+function validOverride(value: unknown): value is CapabilityPolicyInput {
+	if (!objectWithKeys(value, ["tools", "skills", "mcpServers", "communication", "workspace"])) return false;
+	const strings = (list: unknown, test: (s: string) => boolean) => Array.isArray(list)
+		&& list.every(item => typeof item === "string" && test(item));
+	for (const key of ["tools", "skills", "mcpServers"]) {
+		if (value[key] !== undefined && !strings(value[key], s => ITEM.test(s))) return false;
+	}
+	const w = value.workspace;
+	if (w !== undefined) {
+		if (!objectWithKeys(w, ["roots", "deniedPaths", "blockDangerousCommands"])) return false;
+		for (const key of ["roots", "deniedPaths"]) {
+			if (w[key] !== undefined && !strings(w[key], s => !!s.trim() && !s.includes("\u0000"))) return false;
+		}
+		if (w.blockDangerousCommands !== undefined && typeof w.blockDangerousCommands !== "boolean") return false;
+	}
+	const c = value.communication;
+	if (c !== undefined) {
+		if (!objectWithKeys(c, ["enabled", "actions", "allowedTargets", "requiredSendTo", "requireExplicitInboxAck", "maxMessagesPerRun"])) return false;
+		for (const key of ["enabled", "requireExplicitInboxAck"]) if (c[key] !== undefined && typeof c[key] !== "boolean") return false;
+		if (c.actions !== undefined && !strings(c.actions, s => ["send", "poll", "ack", "status"].includes(s))) return false;
+		for (const key of ["allowedTargets", "requiredSendTo"]) if (c[key] !== undefined && !strings(c[key], s => /^(?:\*|group:\*|group:[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}|[a-zA-Z0-9][a-zA-Z0-9._-]{0,79})$/.test(s))) return false;
+		if (c.maxMessagesPerRun !== undefined && (!Number.isInteger(c.maxMessagesPerRun) || c.maxMessagesPerRun < 1 || c.maxMessagesPerRun > 100)) return false;
+	}
+	return true;
+}
+
+function readRegistered(path: string, agentName: string, role?: string): RegisteredCapabilityOverride | null {
+	const record = readJson<unknown>(path);
+	if (record === null) return null;
+	if (!objectWithKeys(record, ["schemaVersion", "agentName", "role", "revision", "override", "updatedAt"])
+		|| record.schemaVersion !== 1 || record.agentName !== agentName
+		|| typeof record.role !== "string" || !record.role.trim() || (role !== undefined && record.role !== role)
+		|| !Number.isSafeInteger(record.revision) || record.revision < 1
+		|| typeof record.updatedAt !== "string" || !Number.isFinite(Date.parse(record.updatedAt))
+		|| !validOverride(record.override)) throw new Error(`Invalid capability override schema/identity: ${path}`);
+	return record as RegisteredCapabilityOverride;
+}
+
 
 function overridePath(fluxDir: string, agentName: string): string {
 	if (!NAME.test(agentName)) throw new Error(`invalid capability agent name: ${agentName}`);
@@ -323,8 +387,7 @@ function effectiveSnapshotPath(fluxDir: string, agentName: string, role?: string
 }
 
 export function loadRegisteredCapabilityOverride(fluxDir: string, agentName: string): RegisteredCapabilityOverride | null {
-	const record = readJson<RegisteredCapabilityOverride>(overridePath(fluxDir, agentName));
-	return record?.schemaVersion === 1 && record.agentName === agentName ? record : null;
+	return readRegistered(overridePath(fluxDir, agentName), agentName);
 }
 
 /** 按本次所选角色读取实例收窄；旧的单角色文件仍可直接使用。 */
@@ -333,8 +396,8 @@ export function loadRegisteredCapabilityOverrideForRole(
 	agentName: string,
 	role: string,
 ): RegisteredCapabilityOverride | null {
-	const scoped = readJson<RegisteredCapabilityOverride>(roleOverridePath(fluxDir, agentName, role));
-	if (scoped?.schemaVersion === 1 && scoped.agentName === agentName && scoped.role === role) return scoped;
+	const scoped = readRegistered(roleOverridePath(fluxDir, agentName, role), agentName, role);
+	if (scoped) return scoped;
 	const base = loadRegisteredCapabilityOverride(fluxDir, agentName);
 	return base?.role === role ? base : null;
 }
@@ -353,28 +416,13 @@ export function saveRegisteredCapabilityOverride(input: {
 	override: CapabilityPolicyInput;
 	expectedRevision?: number;
 }): RegisteredCapabilityOverride {
-	const base = loadRegisteredCapabilityOverride(input.fluxDir, input.agentName);
-	// 保留旧的单角色文件作为默认角色；其他角色使用独立文件，避免覆盖不同角色的实例收窄。
-	const path = base && base.role !== input.role
-		? roleOverridePath(input.fluxDir, input.agentName, input.role)
-		: overridePath(input.fluxDir, input.agentName);
-	const lockPath = `${path}.lock`;
-	mkdirSync(dirname(path), { recursive: true });
-	let fd: number | null = null;
-	let ownsLock = false;
-	try {
-		try {
-			fd = openSync(lockPath, "wx");
-		} catch (error: any) {
-			if (error?.code !== "EEXIST") throw error;
-			let stale = false;
-			try { stale = Date.now() - statSync(lockPath).mtimeMs > 30_000; } catch {}
-			if (!stale) throw new Error(`capability override update already in progress: ${input.agentName}`);
-			try { unlinkSync(lockPath); } catch {}
-			fd = openSync(lockPath, "wx");
-		}
-		ownsLock = true;
-		const current = readJson<RegisteredCapabilityOverride>(path);
+	if (!validOverride(input.override) || !input.role?.trim()) throw new Error("Invalid capability override input");
+	const basePath = overridePath(input.fluxDir, input.agentName);
+	// 所有角色共用 base fence，选择文件与 revision 检查也在锁内，防止首次并发写覆盖另一角色。
+	return withJsonStoreLock(basePath, () => {
+		const base = loadRegisteredCapabilityOverride(input.fluxDir, input.agentName);
+		const path = base && base.role !== input.role ? roleOverridePath(input.fluxDir, input.agentName, input.role) : basePath;
+		const current = readRegistered(path, input.agentName, input.role);
 		if (input.expectedRevision !== undefined && (current?.revision ?? 0) !== input.expectedRevision) {
 			throw new Error(`capability revision conflict: expected ${input.expectedRevision}, current ${current?.revision ?? 0}`);
 		}
@@ -386,17 +434,14 @@ export function saveRegisteredCapabilityOverride(input: {
 			override: input.override,
 			updatedAt: new Date().toISOString(),
 		};
-		writeAtomic(path, record);
+		writeJsonFileAtomic(path, record);
 		return record;
-	} finally {
-		if (fd !== null) closeSync(fd);
-		if (ownsLock) try { unlinkSync(lockPath); } catch {}
-	}
+	});
 }
 
 export function writeEffectiveCapabilitySnapshot(fluxDir: string, policy: ResolvedCapabilityPolicy, role?: string): string {
 	const path = effectiveSnapshotPath(fluxDir, policy.agentName, role);
-	writeAtomic(path, policy);
+	writeJsonFileAtomic(path, policy);
 	return path;
 }
 
@@ -407,6 +452,12 @@ export function evaluateCapabilityToolCall(
 	toolName: string,
 	input: Record<string, unknown>,
 ): string | null {
+	if (!policy || !Array.isArray(policy.tools) || !policy.workspace
+		|| !Array.isArray(policy.workspace.roots) || !Array.isArray(policy.workspace.deniedPaths)) {
+		return "Invalid effective capability policy; tool call rejected";
+	}
+	const unsupportedReason = capabilityToolUnsupportedReason(toolName);
+	if (unsupportedReason) return unsupportedReason;
 	if (!policy.tools.includes(toolName)) return `Tool ${toolName} is not allowed by effective capability policy`;
 	const roots = policy.workspace.roots.map(root => resolve(cwd, root));
 	const denied = policy.workspace.deniedPaths.map(path => resolve(cwd, path));

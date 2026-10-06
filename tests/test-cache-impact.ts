@@ -123,7 +123,7 @@ check("returns warning string when should notify user", () => {
 	const result = assessCacheImpact("tool_schema", 1);
 	const warning = formatCacheImpactWarning(result);
 	assert.ok(warning !== null);
-	assert.ok(warning!.includes("⚠ Cache impact"));
+	assert.ok(warning!.includes("Warning: Cache impact"));
 	assert.ok(warning!.includes("tool_schema"));
 	assert.ok(warning!.includes("cost_sensitivity"));
 	assert.ok(warning!.includes("reusable-prefix=invalidated"));

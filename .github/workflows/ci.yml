@@ -7,12 +7,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        node: [20, 22]
+        os: [ubuntu-latest, windows-latest]
+        node: ["22.19.0", "24"]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,24 +31,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Unit tests
-        run: npm run test:unit
+      - name: Verify
+        run: npm run verify
 
       - name: Production build
         run: npm run build
 
-      - name: Verify package contents
-        run: |
-          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
-          grep -q "dist/extension/entry.js" /tmp/pack.txt
-          grep -q "README.md" /tmp/pack.txt
-          test -f dist/extension/entry.js
-          test -f dist/extension/subagent-entry.js
-          if grep -q "dist/host/" /tmp/pack.txt || grep -q "dist/contracts/" /tmp/pack.txt; then
-            echo "host/contracts 已随 PiDeck 移除，不应出现在发布包中"
-            exit 1
-          fi
-          echo "package layout OK"
+      - name: Verify package and offline Host loader
+        run: npm run check:package

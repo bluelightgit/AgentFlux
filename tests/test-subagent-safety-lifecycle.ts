@@ -40,6 +40,17 @@ try {
 	check("provider error message cannot be reported as exit-code zero success",
 		zeroExitProviderFailure.exitCode !== 0 && zeroExitProviderFailure.errorMessage?.includes("Monthly usage limit") === true,
 		`exit=${zeroExitProviderFailure.exitCode} error=${zeroExitProviderFailure.errorMessage}`);
+	for (const mode of ["recovered", "error", "abort", "limit"]) {
+		const result = await runAgent({
+			cwd: root, agent, task: `assistant retry ${mode}`, sessionId: "test-session", telemetry,
+			prefixLayout: false, maxRetries: 0, ...(mode === "limit" ? { maxTurns: 1 } : {}),
+			invocationOverride: { command: process.execPath, args: [join(process.cwd(), "tests/helpers/assistant-retry-subagent.cjs"), mode] },
+		});
+		const correct = mode === "recovered" ? result.exitCode === 0 && !result.errorMessage && result.output === "RECOVERED" && result.usage.turns === 3 && result.usage.cost === 0.003
+			: mode === "limit" ? result.exitCode === 74 && result.errorMessage?.includes("turn limit reached") === true
+			: result.exitCode !== 0 && result.errorMessage?.includes(mode === "error" ? "assistant ended with error" : "assistant aborted") === true;
+		check(`assistant retry ${mode}: latest assistant outcome never clears a Host limit`, correct, `exit=${result.exitCode} error=${result.errorMessage} cost=${result.usage.cost}`);
+	}
 	const fallbackModels = {
 		primary: { provider: "provider-a", capability: { coding: 0.9, reasoning: 0.9, speed: 0.8 } },
 		sameChannel: { provider: "provider-a", capability: { coding: 0.85, reasoning: 0.85, speed: 0.8 } },
@@ -79,6 +90,10 @@ try {
 	check("expired lock held by a live process is not stealable",
 		board.acquireFileLock("other-run-2", target) === false, "live owner blocks steal");
 	lockObj.ownerId = "other-run:99999999-dead-uuid";
+	writeFileSync(lockPath, JSON.stringify(lockObj));
+	check("mismatched birth and owner PID cannot authorize stealing",
+		board.acquireFileLock("other-run-3", target) === false, "inconsistent ownership is unknown");
+	delete lockObj.ownerIdentity; // This positive case intentionally represents a legacy dead owner.
 	writeFileSync(lockPath, JSON.stringify(lockObj));
 	check("expired lock held by a dead process is stealable",
 		board.acquireFileLock("other-run-3", target) === true, "dead owner allows steal");

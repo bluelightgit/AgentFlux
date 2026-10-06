@@ -2,7 +2,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_pr
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * P0-07 production-dist long-run evidence：真实 Agent 在没有显式 deadline 时，
@@ -11,7 +11,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-long-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-long-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 const ACTIVE = new Set(["starting", "running", "stop_requested"]);
 
 interface PiResult {
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
 		mkdirSync(join(sourceRoot, ".agentflux", "test-results"), { recursive: true });
 		mkdirSync(join(fixtureRoot, ".agentflux"), { recursive: true });
 		if (!useBuiltExtension) throw new Error("P0-07 long-run live test requires AGENTFLUX_LIVE_BUILT=1");
-		if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "subagent-entry.js"))) {
+		if (!existsSync(join(sourceRoot, "dist", "extension", "entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "subagent-entry.js")) || !existsSync(join(sourceRoot, "dist", "extension", "background-preload.mjs"))) {
 			throw new Error("production dist entries are missing; run npm run build first");
 		}
 		cpSync(join(sourceRoot, "dist", "extension"), join(fixtureRoot, "dist", "extension"), { recursive: true });
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
 			"调用 bash，参数必须是 command=node -e \"setTimeout(() => process.exit(0), 605000)\" 且 timeout=610；等待这个命令完整结束，在命令结束前不要回复；命令结束后只回复 LONG_NO_DEADLINE_DONE。",
 			"run 返回后只输出 LONG_MAIN_DONE。",
 		].join("\n");
-		pi = launch(join(fixtureRoot, "dist", "extension", "entry.js"), config, prompt);
+		pi = launch(join(fixtureRoot, "dist", "extension", "host-entry.ts"), config, prompt);
 		let closed = false;
 		pi.child.once("close", () => { closed = true; });
 		let lastSignature = "";
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
 			model: config.workerModel,
 			thinking: config.thinking,
 			builtExtension: useBuiltExtension,
-			extensionEntry: join(fixtureRoot, "dist", "extension", "entry.js"),
+			extensionEntry: join(fixtureRoot, "dist", "extension", "host-entry.ts"),
 			subagentEntry: join(fixtureRoot, "dist", "extension", "subagent-entry.js"),
 			main: { pid: result.pid, exitCode: result.exitCode, timedOut: result.timedOut },
 			wallClockMs: Date.now() - startedAt,

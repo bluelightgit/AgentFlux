@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadLiveConfig } from "./live-config";
+import { getPiCliPath, loadLiveConfig } from "./live-config";
 
 /**
  * 生产 dist provider-overload 验证：本地 OpenAI-compatible SSE provider 先返回
@@ -12,7 +12,7 @@ import { loadLiveConfig } from "./live-config";
 const sourceRoot = resolve(import.meta.dirname, "../..");
 const fixtureRoot = join(sourceRoot, ".agentflux", "test-workspaces", `p0-07-provider-overload-${process.pid}`);
 const reportPath = join(sourceRoot, ".agentflux", "test-results", "p0-07-provider-overload-latest.json");
-const piCli = join(sourceRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
+const piCli = getPiCliPath();
 
 interface RequestRecord {
 	sequence: number;
@@ -231,8 +231,8 @@ async function main(): Promise<void> {
 		writeFileSync(join(fixtureRoot, ".agentflux", "models.json"), JSON.stringify(config.fluxModelsJson(), null, 2));
 		const extensionDir = join(fixtureRoot, "dist", "extension");
 		mkdirSync(extensionDir, { recursive: true });
-		for (const file of ["entry.js", "subagent-entry.js"]) writeFileSync(join(extensionDir, file), readFileSync(join(sourceRoot, "dist", "extension", file)));
-		const result = await runMain(config, join(extensionDir, "entry.js"));
+		for (const file of ["entry.js", "host-entry.ts", "subagent-entry.js", "background-preload.mjs"]) writeFileSync(join(extensionDir, file), readFileSync(join(sourceRoot, "dist", "extension", file)));
+		const result = await runMain(config, join(extensionDir, "host-entry.ts"));
 		const tasks = readJson(join(fixtureRoot, ".agentflux", "runtime", "tasks.json"))?.tasks ?? [];
 		const runs = readJson(join(fixtureRoot, ".agentflux", "runtime", "runs.json"))?.runs ?? [];
 		const dagDirs = existsSync(join(fixtureRoot, ".agentflux", "runtime", "runs")) ? ["runs"] : [];

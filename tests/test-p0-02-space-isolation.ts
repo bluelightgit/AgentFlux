@@ -42,7 +42,7 @@ async function emitFake(pi: FakePi, name: string, event: any, ctx: any): Promise
 	for (const hook of pi.hooks.get(name) ?? []) await hook(event, ctx);
 }
 
-function startContextProcess(root: string, context: "main" | "workflow" | "community", name: string, holdMs: number, mode: "normal" | "crash" = "normal"): ContextProcess {
+function startContextProcess(root: string, context: "main" | "workflow" | "community", name: string, holdMs: number, mode: "normal" | "crash" = "normal", releasePath = ""): ContextProcess {
 	return spawn(process.execPath, [
 		resolve("node_modules/tsx/dist/cli.mjs"),
 		resolve("tests/helpers/active-context-process.ts"),
@@ -51,7 +51,8 @@ function startContextProcess(root: string, context: "main" | "workflow" | "commu
 		name,
 		String(holdMs),
 		mode,
-	], { stdio: ["ignore", "pipe", "pipe"] });
+		releasePath,
+	], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 }
 
 function writeLifecycleSubagent(root: string, name: string): string {
@@ -63,13 +64,22 @@ process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolName: "r
 if (exitCode === 0) {
   setTimeout(() => process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", model: "space-test-model", provider: "space-test-provider", usage: { input: 5, output: 2, cacheRead: 1, cacheWrite: 0, totalTokens: 8, cost: { total: 0.001 } }, content: [{ type: "text", text: "space lifecycle complete" }] } }) + "\\n"), 20);
 }
-setTimeout(() => process.exit(exitCode), delayMs);
+const releasePath = process.argv[4];
+if (releasePath) {
+  const deadline = Date.now() + delayMs;
+  const poll = setInterval(() => {
+    const released = require('node:fs').existsSync(releasePath);
+    if (!released && Date.now() < deadline) return;
+    clearInterval(poll);
+    process.exit(released ? exitCode : 1);
+  }, 20);
+} else setTimeout(() => process.exit(exitCode), delayMs);
 `);
 	return path;
 }
 
-function lifecycleInvocation(root: string, name: string, delayMs: number, exitCode = 0): { command: string; args: string[] } {
-	return { command: process.execPath, args: [writeLifecycleSubagent(root, name), String(delayMs), String(exitCode)] };
+function lifecycleInvocation(root: string, name: string, delayMs: number, exitCode = 0, releasePath = ""): { command: string; args: string[] } {
+	return { command: process.execPath, args: [writeLifecycleSubagent(root, name), String(delayMs), String(exitCode), releasePath] };
 }
 
 async function readProcessResult(child: ContextProcess): Promise<{ ok: boolean; error?: string }> {
@@ -91,7 +101,7 @@ async function readProcessResult(child: ContextProcess): Promise<{ ok: boolean; 
 }
 
 async function waitProcess(child: ContextProcess): Promise<number | null> {
-	if (child.exitCode !== null) return child.exitCode;
+	if (child.exitCode !== null || child.signalCode !== null) return child.exitCode;
 	return new Promise(resolveExit => child.once("exit", (code) => resolveExit(code)));
 }
 
@@ -153,6 +163,11 @@ async function runMainConflictTerminalCase(holderTask: string): Promise<{
 
 async function main(): Promise<void> {
 	const root = mkdtempSync(join(tmpdir(), "agentflux-p0-02-space-"));
+	const gatedChildren: ContextProcess[] = [];
+	const gatedRuns: Promise<unknown>[] = [];
+	const runReleasePaths = Object.fromEntries(["normal", "timeout", "cancel", "failure"].map(name => [name, join(root, `${name}-release`)]));
+	const releasePath = join(root, "context-release");
+	const crashReleasePath = join(root, "crash-sibling-release");
 	try {
 		for (const holderTask of [
 			"ordinary work",
@@ -160,7 +175,7 @@ async function main(): Promise<void> {
 			"review deadline requirements",
 		]) {
 			const result = await runMainConflictTerminalCase(holderTask);
-			check(result.errorMessage.includes("main 空间活跃")
+			check(result.errorMessage.includes("active main space")
 				&& result.taskStatus === "failed"
 				&& result.outcomeStatus === "failure"
 				&& result.deadlineAt == null
@@ -228,7 +243,7 @@ async function main(): Promise<void> {
 			space: "main",
 		});
 		const shortInvocation = lifecycleInvocation(root, "space-short", 180);
-		const longInvocation = lifecycleInvocation(root, "space-long", 1400);
+		const longInvocation = lifecycleInvocation(root, "space-long", 30_000, 0, runReleasePaths.normal);
 		const normalShort = createAgent(root, { name: "space-main-short", role: "assistant", modelsConfig });
 		const normalLong = createAgent(root, { name: "space-main-long", role: "assistant", modelsConfig });
 		const normalShortRun = runAgentRecord(normalShort.name, "main space short", context("p0-02-normal-short", shortInvocation));
@@ -237,44 +252,53 @@ async function main(): Promise<void> {
 		try {
 			registerActiveContext(root, { name: "workflow-conflict", context: "workflow", scope: "workflow-conflict", task: "must be rejected" });
 		} catch (error: any) {
-			workflowRejected = String(error?.message ?? "").includes("main 空间活跃");
+			workflowRejected = String(error?.message ?? "").includes("active main space");
 		}
 		check(workflowRejected, "Main 派发活跃时跨空间 Workflow 被拒绝");
 		const normalLongRun = runAgentRecord(normalLong.name, "main space long", context("p0-02-normal-long", longInvocation));
+		gatedRuns.push(normalLongRun);
 		check(await waitFor(() => readActiveContext(root).entries.filter(entry => entry.context === "main").length === 2), "同一 Main 空间允许并行派发并保留两个 lease");
 		const normalShortResult = await normalShortRun;
 		const afterNormalShort = readActiveContext(root).entries;
 		check(normalShortResult.exitCode === 0 && afterNormalShort.length === 1 && afterNormalShort[0].scope === "p0-02-normal-long", "short Main 正常完成只释放自身 lease，long sibling 仍存活");
+		writeFileSync(runReleasePaths.normal, "release");
 		const normalLongResult = await normalLongRun;
 		check(normalLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "long Main 完成后清空剩余 space lease");
 
-		const processMain = startContextProcess(root, "main", "process-main", 2_000);
+		// Synchronize the overlap explicitly; OS identity queries are not the holder's task duration.
+		const processMain = startContextProcess(root, "main", "process-main", 30_000, "normal", releasePath);
+		gatedChildren.push(processMain);
 		const processMainResult = await readProcessResult(processMain);
 		check(processMainResult.ok === true, "独立进程可以原子注册 Main space lease");
 		const processConflict = startContextProcess(root, "workflow", "process-workflow-conflict", 100);
 		const processConflictResult = await readProcessResult(processConflict);
-		check(processConflictResult.ok === false && processConflictResult.error?.includes("main 空间活跃"), "独立进程跨空间注册被拒绝");
-		const processSameSpace = startContextProcess(root, "main", "process-main-parallel", 350);
+		check(processConflictResult.ok === false && processConflictResult.error?.includes("active main space"), "独立进程跨空间注册被拒绝");
+		const processSameSpace = startContextProcess(root, "main", "process-main-parallel", 30_000, "normal", releasePath);
+		gatedChildren.push(processSameSpace);
 		const processSameSpaceResult = await readProcessResult(processSameSpace);
 		check(processSameSpaceResult.ok === true && readActiveContext(root).entries.filter(entry => entry.context === "main").length === 2, "独立进程同空间注册允许并行");
+		writeFileSync(releasePath, "release");
 		await Promise.all([waitProcess(processMain), waitProcess(processConflict), waitProcess(processSameSpace)]);
 		check(readActiveContext(root).entries.length === 0, "独立进程正常退出后各自 lease 均被释放");
 
 		const timeoutLong = createAgent(root, { name: "space-timeout-long", role: "assistant", modelsConfig });
 		const timeoutShort = createAgent(root, { name: "space-timeout-short", role: "assistant", modelsConfig });
-		const timeoutLongRun = runAgentRecord(timeoutLong.name, "long sibling during deadline", context("p0-02-timeout-long", lifecycleInvocation(root, "space-timeout-long", 1600)));
+		const timeoutLongRun = runAgentRecord(timeoutLong.name, "long sibling during deadline", context("p0-02-timeout-long", lifecycleInvocation(root, "space-timeout-long", 30_000, 0, runReleasePaths.timeout)));
+		gatedRuns.push(timeoutLongRun);
 		check(await waitFor(() => readActiveContext(root).entries.some(entry => entry.scope === "p0-02-timeout-long")), "deadline 场景先存在 long sibling lease");
 		const timeoutShortRun = runAgentRecord(timeoutShort.name, "explicit deadline cleanup", { ...context("p0-02-timeout-short", lifecycleInvocation(root, "space-timeout-short", 1600)), timeoutMs: 100 });
 		check(await waitFor(() => readActiveContext(root).entries.filter(entry => entry.context === "main").length === 2), "deadline 场景同时存在两个 Main lease");
 		const timedResult = await timeoutShortRun;
 		const afterTimeout = readActiveContext(root).entries;
 		check(timedResult.exitCode === 124 && timedResult.timedOut === true && afterTimeout.length === 1 && afterTimeout[0].scope === "p0-02-timeout-long", "真实 deadline 超时带有可信 timedOut 运行事实且只释放自身 lease");
+		writeFileSync(runReleasePaths.timeout, "release");
 		const timeoutLongResult = await timeoutLongRun;
 		check(timeoutLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "deadline long sibling 完成后清空剩余 lease");
 
 		const cancelLong = createAgent(root, { name: "space-cancel-long", role: "assistant", modelsConfig });
 		const cancelShort = createAgent(root, { name: "space-cancel-short", role: "assistant", modelsConfig });
-		const cancelLongRun = runAgentRecord(cancelLong.name, "long sibling during cancel", context("p0-02-cancel-long", lifecycleInvocation(root, "space-cancel-long", 1600)));
+		const cancelLongRun = runAgentRecord(cancelLong.name, "long sibling during cancel", context("p0-02-cancel-long", lifecycleInvocation(root, "space-cancel-long", 30_000, 0, runReleasePaths.cancel)));
+		gatedRuns.push(cancelLongRun);
 		check(await waitFor(() => readActiveContext(root).entries.some(entry => entry.scope === "p0-02-cancel-long")), "取消场景先存在 long sibling lease");
 		const controller = new AbortController();
 		const cancelledPromise = runAgentRecord(cancelShort.name, "cancel cleanup", context("p0-02-cancel-short", lifecycleInvocation(root, "space-cancel-short", 1600)), controller.signal);
@@ -283,20 +307,24 @@ async function main(): Promise<void> {
 		const cancelledResult = await cancelledPromise;
 		const afterCancel = readActiveContext(root).entries;
 		check(cancelledResult.exitCode === 130 && afterCancel.length === 1 && afterCancel[0].scope === "p0-02-cancel-long", "取消只释放自身 lease，不误删 long sibling");
+		writeFileSync(runReleasePaths.cancel, "release");
 		const cancelLongResult = await cancelLongRun;
 		check(cancelLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "取消 long sibling 完成后清空剩余 lease");
 
 		const failureLong = createAgent(root, { name: "space-failure-long", role: "assistant", modelsConfig });
 		const failureShort = createAgent(root, { name: "space-failure-short", role: "assistant", modelsConfig });
-		const failureLongRun = runAgentRecord(failureLong.name, "long sibling during failure", context("p0-02-failure-long", lifecycleInvocation(root, "space-failure-long", 8000)));
+		const failureLongRun = runAgentRecord(failureLong.name, "long sibling during failure", context("p0-02-failure-long", lifecycleInvocation(root, "space-failure-long", 30_000, 0, runReleasePaths.failure)));
+		gatedRuns.push(failureLongRun);
 		check(await waitFor(() => readActiveContext(root).entries.some(entry => entry.scope === "p0-02-failure-long")), "failure 场景先存在 long sibling lease");
 		const failedResult = await runAgentRecord(failureShort.name, "failure cleanup", context("p0-02-failure-short", lifecycleInvocation(root, "space-failure-short", 1600, 1)));
 		const afterFailure = readActiveContext(root).entries;
 		check(failedResult.exitCode === 1 && afterFailure.length === 1 && afterFailure[0].scope === "p0-02-failure-long", "业务失败只释放自身 lease，不误删 long sibling");
+		writeFileSync(runReleasePaths.failure, "release");
 		const failureLongResult = await failureLongRun;
 		check(failureLongResult.exitCode === 0 && readActiveContext(root).entries.length === 0, "failure long sibling 完成后清空剩余 lease");
 
-		const crashSibling = startContextProcess(root, "main", "process-crash-sibling", 3_000);
+		const crashSibling = startContextProcess(root, "main", "process-crash-sibling", 30_000, "normal", crashReleasePath);
+		gatedChildren.push(crashSibling);
 		const crashSiblingResult = await readProcessResult(crashSibling);
 		check(crashSiblingResult.ok === true, "真实 crash 场景先注册 sibling lease");
 		const crashed = startContextProcess(root, "main", "process-crashed", 250, "crash");
@@ -308,11 +336,17 @@ async function main(): Promise<void> {
 		const replacement = registerActiveContext(root, { name: "process-crash-replacement", context: "main", scope: "process-crash-replacement", task: "replacement after crash" });
 		check(!!replacement.leaseId && readActiveContext(root).entries.some(entry => entry.leaseId === replacement.leaseId), "真实 crash 后同空间 replacement 可注册");
 		releaseActiveContext(root, replacement.leaseId);
+		writeFileSync(crashReleasePath, "release");
 		await waitProcess(crashSibling);
 		check(readActiveContext(root).entries.length === 0, "真实 crash sibling 正常退出后空间 lease 清空");
 
 		console.log(`\n${passed} P0-02 space isolation checks passed`);
 	} finally {
+		writeFileSync(releasePath, "release");
+		writeFileSync(crashReleasePath, "release");
+		for (const path of Object.values(runReleasePaths)) writeFileSync(path, "release");
+		await Promise.allSettled(gatedRuns);
+		await Promise.all(gatedChildren.map(waitProcess));
 		rmSync(root, { recursive: true, force: true });
 	}
 }

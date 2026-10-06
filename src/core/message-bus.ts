@@ -8,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { SharedBoard } from "./shared-board";
 import { assertSafeOpaqueId, assertSafePathSegment } from "./safe-path";
 import { writeJsonFileAtomic } from "./json-store";
-import { isProcessAlive, parseOwnerPid, stealStaleLock } from "./fs-lock";
+import { createProcessOwnerToken, isLockOwnerActive, stealStaleLock } from "./fs-lock";
 
 export type MessageChannel =
 	| { type: "direct"; id: string }
@@ -30,7 +30,10 @@ export interface MessageEnvelopeV2 {
 	createdAt: string;
 	expiresAt?: string;
 	dedupeKey?: string;
+	/** 目标物理 Run 的投递 fence；不是发送方 Run。 */
 	correlationId?: string;
+	/** 发送方物理 Run，用于配额及 handoff completion contract。 */
+	senderRunId?: string;
 	taskId?: string;
 	artifactId?: string;
 	/** Concrete process/run identity; `from` remains the routable agent identity. */
@@ -76,6 +79,7 @@ export interface SendMessageV2Input {
 	expiresAt?: string;
 	dedupeKey?: string;
 	correlationId?: string;
+	senderRunId?: string;
 	taskId?: string;
 	artifactId?: string;
 	senderInstanceId?: string;
@@ -172,6 +176,7 @@ export class MessageBus {
 				expiresAt: input.expiresAt,
 				dedupeKey: input.dedupeKey,
 				correlationId: input.correlationId,
+				senderRunId: input.senderRunId,
 				taskId: input.taskId,
 				artifactId: input.artifactId,
 				senderInstanceId: input.senderInstanceId,
@@ -426,6 +431,7 @@ export class MessageBus {
 		for (const recipient of recipients) this.validateAgentName(recipient, "recipient");
 		if (input.expiresAt && !Number.isFinite(Date.parse(input.expiresAt))) throw new Error("expiresAt must be an ISO timestamp");
 		if (input.dedupeKey && input.dedupeKey.length > 200) throw new Error("dedupeKey exceeds 200 characters");
+		if (input.senderRunId !== undefined) assertSafePathSegment(input.senderRunId, "senderRunId");
 		if (input.senderInstanceId && input.senderInstanceId.length > 160) throw new Error("senderInstanceId exceeds 160 characters");
 	}
 
@@ -470,9 +476,9 @@ export class MessageBus {
 
 	private withMutex<T>(operation: () => T, timeoutMs = 2_000): T {
 		const lockPath = join(this.root, ".mutex.lock");
+		const owner = createProcessOwnerToken();
 		const deadline = Date.now() + timeoutMs;
 		const waiter = new Int32Array(new SharedArrayBuffer(4));
-		const owner = `${process.pid}:${randomUUID()}`;
 		do {
 			let fd: number | null = null;
 			try {
@@ -494,8 +500,7 @@ export class MessageBus {
 						// 时间超时且持有者进程已消失才算过期；活进程的锁不可偷（长写保护）
 						let owner = "";
 						try { owner = readFileSync(lockPath, "utf-8"); } catch {}
-						const pid = parseOwnerPid(owner);
-						stale = pid !== undefined && !isProcessAlive(pid);
+						stale = !isLockOwnerActive(owner);
 					}
 				} catch {}
 				if (stale) {

@@ -50,7 +50,8 @@ export interface CacheStats {
 	cacheWrite: number;
 	costUsd: number;
 	contextTokens: number;
-	contextWindow: number;
+	contextWindow?: number;
+	costComplete?: boolean;
 	contextPercent: number | null;
 	cacheHitRate: number;
 }
@@ -97,7 +98,11 @@ export interface CommunicationRuntimeConfig {
 	redelivery_after_ms: number;
 }
 
+export type SubagentRuntime = "process" | "sdk";
+
 export interface FluxConfig {
+	/** 技术执行后端；省略兼容既有 process，新 Run 读取后冻结。 */
+	subagent_runtime?: SubagentRuntime;
 	cache: CacheConfig;
 	context: ContextConfig;
 	budget: BudgetConfig;
@@ -114,12 +119,15 @@ export interface FluxConfig {
 /** 质量门配置: judge 独立于节点模型, 避免节点模型慢导致 judge 超时。 */
 export interface QualityGateConfig {
 	model?: string;
+	provider?: string;
+	thinking?: ThinkingLevel;
 	/** null/omitted means the judge has no model-execution wall-clock deadline. */
 	timeout_ms?: number | null;
 }
 
 export const DEFAULT_CONFIG: FluxConfig = {
-	cache: { prefix_layout: "static_first", cache_breaker_actions: [], target_hit_rate: 0.85 },
+	subagent_runtime: "process",
+	cache: { prefix_layout: "none", cache_breaker_actions: [], target_hit_rate: 0.85 },
 	context: { compaction_threshold: 0.70 },
 	budget: { max_cost_per_task: 2, max_iterations: 5, max_turns_per_task: undefined, max_input_tokens_per_task: undefined, max_parallel_agents: 4, max_wall_clock_seconds: null },
 	retention: {

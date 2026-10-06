@@ -54,21 +54,29 @@ on:
         default: off
         type: string
       cases:
-        description: "要跑的用例（逗号分隔）：direct,team,workflow,community,history,workflow-reuse,workflow-modify"
+        description: "Cases: direct,agents,workflow,community,history,workflow-reuse,workflow-modify"
         required: false
-        default: direct
+        default: direct,agents,workflow,community
         type: string
+
+permissions:
+  contents: read
+
 jobs:
   live:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [process, sdk]
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "24"
           cache: npm
 
       - name: Install dependencies
@@ -89,23 +97,29 @@ jobs:
           AGENTFLUX_LIVE_API_KEY: ${{ inputs.api-key || secrets.AGENTFLUX_LIVE_API_KEY }}
           AGENTFLUX_LIVE_API: ${{ inputs.api-type || 'openai-completions' }}
           AGENTFLUX_LIVE_PROVIDER_ID: ${{ inputs.provider-id || 'agentflux-ci' }}
-          AGENTFLUX_LIVE_MODEL_PRO: ${{ inputs.model-pro || secrets.AGENTFLUX_LIVE_MODEL_PRO }}
-          AGENTFLUX_LIVE_MODEL_FLASH: ${{ inputs.model-flash || secrets.AGENTFLUX_LIVE_MODEL_FLASH }}
+          AGENTFLUX_LIVE_PROFILE: environment
+          AGENTFLUX_LIVE_BUILT: "1"
+          AGENTFLUX_LIVE_RUNTIME: ${{ matrix.runtime }}
+          AGENTFLUX_LIVE_MODEL: ${{ inputs.model-pro || secrets.AGENTFLUX_LIVE_MODEL_PRO }}
+          AGENTFLUX_LIVE_PLANNER_MODEL: ${{ inputs.model-pro || secrets.AGENTFLUX_LIVE_MODEL_PRO }}
+          AGENTFLUX_LIVE_WORKER_MODEL: ${{ inputs.model-flash || secrets.AGENTFLUX_LIVE_MODEL_FLASH }}
+          AGENTFLUX_LIVE_JUDGE_MODEL: ${{ inputs.model-pro || secrets.AGENTFLUX_LIVE_MODEL_PRO }}
           AGENTFLUX_LIVE_THINKING: ${{ inputs.thinking || secrets.AGENTFLUX_LIVE_THINKING || 'off' }}
+          LIVE_CASES: ${{ inputs.cases || 'direct,agents,workflow,community' }}
         run: |
           test -n "$AGENTFLUX_LIVE_BASE_URL" || { echo "缺少 base-url"; exit 1; }
           test -n "$AGENTFLUX_LIVE_API_KEY" || { echo "缺少 api-key"; exit 1; }
-          test -n "$AGENTFLUX_LIVE_MODEL_PRO" || { echo "缺少 model-pro"; exit 1; }
-          test -n "$AGENTFLUX_LIVE_MODEL_FLASH" || { echo "缺少 model-flash"; exit 1; }
-          echo "provider=$AGENTFLUX_LIVE_PROVIDER_ID api=$AGENTFLUX_LIVE_API url=$AGENTFLUX_LIVE_BASE_URL"
-          echo "modelPro=$AGENTFLUX_LIVE_MODEL_PRO modelFlash=$AGENTFLUX_LIVE_MODEL_FLASH thinking=$AGENTFLUX_LIVE_THINKING"
-          CASES="${{ inputs.cases || 'direct' }}"
+          test -n "$AGENTFLUX_LIVE_MODEL" || { echo "Missing model-pro"; exit 1; }
+          test -n "$AGENTFLUX_LIVE_WORKER_MODEL" || { echo "Missing model-flash"; exit 1; }
+          echo "provider=$AGENTFLUX_LIVE_PROVIDER_ID api=$AGENTFLUX_LIVE_API runtime=$AGENTFLUX_LIVE_RUNTIME"
+          echo "modelPro=$AGENTFLUX_LIVE_MODEL modelFlash=$AGENTFLUX_LIVE_WORKER_MODEL thinking=$AGENTFLUX_LIVE_THINKING"
+          CASES="$LIVE_CASES"
           echo "cases=$CASES"
           FAILED=0
           for case in $(echo "$CASES" | tr ',' ' '); do
             echo "=== case: $case ==="
             case "$case" in
-              direct|team|workflow|community)
+              direct|agents|workflow|community)
                 AGENTFLUX_LIVE_CASES="$case" npm run test:live || FAILED=1 ;;
               history)
                 npm run test:live:history || FAILED=1 ;;
@@ -123,6 +137,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: agentflux-live-report
+          name: agentflux-live-report-${{ matrix.runtime }}
           path: .agentflux/test-results/
           if-no-files-found: ignore

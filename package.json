@@ -1,7 +1,8 @@
 {
   "name": "agentflux",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
+  "engines": { "node": ">=22.19.0" },
   "description": "A multi-Agent workbench for pi: direct execution, optional DAG workflows and issue communities",
   "keywords": [
     "pi-package",
@@ -27,36 +28,48 @@
   },
   "pi": {
     "extensions": [
-      "./dist/extension/entry.js"
+      "./dist/extension/host-entry.ts"
     ]
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.84.1",
-    "@earendil-works/pi-coding-agent": "^0.84.1",
-    "@earendil-works/pi-tui": "^0.84.1",
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "esbuild": "^0.25.12",
     "tsx": "^4.22.4",
-    "typebox": "^1.3.7",
+    "typebox": "^1.3.27",
     "typescript": "^5.9.3"
   },
   "scripts": {
     "build": "node scripts/build.mjs && tsc -p tsconfig.declarations.json",
     "typecheck": "tsc -p tsconfig.json",
+    "check:package": "node scripts/verify-package.mjs",
     "test": "npm run test:unit",
-    "test:unit": "tsx tests/test-core-workstyles.ts && tsx tests/test-task-envelope.ts && tsx tests/test-task-registry.ts && tsx tests/test-workflow-registry.ts && tsx tests/test-community.ts && tsx tests/test-community-3b.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts && tsx tests/test-pricing.ts && tsx tests/test-cache-impact.ts && tsx tests/test-commands.ts && tsx tests/test-config.ts && tsx tests/test-live-config.ts && tsx tests/test-format-workflow-summary.ts && tsx tests/test-prefix-layout.ts && tsx tests/test-task-execution.ts && tsx tests/test-run-health.ts && tsx tests/test-active-context.ts && tsx tests/test-p0-02-space-isolation.ts && tsx tests/test-fs-lock.ts",
+    "test:unit": "tsx tests/test-subagent-runtime.ts && tsx tests/test-pi-runtime.ts && tsx tests/test-jsonl-stream.ts && tsx tests/test-usage-accounting.ts && tsx tests/test-model-catalog.ts && tsx tests/test-pi-host-migration.ts && tsx tests/test-pi-subentry-host.ts && tsx tests/test-subagent-entry-contract.ts && tsx tests/test-compaction-advisor.ts && tsx tests/test-process-identity.ts && tsx tests/test-process-identity-integration.ts && tsx tests/test-process-start-cleanup.ts && tsx tests/test-background-preload.ts && tsx tests/test-product-copy.ts && tsx tests/test-core-workstyles.ts && tsx tests/test-task-envelope.ts && tsx tests/test-task-registry.ts && tsx tests/test-workflow-registry.ts && tsx tests/test-community.ts && tsx tests/test-community-3b.ts && tsx tests/test-main-agent-routing.ts && tsx tests/test-agent-lifecycle-new.ts && tsx tests/test-tui-core.ts && tsx tests/test-lifecycle-gc-new.ts && tsx tests/test-capability-policy.ts && tsx tests/test-message-v2-cache-impact.ts && tsx tests/test-subagent-safety-lifecycle.ts && tsx tests/test-dag-contracts.ts && tsx tests/test-rpc-inbox-pump.ts && tsx tests/test-startup-inbox-ownership.ts && tsx tests/test-pricing.ts && tsx tests/test-cache-impact.ts && tsx tests/test-commands.ts && tsx tests/test-config.ts && tsx tests/test-live-config.ts && tsx tests/test-format-workflow-summary.ts && tsx tests/test-prefix-layout.ts && tsx tests/test-task-execution.ts && tsx tests/test-run-health.ts && tsx tests/test-active-context.ts && tsx tests/test-p0-02-space-isolation.ts && tsx tests/test-fs-lock.ts && tsx tests/test-review-regressions.ts && tsx tests/test-quality-gate-runner.ts && tsx tests/test-core-smoke-evidence.ts && tsx tests/test-task-history-evidence.ts && tsx tests/test-agent-native-fork.ts && tsx tests/test-agent-reference-fence.ts && tsx tests/test-agent-reference-boundaries.ts && tsx tests/test-message-redelivery-evidence.ts",
     "test:live": "tsx tests/live/test-core-smoke.ts",
     "test:live:history": "tsx tests/live/test-task-history.ts",
     "test:live:workflow-reuse": "tsx tests/live/test-workflow-reuse.ts",
     "test:live:workflow-modify": "tsx tests/live/test-workflow-modify.ts",
+    "test:live:workflow-requests": "tsx tests/live/test-workflow-requests.ts",
+    "test:live:workflow-resume": "tsx tests/live/test-workflow-resume.ts",
     "test:live:multirole": "tsx tests/live/test-multirole.ts",
+    "test:live:runtime-lifecycle": "tsx tests/live/test-runtime-lifecycle.ts",
+    "test:live:installed": "tsx tests/live/test-installed-plugin.ts",
     "test:live:run-telemetry": "tsx tests/live/test-run-telemetry.ts",
     "test:live:p0-07-controls": "tsx tests/live/test-p0-07-controls.ts",
+    "test:live:message-peers": "tsx tests/live/test-message-peers.ts",
+    "test:live:message-busy": "tsx tests/live/test-message-busy-followup.ts",
+    "test:live:gc-references": "tsx tests/live/test-gc-references.ts",
+    "test:live:message-redelivery": "tsx tests/live/test-message-redelivery.ts",
+    "test:live:native-fork": "tsx tests/live/test-agent-native-fork.ts",
     "test:live:p0-07-workflow-deadline": "tsx tests/live/test-p0-07-workflow-deadline.ts",
     "test:live:p0-07-fanout": "tsx tests/live/test-p0-07-fanout.ts",
     "test:live:p0-07-long": "tsx tests/live/test-p0-07-long-deadline.ts",

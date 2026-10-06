@@ -1,6 +1,6 @@
 # P0-02 项目空间互斥与实例 lease
 
-状态：空间行为、三项审计证据和终态分类返工均已通过 clean production fresh 重验，待独立复核后归档（当前状态见开发规划）
+最新状态：Main 失败 sibling 覆盖返工已在指定生产快照取得独立 PASS（2026-09-08 整合）。旧第四次验收仍保持原 rework，以下历史不改写；后续构建、账务与其他未完成验证见当前规划。
 
 ## 目标摘要
 
@@ -39,7 +39,7 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 - 报告在 workspace cleanup 前保存有界 Core 快照：11 个 Task/Execution、2 个 Agent、3 个 Run、3 个 Issue、1 个 Workflow，包含状态、usage/cost、Task/Execution/Run 父谱系和一致性检查；执行 usage 成本为非零，`costUsdTotal` 与观察值一致，所有 Task/Execution/Run 均终态且无 active Run。
 - 每个进程保存完整 stdout/stderr artifact、SHA-256、最终 assistant 文本和结构化 tool events；11/11 assistant 终态可解析且 marker 均为 trim 后精确相等，artifact、Core 快照和 cleanup 结果均通过独立一致性检查。workspace 已删除但 artifact 与报告仍保留可复核终态证据。
 
-实现阶段报告、独立验收失败报告和本次重验前的失败尝试均作为历史证据保留；其中一次 environment profile 的 deepseek/off 运行因 provider 月度额度返回 429。当前报告使用配置驱动的 local profile（`openai-codex/gpt-5.6-luna`、`thinking=max`），避免用环境失败替代本轮验证。
+实现阶段报告、独立验收失败报告和本次重验前的失败尝试均作为历史证据保留；其中一次 environment profile 的 deepseek/off 运行因 provider 月度额度返回 429。实现阶段报告使用配置驱动的 local profile（`openai-codex/gpt-5.6-luna`、`thinking=max`）；其通过声明不替代后续独立验收。
 
 ## 实现方重验结论
 
@@ -53,4 +53,20 @@ AGENTFLUX_LIVE_BUILT=1 D:/Nodejs/npm.cmd run test:live:p0-02-space-isolation
 
 第三次验收发现 `main-conflict` 明确因空间冲突被拒且无 deadline，却因 holder 任务文本中的 `setTimeout`/`deadline` 被写成 `timed_out/timeout`；fixture 原先只检查终态集合。当前返工已改为 typed `WorkflowDeadlineExceededError`、runner 的显式 `timedOut` 运行事实和逐场景 Task/Execution 终态契约，并加入自然 exit 124 的 failure 对照；确定性与本轮 clean production fresh 重验均已通过。
 
-此前独立审计、实现方 passing 报告和所有带时间戳失败报告均保留用于追溯。P0-03 Community fail-closed 工具契约、P0-06 Message V2 group 单一路径、Workflow/Community 更广真实流程、资源容量和 P1-07 并行写隔离仍按当前开发规划推进。
+## 第四次独立验收（2026-09-07）
+
+clean 候选 `35f4edb060970d5c2ef9105147ac61c962399556` 的定向测试、完整 verify、typecheck/build/diff 和独立 fresh production 均通过。空间场景耗时 571.291 秒，补充 Workflow/deadline 286.035 秒；environment profile 显式选择 Luna/max（judge 内部仍固定 off）。11 个精确 marker、artifact 哈希、进程/session/Task/Execution 关联、普通冲突 failure、真实 deadline timeout、最终空 context 和退出 PID 均已核对，前次终态分类及断言阻断关闭。
+
+结论仍为 **rework**：fixture 将原来 live Main siblings 期间的 `flux_agent` 无效模型失败换成 holders 全部结束后的缺失 Issue 错误，失败后 sibling 断言从至少两个改成零。现有 production pass 没有覆盖原 Main lease failure/finally 边界；未复现 Core sibling 误删，不能把覆盖缺失表述为运行缺陷。当前返工要求仅维护在开发规划。
+
+当前独立报告为 `.agentflux/test-results/p0-02-independent-fourth-audit-latest.json`；完整核对见 `p0-02-fourth-audit-report-check.json`，覆盖差异见 `p0-02-fourth-audit-coverage-diff.patch`。上一轮 provider usage limit、无退出回执的未完成尝试及原 workspace 均保留。成本通道仍存在历史不一致，观察合计不等于权威计费；两个 active Claim 也不等于 review/resolve 验收。
+
+此前独立审计、实现方 passing 报告和所有带时间戳失败报告均保留用于追溯。当时 P0-02 下游依赖未满足；最新返工结论如下。
+
+## Main failure sibling 返工独立接受（2026-09-08 整合）
+
+恢复真实 `flux_agent run` 无效模型失败：两个 holders 等 supervisor release 文件；在工具开始和失败后逐一核对原 leaseId/PID，并保留单独的 missing-Issue 场景。没有用等待 siblings 退出或其他工具错误替代该边界。
+
+独立 Luna/max reviewer 对 `function-closure/live-1788795202094-5680` 给出 PASS：重算 36/36 artifact SHA、核对 12/12 精确 marker/退出、12 Task/12 Execution/3 Agent/3 Run/3 Issue/1 Workflow 与零 active context，且 fixture/receipt/当时 dist 哈希一致。真实 invalid-model 父 Task/Execution 为 failed/failure；失败前后 PID 31268、32684 及其原 lease 均保留。
+
+独立原文、Run 及来源 hash 保存于 `.agentflux/test-results/function-closure/p002-current-independent-verdict.json`。该结果解除原 Main 失败覆盖缺口，不回写 `.agentflux/test-results/p0-02-independent-fourth-audit-latest.json`，也不外推到账单、全部孙进程或之后名称/计价构建。Community submit/review/resolve 的补充 smoke 证据独立保存，不把本空间夹具尚 executing 的 Claim 当作已 review/resolve。

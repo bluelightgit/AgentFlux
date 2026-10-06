@@ -11,8 +11,10 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { isProcessAlive as isAlive } from "./fs-lock";
+import { isProcessInstanceActive } from "./fs-lock";
+import { getProcessIdentity, type ProcessIdentity } from "./process-identity";
 import { readJsonStore, updateJsonStore } from "./json-store";
+import { isSdkRunOwner, isSdkRunOwnerActive, type SdkRunOwner } from "./runtime-owner";
 
 export type SpaceContext = "main" | "workflow" | "community";
 
@@ -26,6 +28,8 @@ export interface ActiveContextEntry {
 	scope?: string;
 	task: string;
 	pid: number;
+	processIdentity?: ProcessIdentity;
+	runtimeOwner?: SdkRunOwner;
 	startedAt: string;
 	updatedAt: string;
 }
@@ -43,9 +47,9 @@ export function activeContextPath(cwd: string): string {
 	return join(cwd, ".agentflux", "runtime", "active-context.json");
 }
 
-/** 条目是否仍视为活跃：pid 存活即活跃（长运行空间保留，崩溃条目立即失效）。 */
-function isActiveEntry(entry: ActiveContextEntry): boolean {
-	return isAlive(entry.pid);
+/** Only proven exit/reuse expires a lease; unknown and legacy live owners stay protected. */
+function isActiveEntry(entry: ActiveContextEntry, cwd: string): boolean {
+	return entry.runtimeOwner ? isSdkRunOwnerActive(cwd, entry.runtimeOwner) : isProcessInstanceActive(entry.pid, entry.processIdentity);
 }
 
 /**
@@ -60,14 +64,14 @@ function normalizeEntry(entry: ActiveContextEntry, index: number): ActiveContext
 	return { ...entry, leaseId };
 }
 
-function liveEntries(state: ActiveContextState): ActiveContextEntry[] {
-	return state.entries.map(normalizeEntry).filter(isActiveEntry);
+function liveEntries(state: ActiveContextState, cwd: string): ActiveContextEntry[] {
+	return state.entries.map(normalizeEntry).filter(entry => isActiveEntry(entry, cwd));
 }
 
 /** 读取当前活跃空间状态（stale 条目即时清理但不写回）。 */
 export function readActiveContext(cwd: string): ActiveContextState {
 	const state = readJsonStore(activeContextPath(cwd), createState, isState);
-	const entries = liveEntries(state);
+	const entries = liveEntries(state, cwd);
 	return {
 		context: entries.length > 0 ? state.context : null,
 		entries,
@@ -81,9 +85,10 @@ function contextLabel(entries: ActiveContextEntry[]): string {
 /** 注册一条活跃运行：存在非目标空间的活跃条目 → 拒绝（互斥）。 */
 export function registerActiveContext(
 	cwd: string,
-	entry: { name: string; context: SpaceContext; scope?: string; task: string; pid?: number },
+	entry: { name: string; context: SpaceContext; scope?: string; task: string; pid?: number; runtimeOwner?: SdkRunOwner },
 ): ActiveContextEntry {
 	if (!entry.name.trim()) throw new Error("active context entry requires name");
+	if (entry.runtimeOwner && !isSdkRunOwner(entry.runtimeOwner)) throw new Error("Invalid active context logical owner");
 	const record: ActiveContextEntry = {
 		leaseId: `lease-${randomUUID()}`,
 		name: entry.name,
@@ -91,18 +96,20 @@ export function registerActiveContext(
 		scope: entry.scope,
 		task: entry.task.slice(0, 200),
 		pid: entry.pid ?? process.pid,
+		processIdentity: getProcessIdentity(entry.pid ?? process.pid),
+		runtimeOwner: entry.runtimeOwner,
 		startedAt: new Date().toISOString(),
 		updatedAt: new Date().toISOString(),
 	};
-	// 注册前先清理崩溃残留（pid 已死条目），缩短 pid 复用误判窗口；prune 是纯 pid 判定，不影响长运行条目
+	// Drop only owners proven gone or replaced; do not infer death from a failed probe.
 	pruneStaleActiveContext(cwd);
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const live = liveEntries(state);
+		const live = liveEntries(state, cwd);
 		const conflict = live.find(agent => agent.context !== record.context);
 		if (conflict) {
 			throw new Error(
-				`项目已有 ${conflict.context} 空间活跃（${conflict.name} · ${conflict.task.slice(0, 60)}），` +
-					`不能同时启动 ${record.context} 空间运行；请先等待其结束或 /flux agent stop 停止`,
+				`The project already has an active ${conflict.context} space (${conflict.name} · ${conflict.task.slice(0, 60)}). ` +
+					`Cannot start a ${record.context} space concurrently; wait for completion or stop it with /flux agent stop`,
 			);
 		}
 		live.push(record);
@@ -121,7 +128,7 @@ export function registerActiveContext(
 export function releaseActiveContext(cwd: string, selector: string): boolean {
 	let removed = false;
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const live = liveEntries(state);
+		const live = liveEntries(state, cwd);
 		const exact = live.find(entry => entry.leaseId === selector);
 		const matches = exact
 			? [exact]
@@ -145,7 +152,7 @@ export function releaseActiveContext(cwd: string, selector: string): boolean {
 export function releaseActiveContexts(cwd: string, predicate: (entry: ActiveContextEntry) => boolean): number {
 	let removed = 0;
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
-		const live = liveEntries(state);
+		const live = liveEntries(state, cwd);
 		const kept = live.filter(entry => {
 			if (!predicate(entry)) return true;
 			removed++;
@@ -162,8 +169,8 @@ export function pruneStaleActiveContext(cwd: string): string[] {
 	const pruned: string[] = [];
 	updateJsonStore(activeContextPath(cwd), createState, isState, state => {
 		const normalized = state.entries.map(normalizeEntry);
-		const live = normalized.filter(entry => isActiveEntry(entry));
-		for (const entry of normalized) if (!isActiveEntry(entry)) pruned.push(entry.name);
+		const live = normalized.filter(entry => isActiveEntry(entry, cwd));
+		for (const entry of normalized) if (!isActiveEntry(entry, cwd)) pruned.push(entry.name);
 		state.entries = live;
 		state.context = live.length > 0 ? live[live.length - 1].context : null;
 	});
